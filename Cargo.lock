@@ -2486,6 +2486,42 @@ dependencies = [
 ]
 
 [[package]]
+name = "seidrum-entity-extractor"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "async-nats",
+ "chrono",
+ "clap",
+ "futures",
+ "reqwest 0.12.28",
+ "seidrum-common",
+ "serde",
+ "serde_json",
+ "tokio",
+ "tracing",
+ "tracing-subscriber",
+]
+
+[[package]]
+name = "seidrum-graph-context-loader"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "async-nats",
+ "chrono",
+ "clap",
+ "futures",
+ "reqwest 0.12.28",
+ "seidrum-common",
+ "serde",
+ "serde_json",
+ "tokio",
+ "tracing",
+ "tracing-subscriber",
+]
+
+[[package]]
 name = "seidrum-kernel"
 version = "0.1.0"
 dependencies = [

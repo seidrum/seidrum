@@ -4,6 +4,7 @@ use std::path::Path;
 use std::process;
 use tracing::{error, info, warn};
 
+use orchestrator::service::OrchestratorService;
 use registry::service::RegistryService;
 
 mod brain;
@@ -123,8 +124,20 @@ async fn run_serve() -> anyhow::Result<()> {
     let scheduler_handle = scheduler_service.spawn().await?;
     info!("scheduler service started");
 
-    // 6. Wait for all services. In the future, agent_orchestrator handles
-    //    will be added here as well.
+    // 6. Spawn the agent orchestrator.
+    let agents_dir = platform_config
+        .as_ref()
+        .map(|c| c.agents_dir.as_str())
+        .unwrap_or("agents/")
+        .to_string();
+
+    let orchestrator = OrchestratorService::new();
+    let orchestrator_handle = orchestrator
+        .spawn(nats_client.clone(), &agents_dir)
+        .await?;
+    info!("orchestrator service started");
+
+    // 7. Wait for all services.
     tokio::select! {
         _ = registry_handle => {
             warn!("registry service exited unexpectedly");
@@ -134,6 +147,9 @@ async fn run_serve() -> anyhow::Result<()> {
         }
         _ = scheduler_handle => {
             warn!("scheduler service exited unexpectedly");
+        }
+        _ = orchestrator_handle => {
+            warn!("orchestrator service exited unexpectedly");
         }
         _ = tokio::signal::ctrl_c() => {
             info!("received Ctrl-C, shutting down...");

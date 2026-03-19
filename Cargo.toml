@@ -7,5 +7,7 @@ members = [
     "crates/plugins/seidrum-response-formatter",
     "crates/plugins/seidrum-content-ingester",
     "crates/plugins/seidrum-telegram",
+    "crates/plugins/seidrum-entity-extractor",
+    "crates/plugins/seidrum-graph-context-loader",
 ]
 resolver = "2"
