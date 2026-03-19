@@ -49,6 +49,12 @@ tiktoken-rs = "0.6"
 # Base64 encoding (for ArangoDB auth)
 base64 = "0.22"
 
+# Futures utilities (StreamExt for NATS subscribers)
+futures = "0.3"
+
+# ULID generation
+ulid = "1"
+
 # Error handling
 anyhow = "1"
 thiserror = "2"

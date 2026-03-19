@@ -4,6 +4,8 @@ use std::path::Path;
 use std::process;
 use tracing::{error, info, warn};
 
+use registry::service::RegistryService;
+
 mod brain;
 mod orchestrator;
 mod registry;
@@ -40,6 +42,7 @@ async fn main() -> anyhow::Result<()> {
     match cli.command {
         Command::Serve => {
             info!("Starting seidrum-kernel daemon...");
+            run_serve().await?;
         }
         Command::Init => {
             info!("Initializing brain database and NATS streams...");
@@ -50,6 +53,78 @@ async fn main() -> anyhow::Result<()> {
             if !run_validate(&config) {
                 process::exit(1);
             }
+        }
+    }
+
+    Ok(())
+}
+
+/// Start the kernel daemon: connect to NATS, spawn registry service (and
+/// future brain / orchestrator services), then wait for shutdown.
+async fn run_serve() -> anyhow::Result<()> {
+    // 1. Resolve NATS URL from config or env.
+    let config_path = Path::new("config/platform.yaml");
+    let platform_config = load_platform_config(config_path).ok();
+
+    let nats_url = std::env::var("NATS_URL")
+        .ok()
+        .or_else(|| platform_config.as_ref().map(|c| c.nats_url.clone()))
+        .unwrap_or_else(|| "nats://localhost:4222".to_string());
+
+    if platform_config.is_none() {
+        warn!(
+            "Platform config not found at {}; using env vars / defaults",
+            config_path.display()
+        );
+    }
+
+    info!("NATS URL: {}", nats_url);
+
+    // 2. Connect to NATS.
+    let nats_client = async_nats::connect(&nats_url)
+        .await
+        .map_err(|e| anyhow::anyhow!("failed to connect to NATS at {}: {}", nats_url, e))?;
+    info!("connected to NATS");
+
+    // 3. Spawn the registry service.
+    let registry = RegistryService::new();
+    let registry_handle = registry.spawn(nats_client.clone()).await?;
+    info!("registry service started");
+
+    // 4. Build ArangoDB client and spawn the brain service.
+    let arango_url = std::env::var("ARANGO_URL")
+        .ok()
+        .or_else(|| platform_config.as_ref().map(|c| c.arango_url.clone()))
+        .unwrap_or_else(|| "http://localhost:8529".to_string());
+    let arango_database = std::env::var("ARANGO_DATABASE")
+        .ok()
+        .or_else(|| platform_config.as_ref().map(|c| c.arango_database.clone()))
+        .unwrap_or_else(|| "seidrum".to_string());
+    let arango_password = std::env::var("ARANGO_PASSWORD").unwrap_or_default();
+
+    let arango_client =
+        brain::client::ArangoClient::new(&arango_url, &arango_database, &arango_password)?;
+    info!("ArangoDB client created ({})", arango_url);
+
+    let brain_service = brain::service::BrainService::new(arango_client, nats_client.clone());
+    let brain_handle = tokio::spawn(async move {
+        if let Err(e) = brain_service.run().await {
+            error!(error = %e, "brain service exited with error");
+        }
+    });
+    info!("brain service started");
+
+    // 5. Wait for all services. In the future, agent_orchestrator handles
+    //    will be added here as well.
+    tokio::select! {
+        _ = registry_handle => {
+            warn!("registry service exited unexpectedly");
+        }
+        _ = brain_handle => {
+            warn!("brain service exited unexpectedly");
+        }
+        _ = tokio::signal::ctrl_c() => {
+            info!("received Ctrl-C, shutting down...");
         }
     }
 

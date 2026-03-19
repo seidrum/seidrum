@@ -295,6 +295,108 @@ impl ArangoClient {
         Ok(resp)
     }
 
+    // ------------------------------------------------------------------
+    // Document CRUD
+    // ------------------------------------------------------------------
+
+    /// Insert a document into a collection. Returns the created document metadata.
+    pub async fn insert_document(&self, collection: &str, doc: &Value) -> Result<Value> {
+        let url = self.db_url(&format!("/_api/document/{}", collection));
+        let resp = self.post(&url, doc).await?;
+
+        if resp.get("error").and_then(|v| v.as_bool()).unwrap_or(false) {
+            anyhow::bail!(
+                "Failed to insert document into '{}': {}",
+                collection,
+                resp.get("errorMessage")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("unknown error")
+            );
+        }
+        Ok(resp)
+    }
+
+    /// Upsert a document: if `_key` exists, update; otherwise insert.
+    /// Uses AQL UPSERT for atomic create-or-update.
+    pub async fn upsert_document(
+        &self,
+        collection: &str,
+        key: &str,
+        doc: &Value,
+    ) -> Result<(Value, bool)> {
+        let query = format!(
+            r#"UPSERT {{ _key: @key }}
+               INSERT MERGE(@doc, {{ _key: @key }})
+               UPDATE MERGE(OLD, @doc)
+               IN {}
+               RETURN {{ doc: NEW, is_new: IS_NULL(OLD) }}"#,
+            collection
+        );
+        let bind_vars = serde_json::json!({
+            "key": key,
+            "doc": doc,
+        });
+        let resp = self.execute_aql(&query, &bind_vars).await?;
+
+        let result = resp
+            .get("result")
+            .and_then(|v| v.as_array())
+            .and_then(|a| a.first())
+            .cloned()
+            .unwrap_or(serde_json::json!({}));
+
+        let is_new = result
+            .get("is_new")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(true);
+        let doc = result.get("doc").cloned().unwrap_or(serde_json::json!({}));
+
+        Ok((doc, is_new))
+    }
+
+    /// Insert an edge document into an edge collection.
+    pub async fn insert_edge(
+        &self,
+        collection: &str,
+        from: &str,
+        to: &str,
+        data: &Value,
+    ) -> Result<Value> {
+        let mut edge = data.clone();
+        if let Some(obj) = edge.as_object_mut() {
+            obj.insert("_from".to_string(), Value::String(from.to_string()));
+            obj.insert("_to".to_string(), Value::String(to.to_string()));
+        }
+        self.insert_document(collection, &edge).await
+    }
+
+    /// Get a single document by collection and key.
+    pub async fn get_document(&self, collection: &str, key: &str) -> Result<Option<Value>> {
+        let url = self.db_url(&format!("/_api/document/{}/{}", collection, key));
+        trace!("GET {}", url);
+        let resp = self
+            .http
+            .get(&url)
+            .header("Authorization", &self.auth_header)
+            .send()
+            .await
+            .with_context(|| format!("GET {} failed", url))?;
+
+        let status = resp.status();
+        if status.as_u16() == 404 {
+            return Ok(None);
+        }
+
+        let text = resp.text().await.context("failed to read response body")?;
+        let val: Value = serde_json::from_str(&text)
+            .with_context(|| format!("invalid JSON from ArangoDB: {}", &text))?;
+
+        if val.get("error").and_then(|v| v.as_bool()).unwrap_or(false) {
+            return Ok(None);
+        }
+        Ok(Some(val))
+    }
+
     /// Return the database name.
     pub fn database(&self) -> &str {
         &self.database

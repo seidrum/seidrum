@@ -2159,6 +2159,7 @@ dependencies = [
  "chrono",
  "clap",
  "config",
+ "futures",
  "garde",
  "reqwest",
  "seidrum-common",
@@ -2171,6 +2172,7 @@ dependencies = [
  "tokio-cron-scheduler",
  "tracing",
  "tracing-subscriber",
+ "ulid",
 ]
 
 [[package]]
