@@ -3,5 +3,6 @@ members = [
     "crates/seidrum-common",
     "crates/seidrum-kernel",
     "crates/plugins/seidrum-cli",
+    "crates/plugins/seidrum-llm-router",
 ]
 resolver = "2"

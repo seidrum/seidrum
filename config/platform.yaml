@@ -1,0 +1,7 @@
+# Seidrum platform configuration
+
+nats_url: nats://localhost:4222
+arango_url: http://localhost:8529
+arango_database: seidrum
+agents_dir: agents/
+log_level: info
