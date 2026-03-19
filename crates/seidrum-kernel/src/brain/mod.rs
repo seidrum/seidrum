@@ -1,1 +1,4 @@
-// ArangoDB client and query logic.
+//! ArangoDB client and brain initialization logic.
+
+pub mod client;
+pub mod init;

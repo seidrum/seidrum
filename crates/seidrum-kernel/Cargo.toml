@@ -46,6 +46,9 @@ tokio-cron-scheduler = "0.13"
 # Token counting
 tiktoken-rs = "0.6"
 
+# Base64 encoding (for ArangoDB auth)
+base64 = "0.22"
+
 # Error handling
 anyhow = "1"
 thiserror = "2"

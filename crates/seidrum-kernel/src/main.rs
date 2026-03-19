@@ -2,7 +2,7 @@ use clap::{Parser, Subcommand};
 use seidrum_common::config::{load_agent_config, load_platform_config, AgentConfigFile};
 use std::path::Path;
 use std::process;
-use tracing::{error, info};
+use tracing::{error, info, warn};
 
 mod brain;
 mod orchestrator;
@@ -43,6 +43,7 @@ async fn main() -> anyhow::Result<()> {
         }
         Command::Init => {
             info!("Initializing brain database and NATS streams...");
+            run_init().await?;
         }
         Command::Validate { config } => {
             info!("Validating configuration...");
@@ -51,6 +52,45 @@ async fn main() -> anyhow::Result<()> {
             }
         }
     }
+
+    Ok(())
+}
+
+/// Run brain initialization: connect to ArangoDB, create collections, graph,
+/// indexes, views, and seed the root scope.
+async fn run_init() -> anyhow::Result<()> {
+    // 1. Resolve ArangoDB connection parameters from config or env vars.
+    let config_path = Path::new("config/platform.yaml");
+    let platform_config = load_platform_config(config_path).ok();
+
+    let arango_url = std::env::var("ARANGO_URL")
+        .ok()
+        .or_else(|| platform_config.as_ref().map(|c| c.arango_url.clone()))
+        .unwrap_or_else(|| "http://localhost:8529".to_string());
+
+    let arango_database = std::env::var("ARANGO_DATABASE")
+        .ok()
+        .or_else(|| platform_config.as_ref().map(|c| c.arango_database.clone()))
+        .unwrap_or_else(|| "seidrum".to_string());
+
+    let arango_password = std::env::var("ARANGO_PASSWORD").unwrap_or_default();
+
+    if platform_config.is_none() {
+        warn!(
+            "Platform config not found at {}; using env vars / defaults",
+            config_path.display()
+        );
+    }
+
+    info!("ArangoDB URL: {}", arango_url);
+    info!("ArangoDB database: {}", arango_database);
+
+    // 2. Build the ArangoDB HTTP client.
+    let client =
+        brain::client::ArangoClient::new(&arango_url, &arango_database, &arango_password)?;
+
+    // 3. Run initialization.
+    brain::init::initialize_brain(&client).await?;
 
     Ok(())
 }

@@ -2155,6 +2155,7 @@ dependencies = [
  "anyhow",
  "arangors",
  "async-nats",
+ "base64 0.22.1",
  "chrono",
  "clap",
  "config",
@@ -2183,6 +2184,23 @@ dependencies = [
  "clap",
  "futures",
  "reqwest",
+ "seidrum-common",
+ "serde",
+ "serde_json",
+ "tokio",
+ "tracing",
+ "tracing-subscriber",
+]
+
+[[package]]
+name = "seidrum-response-formatter"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "async-nats",
+ "chrono",
+ "clap",
+ "futures",
  "seidrum-common",
  "serde",
  "serde_json",
