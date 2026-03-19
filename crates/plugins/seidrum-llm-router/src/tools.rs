@@ -2,7 +2,7 @@
 //!
 //! - Registers built-in tools (brain-query).
 //! - Queries the brain for dynamically available tools via vector search.
-//! - Builds tool schemas in Anthropic API format.
+//! - Builds tool schemas in Gemini API format.
 //! - Executes tool calls by dispatching to the appropriate handler.
 
 use std::collections::HashMap;
@@ -13,23 +13,23 @@ use serde::{Deserialize, Serialize};
 use tracing::{debug, error, info, warn};
 
 // ---------------------------------------------------------------------------
-// Anthropic tool format types
+// Gemini tool format types
 // ---------------------------------------------------------------------------
 
-/// Tool definition in the Anthropic API format.
+/// Tool definition in the Gemini API format.
 #[derive(Serialize, Deserialize, Debug, Clone)]
-pub struct AnthropicTool {
+pub struct GeminiTool {
     pub name: String,
     pub description: String,
-    pub input_schema: serde_json::Value,
+    pub parameters: serde_json::Value,
 }
 
-/// A tool_use content block returned by the Anthropic API.
+/// A functionCall extracted from a Gemini API response.
 #[derive(Serialize, Deserialize, Debug, Clone)]
-pub struct AnthropicToolUse {
+pub struct GeminiToolUse {
     pub id: String,
     pub name: String,
-    pub input: serde_json::Value,
+    pub args: serde_json::Value,
 }
 
 /// Result of executing a single tool call.
@@ -44,12 +44,12 @@ pub struct ToolResult {
 // Built-in tool definitions
 // ---------------------------------------------------------------------------
 
-/// Return the built-in brain-query tool schema in Anthropic format.
-pub fn brain_query_tool() -> AnthropicTool {
-    AnthropicTool {
+/// Return the built-in brain-query tool schema in Gemini format.
+pub fn brain_query_tool() -> GeminiTool {
+    GeminiTool {
         name: "brain-query".to_string(),
         description: "Query your knowledge graph. Use AQL syntax to search entities, facts, content, and relationships stored in the brain.".to_string(),
-        input_schema: serde_json::json!({
+        parameters: serde_json::json!({
             "type": "object",
             "properties": {
                 "description": {
@@ -67,7 +67,7 @@ pub fn brain_query_tool() -> AnthropicTool {
 }
 
 /// Return the list of pinned (always-included) tools.
-pub fn pinned_tools() -> Vec<AnthropicTool> {
+pub fn pinned_tools() -> Vec<GeminiTool> {
     vec![brain_query_tool()]
 }
 
@@ -78,13 +78,13 @@ pub fn pinned_tools() -> Vec<AnthropicTool> {
 /// Query the brain for tools relevant to the user's message.
 ///
 /// Sends a `brain.query.request` with `query_type: "vector_search"` over the
-/// `tools` collection. Returns any tool schemas found, converted to Anthropic
+/// `tools` collection. Returns any tool schemas found, converted to Gemini
 /// format.
 pub async fn query_dynamic_tools(
     nats: &async_nats::Client,
     message_text: &str,
     max_dynamic_tools: u32,
-) -> Vec<AnthropicTool> {
+) -> Vec<GeminiTool> {
     // We use a get_context query type since we don't have a pre-computed
     // embedding vector here. The kernel can handle text-based tool lookup.
     let query_request = serde_json::json!({
@@ -115,14 +115,14 @@ pub async fn query_dynamic_tools(
                         .results
                         .into_iter()
                         .filter_map(|t| {
-                            Some(AnthropicTool {
+                            Some(GeminiTool {
                                 name: t.get("name")?.as_str()?.to_string(),
                                 description: t
                                     .get("description")
                                     .and_then(|v| v.as_str())
                                     .unwrap_or("")
                                     .to_string(),
-                                input_schema: t
+                                parameters: t
                                     .get("parameters")
                                     .cloned()
                                     .unwrap_or(serde_json::json!({"type": "object"})),
@@ -167,7 +167,7 @@ pub async fn collect_tools(
     nats: &async_nats::Client,
     message_text: &str,
     max_dynamic_tools: u32,
-) -> Vec<AnthropicTool> {
+) -> Vec<GeminiTool> {
     let mut tools = pinned_tools();
     let pinned_names: Vec<String> = tools.iter().map(|t| t.name.clone()).collect();
 
@@ -191,7 +191,7 @@ pub async fn collect_tools(
 /// Currently supported:
 /// - `brain-query`: sends an AQL query to the kernel via NATS request/reply
 pub async fn execute_tool_call(
-    tool_use: &AnthropicToolUse,
+    tool_use: &GeminiToolUse,
     nats: &async_nats::Client,
 ) -> ToolResult {
     info!(tool = %tool_use.name, id = %tool_use.id, "Executing tool call");
@@ -211,16 +211,16 @@ pub async fn execute_tool_call(
 
 /// Execute the brain-query built-in tool.
 async fn execute_brain_query(
-    tool_use: &AnthropicToolUse,
+    tool_use: &GeminiToolUse,
     nats: &async_nats::Client,
 ) -> ToolResult {
     let aql = tool_use
-        .input
+        .args
         .get("aql")
         .and_then(|v| v.as_str())
         .unwrap_or("");
     let description = tool_use
-        .input
+        .args
         .get("description")
         .and_then(|v| v.as_str())
         .unwrap_or("");
@@ -321,8 +321,8 @@ mod tests {
         assert_eq!(tool.name, "brain-query");
         assert!(!tool.description.is_empty());
 
-        // input_schema must be a valid JSON object with properties
-        let schema = &tool.input_schema;
+        // parameters must be a valid JSON object with properties
+        let schema = &tool.parameters;
         assert_eq!(schema["type"], "object");
         assert!(schema["properties"]["aql"].is_object());
         assert!(schema["properties"]["description"].is_object());
@@ -341,26 +341,26 @@ mod tests {
     }
 
     #[test]
-    fn test_anthropic_tool_serialization() {
+    fn test_gemini_tool_serialization() {
         let tool = brain_query_tool();
         let json = serde_json::to_value(&tool).unwrap();
 
-        // Anthropic format requires name, description, input_schema
+        // Gemini format requires name, description, parameters
         assert!(json.get("name").is_some());
         assert!(json.get("description").is_some());
-        assert!(json.get("input_schema").is_some());
-        // Must NOT have "parameters" key (that's OpenAI format)
-        assert!(json.get("parameters").is_none());
+        assert!(json.get("parameters").is_some());
+        // Must NOT have "input_schema" key (that's Anthropic format)
+        assert!(json.get("input_schema").is_none());
     }
 
     #[test]
     fn test_tool_result_structure() {
         let result = ToolResult {
-            tool_use_id: "toolu_123".to_string(),
+            tool_use_id: "call_123".to_string(),
             content: "query returned 5 results".to_string(),
             is_error: false,
         };
-        assert_eq!(result.tool_use_id, "toolu_123");
+        assert_eq!(result.tool_use_id, "call_123");
         assert!(!result.is_error);
     }
 }

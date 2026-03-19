@@ -11,7 +11,7 @@ use serde::{Deserialize, Serialize};
 use tracing::{error, info, warn};
 
 use context_assembly::{assemble_context, ContextConfig};
-use tools::{AnthropicTool, AnthropicToolUse, ToolResult};
+use tools::{GeminiTool, GeminiToolUse, ToolResult};
 
 // ---------------------------------------------------------------------------
 // CLI args
@@ -24,12 +24,12 @@ struct Cli {
     #[arg(long, env = "NATS_URL", default_value = "nats://localhost:4222")]
     nats_url: String,
 
-    /// Anthropic API key
-    #[arg(long, env = "ANTHROPIC_API_KEY")]
-    anthropic_api_key: String,
+    /// Google API key (falls back to OpenClaw auth-profiles.json)
+    #[arg(long, env = "GOOGLE_API_KEY")]
+    google_api_key: Option<String>,
 
     /// Model to use
-    #[arg(long, env = "LLM_MODEL", default_value = "claude-sonnet-4-20250514")]
+    #[arg(long, env = "LLM_MODEL", default_value = "gemini-2.5-flash")]
     model: String,
 
     /// Max tokens for response
@@ -127,112 +127,172 @@ struct TokenUsage {
 }
 
 // ---------------------------------------------------------------------------
-// Anthropic API types (reqwest, no SDK)
+// Gemini API types (reqwest, no SDK)
 // ---------------------------------------------------------------------------
 
 #[derive(Serialize, Debug)]
-struct AnthropicRequest {
-    model: String,
-    max_tokens: u32,
+#[serde(rename_all = "camelCase")]
+struct GeminiRequest {
+    contents: Vec<GeminiContent>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    system: Option<String>,
-    messages: Vec<AnthropicMessage>,
+    system_instruction: Option<GeminiSystemInstruction>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    tools: Option<Vec<AnthropicTool>>,
+    generation_config: Option<GeminiGenerationConfig>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    tools: Option<Vec<GeminiToolDeclaration>>,
 }
 
-/// Anthropic messages can have either a plain string content or structured
-/// content blocks (needed for tool_result messages).
-#[derive(Serialize, Deserialize, Debug, Clone)]
-#[serde(untagged)]
-enum MessageContent {
-    Text(String),
-    Blocks(Vec<serde_json::Value>),
+#[derive(Serialize, Debug)]
+struct GeminiSystemInstruction {
+    parts: Vec<GeminiPart>,
 }
 
+#[derive(Serialize, Debug)]
+#[serde(rename_all = "camelCase")]
+struct GeminiGenerationConfig {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    temperature: Option<f32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    max_output_tokens: Option<u32>,
+}
+
+/// Gemini tool declaration wrapper.
+#[derive(Serialize, Debug, Clone)]
+#[serde(rename_all = "camelCase")]
+struct GeminiToolDeclaration {
+    function_declarations: Vec<GeminiFunctionDeclaration>,
+}
+
+/// A single function declaration in Gemini format.
+#[derive(Serialize, Debug, Clone)]
+struct GeminiFunctionDeclaration {
+    name: String,
+    description: String,
+    parameters: serde_json::Value,
+}
+
+/// Gemini message content (used for both request and response).
 #[derive(Serialize, Deserialize, Debug, Clone)]
-struct AnthropicMessage {
+struct GeminiContent {
     role: String,
-    content: MessageContent,
+    parts: Vec<GeminiPart>,
 }
 
-impl AnthropicMessage {
+/// A part in a Gemini message. Can be text, functionCall, or functionResponse.
+#[derive(Serialize, Deserialize, Debug, Clone)]
+#[serde(rename_all = "camelCase")]
+struct GeminiPart {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    text: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    function_call: Option<GeminiFunctionCall>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    function_response: Option<GeminiFunctionResponse>,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone)]
+struct GeminiFunctionCall {
+    name: String,
+    args: serde_json::Value,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone)]
+struct GeminiFunctionResponse {
+    name: String,
+    response: serde_json::Value,
+}
+
+impl GeminiContent {
     /// Create a simple text message.
     fn text(role: &str, content: &str) -> Self {
         Self {
             role: role.to_string(),
-            content: MessageContent::Text(content.to_string()),
+            parts: vec![GeminiPart {
+                text: Some(content.to_string()),
+                function_call: None,
+                function_response: None,
+            }],
         }
     }
 
-    /// Create a tool_result message (role=user with structured content blocks).
-    fn tool_results(results: &[ToolResult]) -> Self {
-        let blocks: Vec<serde_json::Value> = results
-            .iter()
-            .map(|r| {
-                let mut block = serde_json::json!({
-                    "type": "tool_result",
-                    "tool_use_id": r.tool_use_id,
-                    "content": r.content,
-                });
-                if r.is_error {
-                    block["is_error"] = serde_json::Value::Bool(true);
-                }
-                block
-            })
-            .collect();
-        Self {
-            role: "user".to_string(),
-            content: MessageContent::Blocks(blocks),
-        }
-    }
-
-    /// Extract plain text content if this is a text message.
+    /// Extract plain text content from the first text part.
     fn text_content(&self) -> Option<&str> {
-        match &self.content {
-            MessageContent::Text(s) => Some(s.as_str()),
-            MessageContent::Blocks(_) => None,
-        }
+        self.parts.iter().find_map(|p| p.text.as_deref())
     }
 }
 
-#[derive(Deserialize, Debug)]
-struct AnthropicResponse {
-    #[allow(dead_code)]
-    id: String,
-    content: Vec<AnthropicContent>,
-    model: String,
-    stop_reason: Option<String>,
-    usage: AnthropicUsage,
-}
+// Gemini API response types
 
-#[derive(Deserialize, Debug, Clone)]
-struct AnthropicContent {
-    #[serde(rename = "type")]
-    content_type: String,
-    text: Option<String>,
-    // Tool use fields
-    id: Option<String>,
-    name: Option<String>,
-    input: Option<serde_json::Value>,
+#[derive(Deserialize, Debug)]
+struct GeminiResponse {
+    #[serde(default)]
+    candidates: Vec<GeminiCandidate>,
+    #[serde(rename = "usageMetadata")]
+    usage_metadata: Option<GeminiUsageMetadata>,
+    #[serde(default)]
+    error: Option<GeminiErrorDetail>,
 }
 
 #[derive(Deserialize, Debug)]
-struct AnthropicUsage {
-    input_tokens: u32,
-    output_tokens: u32,
+#[serde(rename_all = "camelCase")]
+struct GeminiCandidate {
+    content: GeminiContent,
+    #[serde(default)]
+    finish_reason: Option<String>,
 }
 
 #[derive(Deserialize, Debug)]
-struct AnthropicErrorResponse {
-    error: AnthropicErrorDetail,
+#[serde(rename_all = "camelCase")]
+struct GeminiUsageMetadata {
+    #[serde(default)]
+    prompt_token_count: u32,
+    #[serde(default)]
+    candidates_token_count: u32,
+    #[serde(default)]
+    total_token_count: u32,
 }
 
 #[derive(Deserialize, Debug)]
-struct AnthropicErrorDetail {
+struct GeminiErrorDetail {
     message: String,
-    #[serde(rename = "type")]
-    error_type: String,
+    #[serde(default)]
+    code: Option<i32>,
+}
+
+// ---------------------------------------------------------------------------
+// API key resolution
+// ---------------------------------------------------------------------------
+
+/// Resolve the Google API key from env var or OpenClaw auth-profiles.json fallback.
+fn resolve_google_api_key(cli_key: &Option<String>) -> Result<String> {
+    // 1. CLI arg / env var
+    if let Some(key) = cli_key {
+        if !key.is_empty() {
+            info!("Using Google API key from GOOGLE_API_KEY env var");
+            return Ok(key.clone());
+        }
+    }
+
+    // 2. OpenClaw auth-profiles.json fallback
+    let auth_path = dirs::home_dir()
+        .map(|h| h.join(".openclaw/agents/main/agent/auth-profiles.json"))
+        .ok_or_else(|| anyhow::anyhow!("Could not determine home directory"))?;
+
+    let content = std::fs::read_to_string(&auth_path)
+        .map_err(|e| anyhow::anyhow!("Failed to read OpenClaw auth-profiles.json at {}: {}", auth_path.display(), e))?;
+
+    let profiles: serde_json::Value = serde_json::from_str(&content)
+        .map_err(|e| anyhow::anyhow!("Failed to parse OpenClaw auth-profiles.json: {}", e))?;
+
+    let key = profiles
+        .get("profiles")
+        .and_then(|p| p.get("google:default"))
+        .and_then(|v| v.get("key"))
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| anyhow::anyhow!("No google:default.key found in OpenClaw auth-profiles.json"))?;
+
+    info!("Using Google API key from OpenClaw auth-profiles.json");
+    Ok(key.to_string())
 }
 
 // ---------------------------------------------------------------------------
@@ -246,6 +306,9 @@ async fn main() -> Result<()> {
     let cli = Cli::parse();
 
     info!(nats_url = %cli.nats_url, model = %cli.model, "Starting seidrum-llm-router plugin...");
+
+    // Resolve API key
+    let api_key = resolve_google_api_key(&cli.google_api_key)?;
 
     // Connect to NATS
     let nats = async_nats::connect(&cli.nats_url).await?;
@@ -290,7 +353,6 @@ async fn main() -> Result<()> {
 
     // Merge both subscription streams into a single processing loop
     let nats_pub = nats.clone();
-    let api_key = cli.anthropic_api_key.clone();
     let model = cli.model.clone();
     let max_tokens = cli.max_tokens;
     let max_context_tokens = cli.max_context_tokens;
@@ -439,7 +501,7 @@ async fn handle_message(
             }
 
             let user_text = inbound.text.clone();
-            let msgs = vec![AnthropicMessage::text("user", &inbound.text)];
+            let msgs = vec![GeminiContent::text("user", &inbound.text)];
 
             (None, msgs, agent_id, user_text)
         };
@@ -449,7 +511,16 @@ async fn handle_message(
     let tools_option = if api_tools.is_empty() {
         None
     } else {
-        Some(api_tools)
+        // Convert GeminiTool list to Gemini tool declaration format
+        let function_declarations: Vec<GeminiFunctionDeclaration> = api_tools
+            .iter()
+            .map(|t| GeminiFunctionDeclaration {
+                name: t.name.clone(),
+                description: t.description.clone(),
+                parameters: t.parameters.clone(),
+            })
+            .collect();
+        Some(vec![GeminiToolDeclaration { function_declarations }])
     };
 
     // -----------------------------------------------------------------------
@@ -458,7 +529,7 @@ async fn handle_message(
     let mut messages = messages;
     let mut total_input_tokens: u32 = 0;
     let mut total_output_tokens: u32 = 0;
-    let mut final_model = String::new();
+    let mut final_model = model.to_string();
     let mut final_finish_reason = "unknown".to_string();
     let mut final_content: Option<String> = None;
     let mut final_tool_calls: Option<Vec<serde_json::Value>> = None;
@@ -467,18 +538,31 @@ async fn handle_message(
     for round in 0..=max_tool_rounds {
         info!(round, "LLM call round");
 
-        let api_request = AnthropicRequest {
-            model: model.to_string(),
-            max_tokens,
-            system: system_prompt.clone(),
-            messages: messages.clone(),
+        let system_instruction = system_prompt.as_ref().map(|s| GeminiSystemInstruction {
+            parts: vec![GeminiPart {
+                text: Some(s.clone()),
+                function_call: None,
+                function_response: None,
+            }],
+        });
+
+        let api_request = GeminiRequest {
+            contents: messages.clone(),
+            system_instruction,
+            generation_config: Some(GeminiGenerationConfig {
+                temperature: Some(0.7),
+                max_output_tokens: Some(max_tokens),
+            }),
             tools: tools_option.clone(),
         };
 
+        let url = format!(
+            "https://generativelanguage.googleapis.com/v1beta/models/{}:generateContent?key={}",
+            model, api_key
+        );
+
         let response = http
-            .post("https://api.anthropic.com/v1/messages")
-            .header("x-api-key", api_key)
-            .header("anthropic-version", "2023-06-01")
+            .post(&url)
             .header("content-type", "application/json")
             .json(&api_request)
             .send()
@@ -488,56 +572,68 @@ async fn handle_message(
         let body_bytes = response.bytes().await?;
 
         if !status.is_success() {
-            let err_msg = match serde_json::from_slice::<AnthropicErrorResponse>(&body_bytes) {
-                Ok(err) => format!("{}: {}", err.error.error_type, err.error.message),
+            let err_msg = match serde_json::from_slice::<GeminiResponse>(&body_bytes) {
+                Ok(resp) => {
+                    if let Some(err) = resp.error {
+                        format!("code {:?}: {}", err.code, err.message)
+                    } else {
+                        String::from_utf8_lossy(&body_bytes).to_string()
+                    }
+                }
                 Err(_) => String::from_utf8_lossy(&body_bytes).to_string(),
             };
-            anyhow::bail!("Anthropic API error ({}): {}", status, err_msg);
+            anyhow::bail!("Gemini API error ({}): {}", status, err_msg);
         }
 
-        let api_response: AnthropicResponse = serde_json::from_slice(&body_bytes)?;
-        total_input_tokens += api_response.usage.input_tokens;
-        total_output_tokens += api_response.usage.output_tokens;
-        final_model = api_response.model.clone();
-        final_finish_reason = api_response
-            .stop_reason
+        let api_response: GeminiResponse = serde_json::from_slice(&body_bytes)?;
+
+        if let Some(usage) = &api_response.usage_metadata {
+            total_input_tokens += usage.prompt_token_count;
+            total_output_tokens += usage.candidates_token_count;
+        }
+
+        let candidate = api_response.candidates.first()
+            .ok_or_else(|| anyhow::anyhow!("No candidates in Gemini response"))?;
+
+        final_finish_reason = candidate
+            .finish_reason
             .clone()
             .unwrap_or_else(|| "unknown".to_string());
 
         info!(
-            model = %api_response.model,
-            input_tokens = api_response.usage.input_tokens,
-            output_tokens = api_response.usage.output_tokens,
-            stop_reason = ?api_response.stop_reason,
+            model = %model,
+            input_tokens = total_input_tokens,
+            output_tokens = total_output_tokens,
+            finish_reason = %final_finish_reason,
             round,
-            "Anthropic API response received"
+            "Gemini API response received"
         );
 
-        // Extract text content
-        let content_text: String = api_response
+        // Extract text content from parts
+        let content_text: String = candidate
             .content
+            .parts
             .iter()
-            .filter(|c| c.content_type == "text")
-            .filter_map(|c| c.text.as_deref())
+            .filter_map(|p| p.text.as_deref())
             .collect::<Vec<_>>()
             .join("\n");
 
-        // Extract tool_use blocks
-        let tool_uses: Vec<AnthropicToolUse> = api_response
+        // Extract functionCall parts
+        let tool_uses: Vec<GeminiToolUse> = candidate
             .content
+            .parts
             .iter()
-            .filter(|c| c.content_type == "tool_use")
-            .filter_map(|c| {
-                Some(AnthropicToolUse {
-                    id: c.id.as_ref()?.clone(),
-                    name: c.name.as_ref()?.clone(),
-                    input: c.input.clone().unwrap_or(serde_json::Value::Object(Default::default())),
+            .filter_map(|p| {
+                p.function_call.as_ref().map(|fc| GeminiToolUse {
+                    id: format!("call_{}", generate_ulid()),
+                    name: fc.name.clone(),
+                    args: fc.args.clone(),
                 })
             })
             .collect();
 
         if tool_uses.is_empty() || round == max_tool_rounds {
-            // No tool calls or we've hit max rounds — we're done
+            // No tool calls or we've hit max rounds -- we're done
             if round == max_tool_rounds && !tool_uses.is_empty() {
                 warn!(
                     max_rounds = max_tool_rounds,
@@ -552,45 +648,30 @@ async fn handle_message(
             break;
         }
 
-        // There are tool calls — execute them and continue the loop
+        // There are tool calls -- execute them and continue the loop
         info!(
             tool_count = tool_uses.len(),
             round, "Executing tool calls"
         );
 
-        // Append the assistant's response (with tool_use blocks) to messages.
-        // Build the raw content blocks that the API returned so the next
-        // request sees them.
-        let assistant_content_blocks: Vec<serde_json::Value> = api_response
-            .content
-            .iter()
-            .map(|c| {
-                match c.content_type.as_str() {
-                    "text" => serde_json::json!({
-                        "type": "text",
-                        "text": c.text.as_deref().unwrap_or("")
-                    }),
-                    "tool_use" => serde_json::json!({
-                        "type": "tool_use",
-                        "id": c.id.as_deref().unwrap_or(""),
-                        "name": c.name.as_deref().unwrap_or(""),
-                        "input": c.input.clone().unwrap_or(serde_json::Value::Object(Default::default()))
-                    }),
-                    other => serde_json::json!({"type": other}),
-                }
-            })
-            .collect();
+        // Append the model's response (with functionCall parts) to messages
+        messages.push(candidate.content.clone());
 
-        messages.push(AnthropicMessage {
-            role: "assistant".to_string(),
-            content: MessageContent::Blocks(assistant_content_blocks),
-        });
-
-        // Execute all tool calls
-        let mut tool_results: Vec<ToolResult> = Vec::new();
+        // Execute all tool calls and build functionResponse parts
+        let mut response_parts: Vec<GeminiPart> = Vec::new();
         for tool_use in &tool_uses {
             let result = tools::execute_tool_call(tool_use, nats).await;
-            tool_results.push(result);
+            response_parts.push(GeminiPart {
+                text: None,
+                function_call: None,
+                function_response: Some(GeminiFunctionResponse {
+                    name: tool_use.name.clone(),
+                    response: serde_json::json!({
+                        "result": result.content,
+                        "is_error": result.is_error,
+                    }),
+                }),
+            });
         }
 
         // Record tool calls for the LlmResponse event
@@ -601,14 +682,17 @@ async fn handle_message(
                     serde_json::json!({
                         "id": tu.id,
                         "function_name": tu.name,
-                        "arguments": serde_json::to_string(&tu.input).unwrap_or_default()
+                        "arguments": serde_json::to_string(&tu.args).unwrap_or_default()
                     })
                 })
                 .collect(),
         );
 
-        // Append tool results as a user message
-        messages.push(AnthropicMessage::tool_results(&tool_results));
+        // Append tool results as a user message with functionResponse parts
+        messages.push(GeminiContent {
+            role: "user".to_string(),
+            parts: response_parts,
+        });
     }
 
     let duration_ms = start.elapsed().as_millis() as u64;
@@ -620,7 +704,7 @@ async fn handle_message(
         content: final_content,
         tool_calls: final_tool_calls,
         model_used: final_model,
-        provider: "anthropic".to_string(),
+        provider: "google".to_string(),
         tokens: TokenUsage {
             prompt_tokens: total_input_tokens,
             completion_tokens: total_output_tokens,

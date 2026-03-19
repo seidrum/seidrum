@@ -18,12 +18,12 @@ struct Args {
     #[arg(long, env = "NATS_URL", default_value = "nats://127.0.0.1:4222")]
     nats_url: String,
 
-    /// Anthropic API key
-    #[arg(long, env = "ANTHROPIC_API_KEY")]
-    anthropic_api_key: String,
+    /// Google API key (falls back to OpenClaw auth-profiles.json)
+    #[arg(long, env = "GOOGLE_API_KEY")]
+    google_api_key: Option<String>,
 
     /// Model to use for task detection
-    #[arg(long, env = "DETECTION_MODEL", default_value = "claude-haiku-4-5-20251001")]
+    #[arg(long, env = "DETECTION_MODEL", default_value = "gemini-2.5-flash")]
     detection_model: String,
 }
 
@@ -42,29 +42,72 @@ struct DetectedTask {
     due_date: Option<String>,
 }
 
-/// Anthropic Messages API request.
+/// Gemini API request.
 #[derive(Serialize, Debug)]
-struct AnthropicRequest {
-    model: String,
-    max_tokens: u32,
-    messages: Vec<AnthropicMessage>,
+#[serde(rename_all = "camelCase")]
+struct GeminiRequest {
+    contents: Vec<GeminiContent>,
+    generation_config: GeminiGenerationConfig,
 }
 
 #[derive(Serialize, Debug)]
-struct AnthropicMessage {
+struct GeminiContent {
     role: String,
-    content: String,
+    parts: Vec<GeminiPart>,
 }
 
-/// Anthropic Messages API response.
+#[derive(Serialize, Debug)]
+struct GeminiPart {
+    text: String,
+}
+
+#[derive(Serialize, Debug)]
+#[serde(rename_all = "camelCase")]
+struct GeminiGenerationConfig {
+    max_output_tokens: u32,
+}
+
+/// Gemini API response.
 #[derive(Deserialize, Debug)]
-struct AnthropicResponse {
-    content: Vec<AnthropicContent>,
+struct GeminiResponse {
+    #[serde(default)]
+    candidates: Vec<GeminiCandidate>,
 }
 
 #[derive(Deserialize, Debug)]
-struct AnthropicContent {
+struct GeminiCandidate {
+    content: GeminiCandidateContent,
+}
+
+#[derive(Deserialize, Debug)]
+struct GeminiCandidateContent {
+    parts: Vec<GeminiResponsePart>,
+}
+
+#[derive(Deserialize, Debug)]
+struct GeminiResponsePart {
     text: Option<String>,
+}
+
+/// Resolve Google API key from env var or OpenClaw auth-profiles.json.
+fn resolve_google_api_key(cli_key: &Option<String>) -> Result<String> {
+    if let Some(key) = cli_key {
+        if !key.is_empty() {
+            return Ok(key.clone());
+        }
+    }
+    let auth_path = dirs::home_dir()
+        .map(|h| h.join(".openclaw/agents/main/agent/auth-profiles.json"))
+        .ok_or_else(|| anyhow::anyhow!("Could not determine home directory"))?;
+    let content = std::fs::read_to_string(&auth_path)
+        .map_err(|e| anyhow::anyhow!("Failed to read OpenClaw auth-profiles.json: {}", e))?;
+    let profiles: serde_json::Value = serde_json::from_str(&content)?;
+    let key = profiles
+        .get("profiles").and_then(|p| p.get("google:default"))
+        .and_then(|v| v.get("key"))
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| anyhow::anyhow!("No google:default.key in OpenClaw auth-profiles.json"))?;
+    Ok(key.to_string())
 }
 
 #[tokio::main]
@@ -72,6 +115,8 @@ async fn main() -> Result<()> {
     tracing_subscriber::fmt::init();
 
     let args = Args::parse();
+
+    let api_key = resolve_google_api_key(&args.google_api_key)?;
 
     info!(
         plugin = PLUGIN_ID,
@@ -156,7 +201,7 @@ async fn main() -> Result<()> {
         if let Err(err) = detect_and_publish_tasks(
             &client,
             &http_client,
-            &args.anthropic_api_key,
+            &api_key,
             &args.detection_model,
             &content,
             &llm_response.agent_id,
@@ -276,42 +321,47 @@ Text to analyze:
 {llm_content}"#,
     );
 
-    let request_body = AnthropicRequest {
-        model: model.to_string(),
-        max_tokens: 4096,
-        messages: vec![AnthropicMessage {
+    let request_body = GeminiRequest {
+        contents: vec![GeminiContent {
             role: "user".to_string(),
-            content: prompt,
+            parts: vec![GeminiPart { text: prompt }],
         }],
+        generation_config: GeminiGenerationConfig {
+            max_output_tokens: 4096,
+        },
     };
 
+    let url = format!(
+        "https://generativelanguage.googleapis.com/v1beta/models/{}:generateContent?key={}",
+        model, api_key
+    );
+
     let response = http
-        .post("https://api.anthropic.com/v1/messages")
-        .header("x-api-key", api_key)
-        .header("anthropic-version", "2023-06-01")
+        .post(&url)
         .header("content-type", "application/json")
         .timeout(Duration::from_secs(60))
         .json(&request_body)
         .send()
         .await
-        .context("Anthropic API request failed")?;
+        .context("Gemini API request failed")?;
 
     if !response.status().is_success() {
         let status = response.status();
         let body = response.text().await.unwrap_or_default();
-        anyhow::bail!("Anthropic API returned {}: {}", status, body);
+        anyhow::bail!("Gemini API returned {}: {}", status, body);
     }
 
-    let api_response: AnthropicResponse = response
+    let api_response: GeminiResponse = response
         .json()
         .await
-        .context("Failed to parse Anthropic API response")?;
+        .context("Failed to parse Gemini API response")?;
 
     let text_content = api_response
-        .content
-        .iter()
-        .find_map(|c| c.text.as_ref())
-        .context("No text content in Anthropic response")?;
+        .candidates
+        .first()
+        .and_then(|c| c.content.parts.first())
+        .and_then(|p| p.text.as_ref())
+        .context("No text content in Gemini response")?;
 
     // Parse the JSON from the LLM response -- strip any markdown fencing if present
     let json_str = text_content

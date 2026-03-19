@@ -4,7 +4,7 @@
 //! 1. Renders the Tera prompt template with injected variables.
 //! 2. Counts tokens using tiktoken-rs (cl100k_base).
 //! 3. Applies the budget algorithm from LLM_INTEGRATION.md.
-//! 4. Assembles the final messages array for the Anthropic API call.
+//! 4. Assembles the final messages array for the Gemini API call.
 
 use anyhow::{Context, Result};
 use chrono::Utc;
@@ -12,7 +12,7 @@ use serde_json::Value;
 use tiktoken_rs::cl100k_base;
 use tracing::{debug, info, warn};
 
-use crate::{AgentContextLoaded, AnthropicMessage, ChannelInbound, MessageContent};
+use crate::{AgentContextLoaded, GeminiContent, ChannelInbound};
 
 // ---------------------------------------------------------------------------
 // Token counting
@@ -227,7 +227,7 @@ fn extract_user_name(context: &AgentContextLoaded) -> String {
 
 /// Configuration for context assembly.
 pub struct ContextConfig {
-    /// Maximum context window size in tokens (e.g. 100_000 for Claude).
+    /// Maximum context window size in tokens.
     pub max_context_tokens: usize,
     /// Max tokens reserved for the response.
     pub max_response_tokens: usize,
@@ -235,12 +235,12 @@ pub struct ContextConfig {
     pub prompt_template: String,
 }
 
-/// Assembled messages ready for the Anthropic API.
+/// Assembled messages ready for the Gemini API.
 pub struct AssembledContext {
     /// The rendered system prompt.
     pub system_prompt: String,
     /// The messages array (conversation history + user message).
-    pub messages: Vec<AnthropicMessage>,
+    pub messages: Vec<GeminiContent>,
     /// Total tokens estimated for the assembled context.
     pub estimated_tokens: usize,
 }
@@ -312,27 +312,25 @@ pub fn assemble_context(
     );
 
     // 6. Build messages array
-    // The system prompt already contains facts, tasks, history via Tera rendering.
-    // We also inject additional context as assistant-injected content if sections
-    // were provided but couldn't fit in the template.
-    let mut messages: Vec<AnthropicMessage> = Vec::new();
+    // Gemini uses "user" and "model" roles (not "assistant")
+    let mut messages: Vec<GeminiContent> = Vec::new();
 
     // Add RAG context as a system-injected user context message if non-empty
     if !rag_text.is_empty() && rag_text != format_similar_content(&[]) {
-        messages.push(AnthropicMessage::text(
+        messages.push(GeminiContent::text(
             "user",
             &format!(
                 "[System context - relevant knowledge]\n{}\n[End system context]",
                 rag_text
             ),
         ));
-        messages.push(AnthropicMessage::text(
-            "assistant",
+        messages.push(GeminiContent::text(
+            "model",
             "I've noted the relevant context. How can I help you?",
         ));
     }
 
-    // Add conversation history as alternating user/assistant messages
+    // Add conversation history as alternating user/model messages
     if !context.conversation_history.is_empty() {
         for msg in &context.conversation_history {
             let role = msg
@@ -349,14 +347,14 @@ pub fn assemble_context(
                 continue;
             }
 
-            // Normalize role to user/assistant
+            // Normalize role to user/model (Gemini format)
             let normalized_role = match role {
                 "user" | "human" => "user",
-                "assistant" | "bot" | "agent" => "assistant",
+                "assistant" | "bot" | "agent" | "model" => "model",
                 _ => "user",
             };
 
-            messages.push(AnthropicMessage::text(normalized_role, content));
+            messages.push(GeminiContent::text(normalized_role, content));
         }
     }
 
@@ -384,11 +382,9 @@ pub fn assemble_context(
     }
 
     // Add the current user message at the end
-    messages.push(AnthropicMessage::text("user", &user_text));
+    messages.push(GeminiContent::text("user", &user_text));
 
     // Re-render system prompt with budgeted sections
-    // (The Tera template already has placeholders, but the budget-truncated versions
-    // should be used. Re-render with truncated content.)
     let budgeted_system = render_budgeted_system_prompt(
         &config.prompt_template,
         context,
