@@ -128,6 +128,57 @@ services:
     depends_on: [nats]
     restart: unless-stopped
 
+  code-executor:
+    build:
+      context: .
+      dockerfile: crates/plugins/seidrum-code-executor/Dockerfile
+    environment:
+      NATS_URL: nats://nats:4222
+    depends_on: [nats]
+    restart: unless-stopped
+
+  notification:
+    build:
+      context: .
+      dockerfile: crates/plugins/seidrum-notification/Dockerfile
+    environment:
+      NATS_URL: nats://nats:4222
+      NOTIFICATION_CHANNEL: ${NOTIFICATION_CHANNEL:-telegram}
+      NOTIFICATION_LEVEL: ${NOTIFICATION_LEVEL:-all}
+    depends_on: [nats]
+    restart: unless-stopped
+
+  email:
+    build:
+      context: .
+      dockerfile: crates/plugins/seidrum-email/Dockerfile
+    environment:
+      NATS_URL: nats://nats:4222
+      IMAP_HOST: ${IMAP_HOST}
+      IMAP_PORT: ${IMAP_PORT:-993}
+      IMAP_USER: ${IMAP_USER}
+      IMAP_PASSWORD: ${IMAP_PASSWORD}
+      SMTP_HOST: ${SMTP_HOST}
+      SMTP_PORT: ${SMTP_PORT:-587}
+      SMTP_USER: ${SMTP_USER}
+      SMTP_PASSWORD: ${SMTP_PASSWORD}
+      SMTP_FROM: ${SMTP_FROM}
+      EMAIL_POLL_INTERVAL: ${EMAIL_POLL_INTERVAL:-60}
+    depends_on: [nats]
+    restart: unless-stopped
+
+  calendar:
+    build:
+      context: .
+      dockerfile: crates/plugins/seidrum-calendar/Dockerfile
+    environment:
+      NATS_URL: nats://nats:4222
+      GOOGLE_API_KEY: ${GOOGLE_API_KEY}
+      GOOGLE_CALENDAR_ID: ${GOOGLE_CALENDAR_ID:-primary}
+      CALENDAR_POLL_INTERVAL: ${CALENDAR_POLL_INTERVAL:-300}
+    depends_on: [nats]
+    restart: unless-stopped
+
 volumes:
   nats-data:
   arango-data:

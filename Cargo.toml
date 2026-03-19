@@ -13,5 +13,9 @@ members = [
     "crates/plugins/seidrum-task-detector",
     "crates/plugins/seidrum-scope-classifier",
     "crates/plugins/seidrum-event-emitter",
+    "crates/plugins/seidrum-code-executor",
+    "crates/plugins/seidrum-notification",
+    "crates/plugins/seidrum-email",
+    "crates/plugins/seidrum-calendar",
 ]
 resolver = "2"
