@@ -88,6 +88,7 @@ async fn run_serve() -> anyhow::Result<()> {
 
     // 3. Spawn the registry service.
     let registry = RegistryService::new();
+    let registry_for_scheduler = registry.clone();
     let registry_handle = registry.spawn(nats_client.clone()).await?;
     info!("registry service started");
 
@@ -114,7 +115,15 @@ async fn run_serve() -> anyhow::Result<()> {
     });
     info!("brain service started");
 
-    // 5. Wait for all services. In the future, agent_orchestrator handles
+    // 5. Spawn the scheduler service (decay + health monitoring).
+    let scheduler_arango =
+        brain::client::ArangoClient::new(&arango_url, &arango_database, &arango_password)?;
+    let scheduler_service =
+        scheduler::service::SchedulerService::new(scheduler_arango, nats_client.clone(), registry_for_scheduler);
+    let scheduler_handle = scheduler_service.spawn().await?;
+    info!("scheduler service started");
+
+    // 6. Wait for all services. In the future, agent_orchestrator handles
     //    will be added here as well.
     tokio::select! {
         _ = registry_handle => {
@@ -122,6 +131,9 @@ async fn run_serve() -> anyhow::Result<()> {
         }
         _ = brain_handle => {
             warn!("brain service exited unexpectedly");
+        }
+        _ = scheduler_handle => {
+            warn!("scheduler service exited unexpectedly");
         }
         _ = tokio::signal::ctrl_c() => {
             info!("received Ctrl-C, shutting down...");

@@ -5,5 +5,7 @@ members = [
     "crates/plugins/seidrum-cli",
     "crates/plugins/seidrum-llm-router",
     "crates/plugins/seidrum-response-formatter",
+    "crates/plugins/seidrum-content-ingester",
+    "crates/plugins/seidrum-telegram",
 ]
 resolver = "2"
