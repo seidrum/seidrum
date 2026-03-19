@@ -10,5 +10,8 @@ members = [
     "crates/plugins/seidrum-entity-extractor",
     "crates/plugins/seidrum-graph-context-loader",
     "crates/plugins/seidrum-fact-extractor",
+    "crates/plugins/seidrum-task-detector",
+    "crates/plugins/seidrum-scope-classifier",
+    "crates/plugins/seidrum-event-emitter",
 ]
 resolver = "2"

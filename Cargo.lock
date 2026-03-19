@@ -2668,6 +2668,23 @@ dependencies = [
 ]
 
 [[package]]
+name = "seidrum-event-emitter"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "async-nats",
+ "chrono",
+ "clap",
+ "futures",
+ "seidrum-common",
+ "serde",
+ "serde_json",
+ "tokio",
+ "tracing",
+ "tracing-subscriber",
+]
+
+[[package]]
 name = "seidrum-fact-extractor"
 version = "0.1.0"
 dependencies = [
@@ -2760,6 +2777,42 @@ dependencies = [
  "chrono",
  "clap",
  "futures",
+ "seidrum-common",
+ "serde",
+ "serde_json",
+ "tokio",
+ "tracing",
+ "tracing-subscriber",
+]
+
+[[package]]
+name = "seidrum-scope-classifier"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "async-nats",
+ "chrono",
+ "clap",
+ "futures",
+ "reqwest 0.12.28",
+ "seidrum-common",
+ "serde",
+ "serde_json",
+ "tokio",
+ "tracing",
+ "tracing-subscriber",
+]
+
+[[package]]
+name = "seidrum-task-detector"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "async-nats",
+ "chrono",
+ "clap",
+ "futures",
+ "reqwest 0.12.28",
  "seidrum-common",
  "serde",
  "serde_json",

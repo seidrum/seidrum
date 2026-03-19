@@ -1,4 +1,5 @@
 mod context_assembly;
+mod tools;
 
 use std::collections::HashMap;
 use std::time::Instant;
@@ -10,6 +11,7 @@ use serde::{Deserialize, Serialize};
 use tracing::{error, info, warn};
 
 use context_assembly::{assemble_context, ContextConfig};
+use tools::{AnthropicTool, AnthropicToolUse, ToolResult};
 
 // ---------------------------------------------------------------------------
 // CLI args
@@ -41,6 +43,14 @@ struct Cli {
     /// Maximum context window size in tokens
     #[arg(long, env = "LLM_MAX_CONTEXT_TOKENS", default_value = "100000")]
     max_context_tokens: usize,
+
+    /// Maximum number of tool call rounds before forcing a final response
+    #[arg(long, env = "LLM_MAX_TOOL_ROUNDS", default_value = "10")]
+    max_tool_rounds: u32,
+
+    /// Maximum number of dynamic tools loaded from brain (0 = pinned only)
+    #[arg(long, env = "LLM_MAX_DYNAMIC_TOOLS", default_value = "5")]
+    max_dynamic_tools: u32,
 }
 
 // ---------------------------------------------------------------------------
@@ -127,16 +137,68 @@ struct AnthropicRequest {
     #[serde(skip_serializing_if = "Option::is_none")]
     system: Option<String>,
     messages: Vec<AnthropicMessage>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    tools: Option<Vec<AnthropicTool>>,
+}
+
+/// Anthropic messages can have either a plain string content or structured
+/// content blocks (needed for tool_result messages).
+#[derive(Serialize, Deserialize, Debug, Clone)]
+#[serde(untagged)]
+enum MessageContent {
+    Text(String),
+    Blocks(Vec<serde_json::Value>),
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
 struct AnthropicMessage {
     role: String,
-    content: String,
+    content: MessageContent,
+}
+
+impl AnthropicMessage {
+    /// Create a simple text message.
+    fn text(role: &str, content: &str) -> Self {
+        Self {
+            role: role.to_string(),
+            content: MessageContent::Text(content.to_string()),
+        }
+    }
+
+    /// Create a tool_result message (role=user with structured content blocks).
+    fn tool_results(results: &[ToolResult]) -> Self {
+        let blocks: Vec<serde_json::Value> = results
+            .iter()
+            .map(|r| {
+                let mut block = serde_json::json!({
+                    "type": "tool_result",
+                    "tool_use_id": r.tool_use_id,
+                    "content": r.content,
+                });
+                if r.is_error {
+                    block["is_error"] = serde_json::Value::Bool(true);
+                }
+                block
+            })
+            .collect();
+        Self {
+            role: "user".to_string(),
+            content: MessageContent::Blocks(blocks),
+        }
+    }
+
+    /// Extract plain text content if this is a text message.
+    fn text_content(&self) -> Option<&str> {
+        match &self.content {
+            MessageContent::Text(s) => Some(s.as_str()),
+            MessageContent::Blocks(_) => None,
+        }
+    }
 }
 
 #[derive(Deserialize, Debug)]
 struct AnthropicResponse {
+    #[allow(dead_code)]
     id: String,
     content: Vec<AnthropicContent>,
     model: String,
@@ -144,11 +206,15 @@ struct AnthropicResponse {
     usage: AnthropicUsage,
 }
 
-#[derive(Deserialize, Debug)]
+#[derive(Deserialize, Debug, Clone)]
 struct AnthropicContent {
     #[serde(rename = "type")]
     content_type: String,
     text: Option<String>,
+    // Tool use fields
+    id: Option<String>,
+    name: Option<String>,
+    input: Option<serde_json::Value>,
 }
 
 #[derive(Deserialize, Debug)]
@@ -228,6 +294,8 @@ async fn main() -> Result<()> {
     let model = cli.model.clone();
     let max_tokens = cli.max_tokens;
     let max_context_tokens = cli.max_context_tokens;
+    let max_tool_rounds = cli.max_tool_rounds;
+    let max_dynamic_tools = cli.max_dynamic_tools;
 
     // We spawn two tasks: one per subscription. Both share the same processing logic.
     let http1 = http.clone();
@@ -249,6 +317,8 @@ async fn main() -> Result<()> {
                 &model1,
                 max_tokens,
                 max_context_tokens,
+                max_tool_rounds,
+                max_dynamic_tools,
                 &prompt_template1,
                 &nats1,
             )
@@ -270,6 +340,8 @@ async fn main() -> Result<()> {
                 &model,
                 max_tokens,
                 max_context_tokens,
+                max_tool_rounds,
+                max_dynamic_tools,
                 &prompt_template,
                 &nats_pub,
             )
@@ -309,6 +381,8 @@ async fn handle_message(
     model: &str,
     max_tokens: u32,
     max_context_tokens: usize,
+    max_tool_rounds: u32,
+    max_dynamic_tools: u32,
     prompt_template: &str,
     nats: &async_nats::Client,
 ) -> Result<()> {
@@ -321,127 +395,244 @@ async fn handle_message(
         .or_else(|| Some(envelope.id.clone()));
 
     // Branch based on event type
-    let (system_prompt, messages, agent_id) = if subject == "agent.context.loaded" {
-        // Full context assembly path
-        let ctx: AgentContextLoaded = serde_json::from_value(envelope.payload)?;
-        let agent_id = ctx
-            .original_event
-            .scope
-            .clone()
-            .unwrap_or_else(|| "default".to_string());
+    let (system_prompt, messages, agent_id, user_text_for_tools) =
+        if subject == "agent.context.loaded" {
+            // Full context assembly path
+            let ctx: AgentContextLoaded = serde_json::from_value(envelope.payload)?;
+            let agent_id = ctx
+                .original_event
+                .scope
+                .clone()
+                .unwrap_or_else(|| "default".to_string());
 
-        let config = ContextConfig {
-            max_context_tokens,
-            max_response_tokens: max_tokens as usize,
-            prompt_template: prompt_template.to_string(),
+            // Extract user text for tool relevance matching
+            let user_text = ctx
+                .original_event
+                .payload
+                .get("text")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_string();
+
+            let config = ContextConfig {
+                max_context_tokens,
+                max_response_tokens: max_tokens as usize,
+                prompt_template: prompt_template.to_string(),
+            };
+
+            let assembled = assemble_context(&config, &ctx)?;
+            info!(
+                estimated_tokens = assembled.estimated_tokens,
+                messages = assembled.messages.len(),
+                "Context assembled from agent.context.loaded"
+            );
+
+            (Some(assembled.system_prompt), assembled.messages, agent_id, user_text)
+        } else {
+            // Simple path for channel.*.inbound — just the user message
+            let inbound: ChannelInbound = serde_json::from_value(envelope.payload)?;
+            let agent_id = envelope.scope.unwrap_or_else(|| "default".to_string());
+
+            if inbound.text.is_empty() {
+                warn!(subject = %subject, "Empty user text, skipping");
+                return Ok(());
+            }
+
+            let user_text = inbound.text.clone();
+            let msgs = vec![AnthropicMessage::text("user", &inbound.text)];
+
+            (None, msgs, agent_id, user_text)
         };
 
-        let assembled = assemble_context(&config, &ctx)?;
-        info!(
-            estimated_tokens = assembled.estimated_tokens,
-            messages = assembled.messages.len(),
-            "Context assembled from agent.context.loaded"
-        );
-
-        (Some(assembled.system_prompt), assembled.messages, agent_id)
+    // Collect tools (pinned + dynamic from brain)
+    let api_tools = tools::collect_tools(nats, &user_text_for_tools, max_dynamic_tools).await;
+    let tools_option = if api_tools.is_empty() {
+        None
     } else {
-        // Simple path for channel.*.inbound — just the user message
-        let inbound: ChannelInbound = serde_json::from_value(envelope.payload)?;
-        let agent_id = envelope.scope.unwrap_or_else(|| "default".to_string());
-
-        if inbound.text.is_empty() {
-            warn!(subject = %subject, "Empty user text, skipping");
-            return Ok(());
-        }
-
-        let msgs = vec![AnthropicMessage {
-            role: "user".to_string(),
-            content: inbound.text,
-        }];
-
-        (None, msgs, agent_id)
+        Some(api_tools)
     };
 
-    let user_text_len: usize = messages.iter().map(|m| m.content.len()).sum();
-    info!(text_len = user_text_len, "Calling Anthropic API");
-
-    // Build Anthropic API request
-    let api_request = AnthropicRequest {
-        model: model.to_string(),
-        max_tokens,
-        system: system_prompt,
-        messages,
-    };
-
+    // -----------------------------------------------------------------------
+    // Tool call loop: call LLM, execute tools, repeat until content or max rounds
+    // -----------------------------------------------------------------------
+    let mut messages = messages;
+    let mut total_input_tokens: u32 = 0;
+    let mut total_output_tokens: u32 = 0;
+    let mut final_model = String::new();
+    let mut final_finish_reason = "unknown".to_string();
+    let mut final_content: Option<String> = None;
+    let mut final_tool_calls: Option<Vec<serde_json::Value>> = None;
     let start = Instant::now();
 
-    let response = http
-        .post("https://api.anthropic.com/v1/messages")
-        .header("x-api-key", api_key)
-        .header("anthropic-version", "2023-06-01")
-        .header("content-type", "application/json")
-        .json(&api_request)
-        .send()
-        .await?;
+    for round in 0..=max_tool_rounds {
+        info!(round, "LLM call round");
 
-    let duration_ms = start.elapsed().as_millis() as u64;
-    let status = response.status();
-    let body_bytes = response.bytes().await?;
-
-    if !status.is_success() {
-        // Try to parse error body for a better message
-        let err_msg = match serde_json::from_slice::<AnthropicErrorResponse>(&body_bytes) {
-            Ok(err) => format!("{}: {}", err.error.error_type, err.error.message),
-            Err(_) => String::from_utf8_lossy(&body_bytes).to_string(),
+        let api_request = AnthropicRequest {
+            model: model.to_string(),
+            max_tokens,
+            system: system_prompt.clone(),
+            messages: messages.clone(),
+            tools: tools_option.clone(),
         };
-        anyhow::bail!("Anthropic API error ({}): {}", status, err_msg);
+
+        let response = http
+            .post("https://api.anthropic.com/v1/messages")
+            .header("x-api-key", api_key)
+            .header("anthropic-version", "2023-06-01")
+            .header("content-type", "application/json")
+            .json(&api_request)
+            .send()
+            .await?;
+
+        let status = response.status();
+        let body_bytes = response.bytes().await?;
+
+        if !status.is_success() {
+            let err_msg = match serde_json::from_slice::<AnthropicErrorResponse>(&body_bytes) {
+                Ok(err) => format!("{}: {}", err.error.error_type, err.error.message),
+                Err(_) => String::from_utf8_lossy(&body_bytes).to_string(),
+            };
+            anyhow::bail!("Anthropic API error ({}): {}", status, err_msg);
+        }
+
+        let api_response: AnthropicResponse = serde_json::from_slice(&body_bytes)?;
+        total_input_tokens += api_response.usage.input_tokens;
+        total_output_tokens += api_response.usage.output_tokens;
+        final_model = api_response.model.clone();
+        final_finish_reason = api_response
+            .stop_reason
+            .clone()
+            .unwrap_or_else(|| "unknown".to_string());
+
+        info!(
+            model = %api_response.model,
+            input_tokens = api_response.usage.input_tokens,
+            output_tokens = api_response.usage.output_tokens,
+            stop_reason = ?api_response.stop_reason,
+            round,
+            "Anthropic API response received"
+        );
+
+        // Extract text content
+        let content_text: String = api_response
+            .content
+            .iter()
+            .filter(|c| c.content_type == "text")
+            .filter_map(|c| c.text.as_deref())
+            .collect::<Vec<_>>()
+            .join("\n");
+
+        // Extract tool_use blocks
+        let tool_uses: Vec<AnthropicToolUse> = api_response
+            .content
+            .iter()
+            .filter(|c| c.content_type == "tool_use")
+            .filter_map(|c| {
+                Some(AnthropicToolUse {
+                    id: c.id.as_ref()?.clone(),
+                    name: c.name.as_ref()?.clone(),
+                    input: c.input.clone().unwrap_or(serde_json::Value::Object(Default::default())),
+                })
+            })
+            .collect();
+
+        if tool_uses.is_empty() || round == max_tool_rounds {
+            // No tool calls or we've hit max rounds — we're done
+            if round == max_tool_rounds && !tool_uses.is_empty() {
+                warn!(
+                    max_rounds = max_tool_rounds,
+                    "Hit maximum tool call rounds, returning partial content"
+                );
+            }
+            final_content = if content_text.is_empty() {
+                None
+            } else {
+                Some(content_text)
+            };
+            break;
+        }
+
+        // There are tool calls — execute them and continue the loop
+        info!(
+            tool_count = tool_uses.len(),
+            round, "Executing tool calls"
+        );
+
+        // Append the assistant's response (with tool_use blocks) to messages.
+        // Build the raw content blocks that the API returned so the next
+        // request sees them.
+        let assistant_content_blocks: Vec<serde_json::Value> = api_response
+            .content
+            .iter()
+            .map(|c| {
+                match c.content_type.as_str() {
+                    "text" => serde_json::json!({
+                        "type": "text",
+                        "text": c.text.as_deref().unwrap_or("")
+                    }),
+                    "tool_use" => serde_json::json!({
+                        "type": "tool_use",
+                        "id": c.id.as_deref().unwrap_or(""),
+                        "name": c.name.as_deref().unwrap_or(""),
+                        "input": c.input.clone().unwrap_or(serde_json::Value::Object(Default::default()))
+                    }),
+                    other => serde_json::json!({"type": other}),
+                }
+            })
+            .collect();
+
+        messages.push(AnthropicMessage {
+            role: "assistant".to_string(),
+            content: MessageContent::Blocks(assistant_content_blocks),
+        });
+
+        // Execute all tool calls
+        let mut tool_results: Vec<ToolResult> = Vec::new();
+        for tool_use in &tool_uses {
+            let result = tools::execute_tool_call(tool_use, nats).await;
+            tool_results.push(result);
+        }
+
+        // Record tool calls for the LlmResponse event
+        final_tool_calls = Some(
+            tool_uses
+                .iter()
+                .map(|tu| {
+                    serde_json::json!({
+                        "id": tu.id,
+                        "function_name": tu.name,
+                        "arguments": serde_json::to_string(&tu.input).unwrap_or_default()
+                    })
+                })
+                .collect(),
+        );
+
+        // Append tool results as a user message
+        messages.push(AnthropicMessage::tool_results(&tool_results));
     }
 
-    let api_response: AnthropicResponse = serde_json::from_slice(&body_bytes)?;
-
-    // Extract text content from the response
-    let content_text: String = api_response
-        .content
-        .iter()
-        .filter(|c| c.content_type == "text")
-        .filter_map(|c| c.text.as_deref())
-        .collect::<Vec<_>>()
-        .join("\n");
-
-    info!(
-        model = %api_response.model,
-        input_tokens = api_response.usage.input_tokens,
-        output_tokens = api_response.usage.output_tokens,
-        duration_ms = duration_ms,
-        "Anthropic API response received"
-    );
+    let duration_ms = start.elapsed().as_millis() as u64;
+    let total_tokens = total_input_tokens + total_output_tokens;
 
     // Build llm.response event
-    let total_tokens = api_response.usage.input_tokens + api_response.usage.output_tokens;
     let llm_response = LlmResponse {
         agent_id,
-        content: if content_text.is_empty() {
-            None
-        } else {
-            Some(content_text)
-        },
-        tool_calls: None,
-        model_used: api_response.model,
+        content: final_content,
+        tool_calls: final_tool_calls,
+        model_used: final_model,
         provider: "anthropic".to_string(),
         tokens: TokenUsage {
-            prompt_tokens: api_response.usage.input_tokens,
-            completion_tokens: api_response.usage.output_tokens,
+            prompt_tokens: total_input_tokens,
+            completion_tokens: total_output_tokens,
             total_tokens,
             estimated_cost_usd: 0.0, // Cost tracking deferred to future iteration
         },
         duration_ms,
-        finish_reason: api_response
-            .stop_reason
-            .unwrap_or_else(|| "unknown".to_string()),
+        finish_reason: final_finish_reason,
     };
 
     // Wrap in EventEnvelope
-    let envelope = EventEnvelope {
+    let out_envelope = EventEnvelope {
         id: generate_ulid(),
         event_type: "llm.response".to_string(),
         timestamp: Utc::now(),
@@ -451,11 +642,11 @@ async fn handle_message(
         payload: serde_json::to_value(&llm_response)?,
     };
 
-    let envelope_bytes = serde_json::to_vec(&envelope)?;
+    let envelope_bytes = serde_json::to_vec(&out_envelope)?;
     nats.publish("llm.response", envelope_bytes.into())
         .await?;
 
-    info!(event_id = %envelope.id, "Published llm.response");
+    info!(event_id = %out_envelope.id, "Published llm.response");
 
     Ok(())
 }

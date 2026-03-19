@@ -12,7 +12,7 @@ use serde_json::Value;
 use tiktoken_rs::cl100k_base;
 use tracing::{debug, info, warn};
 
-use crate::{AgentContextLoaded, AnthropicMessage, ChannelInbound};
+use crate::{AgentContextLoaded, AnthropicMessage, ChannelInbound, MessageContent};
 
 // ---------------------------------------------------------------------------
 // Token counting
@@ -319,17 +319,17 @@ pub fn assemble_context(
 
     // Add RAG context as a system-injected user context message if non-empty
     if !rag_text.is_empty() && rag_text != format_similar_content(&[]) {
-        messages.push(AnthropicMessage {
-            role: "user".to_string(),
-            content: format!(
+        messages.push(AnthropicMessage::text(
+            "user",
+            &format!(
                 "[System context - relevant knowledge]\n{}\n[End system context]",
                 rag_text
             ),
-        });
-        messages.push(AnthropicMessage {
-            role: "assistant".to_string(),
-            content: "I've noted the relevant context. How can I help you?".to_string(),
-        });
+        ));
+        messages.push(AnthropicMessage::text(
+            "assistant",
+            "I've noted the relevant context. How can I help you?",
+        ));
     }
 
     // Add conversation history as alternating user/assistant messages
@@ -356,15 +356,15 @@ pub fn assemble_context(
                 _ => "user",
             };
 
-            messages.push(AnthropicMessage {
-                role: normalized_role.to_string(),
-                content: content.to_string(),
-            });
+            messages.push(AnthropicMessage::text(normalized_role, content));
         }
     }
 
     // Check history token usage and truncate from the front if needed
-    let history_tokens: usize = messages.iter().map(|m| count_tokens(&m.content) + 4).sum();
+    let history_tokens: usize = messages
+        .iter()
+        .map(|m| count_tokens(m.text_content().unwrap_or("")) + 4)
+        .sum();
     if history_tokens > history_budget + rag_budget {
         warn!(
             history_tokens,
@@ -372,7 +372,10 @@ pub fn assemble_context(
             "History exceeds budget, truncating from oldest"
         );
         while messages.len() > 2 {
-            let total: usize = messages.iter().map(|m| count_tokens(&m.content) + 4).sum();
+            let total: usize = messages
+                .iter()
+                .map(|m| count_tokens(m.text_content().unwrap_or("")) + 4)
+                .sum();
             if total <= history_budget + rag_budget {
                 break;
             }
@@ -381,10 +384,7 @@ pub fn assemble_context(
     }
 
     // Add the current user message at the end
-    messages.push(AnthropicMessage {
-        role: "user".to_string(),
-        content: user_text,
-    });
+    messages.push(AnthropicMessage::text("user", &user_text));
 
     // Re-render system prompt with budgeted sections
     // (The Tera template already has placeholders, but the budget-truncated versions
@@ -398,7 +398,10 @@ pub fn assemble_context(
     )?;
 
     let estimated_tokens = count_tokens(&budgeted_system)
-        + messages.iter().map(|m| count_tokens(&m.content) + 4).sum::<usize>();
+        + messages
+            .iter()
+            .map(|m| count_tokens(m.text_content().unwrap_or("")) + 4)
+            .sum::<usize>();
 
     info!(
         estimated_tokens,
@@ -588,7 +591,7 @@ mod tests {
         // Last message should be the user's current message
         let last = assembled.messages.last().unwrap();
         assert_eq!(last.role, "user");
-        assert_eq!(last.content, "What tasks do I have?");
+        assert_eq!(last.text_content().unwrap(), "What tasks do I have?");
         assert!(assembled.estimated_tokens > 0);
     }
 
