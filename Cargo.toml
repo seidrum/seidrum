@@ -9,5 +9,6 @@ members = [
     "crates/plugins/seidrum-telegram",
     "crates/plugins/seidrum-entity-extractor",
     "crates/plugins/seidrum-graph-context-loader",
+    "crates/plugins/seidrum-fact-extractor",
 ]
 resolver = "2"

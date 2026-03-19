@@ -18,17 +18,24 @@ use serde_json::Value;
 use tracing::{debug, error, info, warn};
 
 use super::client::ArangoClient;
+use crate::scope::service::ScopeService;
 
 /// Long-lived service that handles brain NATS subjects.
 pub struct BrainService {
     arango: ArangoClient,
     nats: async_nats::Client,
+    scope_service: ScopeService,
 }
 
 impl BrainService {
     /// Create a new brain service.
     pub fn new(arango: ArangoClient, nats: async_nats::Client) -> Self {
-        Self { arango, nats }
+        let scope_service = ScopeService::new(arango.clone());
+        Self {
+            arango,
+            nats,
+            scope_service,
+        }
     }
 
     /// Start listening on all brain subjects. This runs forever.
@@ -117,8 +124,9 @@ impl BrainService {
                 Some(msg) = query_request.next() => {
                     let arango = self.arango.clone();
                     let nats = self.nats.clone();
+                    let scope_svc = self.scope_service.clone();
                     tokio::spawn(async move {
-                        if let Err(e) = handle_query_request(&arango, &nats, msg).await {
+                        if let Err(e) = handle_query_request(&arango, &nats, &scope_svc, msg).await {
                             error!(error = %e, "brain.query.request handler failed");
                         }
                     });
@@ -727,20 +735,41 @@ async fn handle_task_upsert(
 async fn handle_query_request(
     arango: &ArangoClient,
     nats: &async_nats::Client,
+    scope_svc: &ScopeService,
     msg: async_nats::Message,
 ) -> Result<()> {
     let (envelope, req): (EventEnvelope, BrainQueryRequest) = parse_envelope(&msg)?;
     debug!(query_type = %req.query_type, "handling brain.query.request");
 
     let start = Instant::now();
-    let scopes_applied = envelope
-        .scope
+
+    // Resolve the accessible scopes from the envelope's scope field.
+    let resolved_scopes = if let Some(scope) = envelope.scope.as_deref() {
+        match scope_svc.resolve_scopes(scope, &[]).await {
+            Ok(resolved) => {
+                debug!(
+                    primary = scope,
+                    count = resolved.allowed.len(),
+                    "scope enforcement: resolved accessible scopes"
+                );
+                Some(resolved)
+            }
+            Err(e) => {
+                warn!(error = %e, "failed to resolve scopes, proceeding without enforcement");
+                None
+            }
+        }
+    } else {
+        None
+    };
+
+    let scopes_applied: Vec<String> = resolved_scopes
         .as_ref()
-        .map(|s| vec![s.clone()])
+        .map(|r| r.allowed.iter().cloned().collect())
         .unwrap_or_default();
 
     let result = match req.query_type.as_str() {
-        "aql" => handle_aql_query(arango, &req, &envelope).await,
+        "aql" => handle_aql_query(arango, &req, &envelope, resolved_scopes.as_ref()).await,
         "vector_search" => handle_vector_search(&req).await,
         "graph_traverse" => handle_graph_traverse(arango, &req, &envelope).await,
         "get_facts" => handle_get_facts(arango, &req, &envelope).await,
@@ -809,11 +838,12 @@ async fn handle_query_request(
 // Query type handlers
 // ---------------------------------------------------------------------------
 
-/// Execute a raw AQL query with bind vars.
+/// Execute a raw AQL query with bind vars, applying scope enforcement.
 async fn handle_aql_query(
     arango: &ArangoClient,
     req: &BrainQueryRequest,
     _envelope: &EventEnvelope,
+    resolved_scopes: Option<&crate::scope::service::ResolvedScopes>,
 ) -> Result<Value> {
     let aql = req
         .aql
@@ -828,11 +858,22 @@ async fn handle_aql_query(
         .context("failed to serialize bind_vars")?
         .unwrap_or(serde_json::json!({}));
 
-    // TODO: Inject scope filtering into AQL for scope enforcement.
-    // For now, pass through as-is.
+    // Inject scope filtering if scopes were resolved.
+    let (final_aql, final_vars) = if let Some(scopes) = resolved_scopes {
+        // Use a temporary ScopeService just for the filter injection (it is
+        // a pure function that does not hit the database).
+        let scope_svc = ScopeService::new(arango.clone());
+        let (wrapped, merged) =
+            scope_svc.inject_scope_filter(aql, &bind_vars, &scopes.allowed);
+        debug!("scope enforcement: AQL query wrapped with scope filter");
+        (wrapped, merged)
+    } else {
+        debug!("scope enforcement: no scope specified, query runs unfiltered");
+        (aql.to_string(), bind_vars)
+    };
 
     let resp = arango
-        .execute_aql(aql, &bind_vars)
+        .execute_aql(&final_aql, &final_vars)
         .await
         .context("AQL execution failed")?;
 

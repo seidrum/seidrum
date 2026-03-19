@@ -1,3 +1,5 @@
+mod context_assembly;
+
 use std::collections::HashMap;
 use std::time::Instant;
 
@@ -6,6 +8,8 @@ use chrono::Utc;
 use clap::Parser;
 use serde::{Deserialize, Serialize};
 use tracing::{error, info, warn};
+
+use context_assembly::{assemble_context, ContextConfig};
 
 // ---------------------------------------------------------------------------
 // CLI args
@@ -29,6 +33,14 @@ struct Cli {
     /// Max tokens for response
     #[arg(long, env = "LLM_MAX_TOKENS", default_value = "4096")]
     max_tokens: u32,
+
+    /// Path to the Tera prompt template file
+    #[arg(long, env = "LLM_PROMPT_PATH", default_value = "./prompts/assistant.md")]
+    prompt_path: String,
+
+    /// Maximum context window size in tokens
+    #[arg(long, env = "LLM_MAX_CONTEXT_TOKENS", default_value = "100000")]
+    max_context_tokens: usize,
 }
 
 // ---------------------------------------------------------------------------
@@ -112,6 +124,8 @@ struct TokenUsage {
 struct AnthropicRequest {
     model: String,
     max_tokens: u32,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    system: Option<String>,
     messages: Vec<AnthropicMessage>,
 }
 
@@ -193,6 +207,18 @@ async fn main() -> Result<()> {
     let sub_inbound = nats.subscribe("channel.*.inbound").await?;
     info!("Subscribed to agent.context.loaded and channel.*.inbound");
 
+    // Load prompt template from disk
+    let prompt_template = match std::fs::read_to_string(&cli.prompt_path) {
+        Ok(content) => {
+            info!(path = %cli.prompt_path, "Loaded prompt template");
+            content
+        }
+        Err(e) => {
+            warn!(path = %cli.prompt_path, error = %e, "Could not load prompt template, using default");
+            "You are {{ user_name }}'s personal assistant.\n\nCurrent time: {{ current_time }}\nContext: {{ scope_name }}\n\n## What you know\n{{ current_facts }}\n\n## Active tasks\n{{ active_tasks }}\n\n## Recent conversation\n{{ conversation_history }}\n\n## Instructions\n- Be direct and concise.\n- If you identify an actionable item, create a task.\n- If you learn a new fact, note it in your response.\n- Stay within your scope.\n".to_string()
+        }
+    };
+
     // Build the HTTP client once
     let http = reqwest::Client::new();
 
@@ -201,12 +227,14 @@ async fn main() -> Result<()> {
     let api_key = cli.anthropic_api_key.clone();
     let model = cli.model.clone();
     let max_tokens = cli.max_tokens;
+    let max_context_tokens = cli.max_context_tokens;
 
     // We spawn two tasks: one per subscription. Both share the same processing logic.
     let http1 = http.clone();
     let api_key1 = api_key.clone();
     let model1 = model.clone();
     let nats1 = nats_pub.clone();
+    let prompt_template1 = prompt_template.clone();
 
     let handle_context = tokio::spawn(async move {
         let mut sub = sub_context;
@@ -220,6 +248,8 @@ async fn main() -> Result<()> {
                 &api_key1,
                 &model1,
                 max_tokens,
+                max_context_tokens,
+                &prompt_template1,
                 &nats1,
             )
             .await
@@ -239,6 +269,8 @@ async fn main() -> Result<()> {
                 &api_key,
                 &model,
                 max_tokens,
+                max_context_tokens,
+                &prompt_template,
                 &nats_pub,
             )
             .await
@@ -276,28 +308,69 @@ async fn handle_message(
     api_key: &str,
     model: &str,
     max_tokens: u32,
+    max_context_tokens: usize,
+    prompt_template: &str,
     nats: &async_nats::Client,
 ) -> Result<()> {
     info!(subject = %subject, "Received event");
 
-    // Extract user text and correlation info from the event
-    let (user_text, correlation_id, agent_id) = extract_text(payload, subject)?;
+    let envelope: EventEnvelope = serde_json::from_slice(payload)?;
+    let correlation_id = envelope
+        .correlation_id
+        .clone()
+        .or_else(|| Some(envelope.id.clone()));
 
-    if user_text.is_empty() {
-        warn!(subject = %subject, "Empty user text, skipping");
-        return Ok(());
-    }
+    // Branch based on event type
+    let (system_prompt, messages, agent_id) = if subject == "agent.context.loaded" {
+        // Full context assembly path
+        let ctx: AgentContextLoaded = serde_json::from_value(envelope.payload)?;
+        let agent_id = ctx
+            .original_event
+            .scope
+            .clone()
+            .unwrap_or_else(|| "default".to_string());
 
-    info!(text_len = user_text.len(), "Calling Anthropic API");
+        let config = ContextConfig {
+            max_context_tokens,
+            max_response_tokens: max_tokens as usize,
+            prompt_template: prompt_template.to_string(),
+        };
+
+        let assembled = assemble_context(&config, &ctx)?;
+        info!(
+            estimated_tokens = assembled.estimated_tokens,
+            messages = assembled.messages.len(),
+            "Context assembled from agent.context.loaded"
+        );
+
+        (Some(assembled.system_prompt), assembled.messages, agent_id)
+    } else {
+        // Simple path for channel.*.inbound — just the user message
+        let inbound: ChannelInbound = serde_json::from_value(envelope.payload)?;
+        let agent_id = envelope.scope.unwrap_or_else(|| "default".to_string());
+
+        if inbound.text.is_empty() {
+            warn!(subject = %subject, "Empty user text, skipping");
+            return Ok(());
+        }
+
+        let msgs = vec![AnthropicMessage {
+            role: "user".to_string(),
+            content: inbound.text,
+        }];
+
+        (None, msgs, agent_id)
+    };
+
+    let user_text_len: usize = messages.iter().map(|m| m.content.len()).sum();
+    info!(text_len = user_text_len, "Calling Anthropic API");
 
     // Build Anthropic API request
     let api_request = AnthropicRequest {
         model: model.to_string(),
         max_tokens,
-        messages: vec![AnthropicMessage {
-            role: "user".to_string(),
-            content: user_text,
-        }],
+        system: system_prompt,
+        messages,
     };
 
     let start = Instant::now();
@@ -390,36 +463,6 @@ async fn handle_message(
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
-
-/// Extract user text, correlation_id, and agent_id from an event payload.
-/// Handles both `agent.context.loaded` and `channel.*.inbound` events.
-fn extract_text(
-    payload: &[u8],
-    subject: &str,
-) -> Result<(String, Option<String>, String)> {
-    let envelope: EventEnvelope = serde_json::from_slice(payload)?;
-    let correlation_id = envelope
-        .correlation_id
-        .clone()
-        .or_else(|| Some(envelope.id.clone()));
-
-    if subject == "agent.context.loaded" {
-        // Parse the AgentContextLoaded payload
-        let ctx: AgentContextLoaded = serde_json::from_value(envelope.payload)?;
-        // The user text is inside the original_event's ChannelInbound payload
-        let inbound: ChannelInbound = serde_json::from_value(ctx.original_event.payload)?;
-        let agent_id = ctx
-            .original_event
-            .scope
-            .unwrap_or_else(|| "default".to_string());
-        Ok((inbound.text, correlation_id, agent_id))
-    } else {
-        // channel.*.inbound — parse directly as ChannelInbound
-        let inbound: ChannelInbound = serde_json::from_value(envelope.payload)?;
-        let agent_id = envelope.scope.unwrap_or_else(|| "default".to_string());
-        Ok((inbound.text, correlation_id, agent_id))
-    }
-}
 
 /// Generate a simple time-based unique ID (ULID-like).
 /// Uses timestamp + random suffix. A proper ULID crate can be added later.
