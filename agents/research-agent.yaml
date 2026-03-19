@@ -1,0 +1,78 @@
+# Research Agent — deep research with project and Seidrum scope access
+
+agent:
+  id: research-agent
+  name: Research Agent
+  description: Deep research agent for technical topics, project analysis, and Seidrum development.
+  enabled: true
+
+  scope: scope_projects
+  additional_scopes:
+    - scope_seidrum
+
+  pipeline:
+    triggers:
+      - channel.cli.inbound
+
+    steps:
+      - plugin: content-ingester
+        consumes: trigger
+        produces: brain.content.stored
+
+      - plugin: graph-context-loader
+        consumes: trigger
+        produces: agent.context.loaded
+        config:
+          graph_depth: 5
+          max_facts: 100
+          min_confidence: 0.3
+          conversation_history_length: 10
+
+      - plugin: llm-router
+        consumes: agent.context.loaded
+        produces: llm.response
+        config:
+          strategy: best-first
+          models:
+            - claude-sonnet-4-20250514
+            - gpt-4o
+          max_tokens: 8192
+          temperature: 0.3
+          max_context_tokens: 100000
+          prompt: ./prompts/research.md
+          tools:
+            registry_access: true
+            pinned: [brain-query, web-search]
+            max_dynamic_tools: 10
+
+      - plugin: event-emitter
+        consumes: llm.response
+        produces:
+          - brain.fact.upsert
+
+      - plugin: response-formatter
+        consumes: llm.response
+        produces: channel.*.outbound
+
+  background:
+    - plugin: entity-extractor
+      consumes: brain.content.stored
+      produces: brain.entity.upsert
+      config:
+        extraction_model: claude-haiku-4-5-20251001
+
+    - plugin: fact-extractor
+      consumes: brain.entity.upserted
+      produces: brain.fact.upsert
+      config:
+        extraction_model: claude-haiku-4-5-20251001
+
+    - plugin: scope-classifier
+      consumes: brain.content.stored
+      produces: brain.scope.assign
+      config:
+        classification_model: claude-haiku-4-5-20251001
+
+  rate_limit:
+    max_calls_per_minute: 15
+    max_daily_spend_usd: 10.00

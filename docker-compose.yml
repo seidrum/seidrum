@@ -1,4 +1,5 @@
 services:
+  # --- Infrastructure ---
   nats:
     image: nats:latest
     command: ["--jetstream", "--store_dir", "/data"]
@@ -12,6 +13,121 @@ services:
       ARANGO_ROOT_PASSWORD: ${ARANGO_PASSWORD:-seidrum_dev}
     ports: ["8529:8529"]
     volumes: ["arango-data:/var/lib/arangodb3"]
+    restart: unless-stopped
+
+  # --- Kernel ---
+  kernel:
+    build:
+      context: .
+      dockerfile: crates/seidrum-kernel/Dockerfile
+    command: ["serve"]
+    environment:
+      NATS_URL: nats://nats:4222
+      ARANGO_URL: http://arangodb:8529
+      ARANGO_PASSWORD: ${ARANGO_PASSWORD:-seidrum_dev}
+    depends_on: [nats, arangodb]
+    restart: unless-stopped
+
+  # --- Plugins ---
+  telegram:
+    build:
+      context: .
+      dockerfile: crates/plugins/seidrum-telegram/Dockerfile
+    environment:
+      NATS_URL: nats://nats:4222
+      TELEGRAM_TOKEN: ${TELEGRAM_TOKEN}
+      TELEGRAM_ALLOWED_USERS: ${TELEGRAM_ALLOWED_USERS}
+    depends_on: [nats]
+    restart: unless-stopped
+
+  llm-router:
+    build:
+      context: .
+      dockerfile: crates/plugins/seidrum-llm-router/Dockerfile
+    environment:
+      NATS_URL: nats://nats:4222
+      ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY}
+      OPENAI_API_KEY: ${OPENAI_API_KEY}
+      OLLAMA_URL: ${OLLAMA_URL:-}
+    depends_on: [nats]
+    restart: unless-stopped
+
+  content-ingester:
+    build:
+      context: .
+      dockerfile: crates/plugins/seidrum-content-ingester/Dockerfile
+    environment:
+      NATS_URL: nats://nats:4222
+      EMBEDDING_PROVIDER: ${EMBEDDING_PROVIDER:-openai}
+      OPENAI_API_KEY: ${OPENAI_API_KEY}
+    depends_on: [nats]
+    restart: unless-stopped
+
+  entity-extractor:
+    build:
+      context: .
+      dockerfile: crates/plugins/seidrum-entity-extractor/Dockerfile
+    environment:
+      NATS_URL: nats://nats:4222
+      ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY}
+    depends_on: [nats]
+    restart: unless-stopped
+
+  fact-extractor:
+    build:
+      context: .
+      dockerfile: crates/plugins/seidrum-fact-extractor/Dockerfile
+    environment:
+      NATS_URL: nats://nats:4222
+      ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY}
+    depends_on: [nats]
+    restart: unless-stopped
+
+  graph-context-loader:
+    build:
+      context: .
+      dockerfile: crates/plugins/seidrum-graph-context-loader/Dockerfile
+    environment:
+      NATS_URL: nats://nats:4222
+    depends_on: [nats]
+    restart: unless-stopped
+
+  scope-classifier:
+    build:
+      context: .
+      dockerfile: crates/plugins/seidrum-scope-classifier/Dockerfile
+    environment:
+      NATS_URL: nats://nats:4222
+      ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY}
+    depends_on: [nats]
+    restart: unless-stopped
+
+  response-formatter:
+    build:
+      context: .
+      dockerfile: crates/plugins/seidrum-response-formatter/Dockerfile
+    environment:
+      NATS_URL: nats://nats:4222
+    depends_on: [nats]
+    restart: unless-stopped
+
+  event-emitter:
+    build:
+      context: .
+      dockerfile: crates/plugins/seidrum-event-emitter/Dockerfile
+    environment:
+      NATS_URL: nats://nats:4222
+    depends_on: [nats]
+    restart: unless-stopped
+
+  task-detector:
+    build:
+      context: .
+      dockerfile: crates/plugins/seidrum-task-detector/Dockerfile
+    environment:
+      NATS_URL: nats://nats:4222
+      ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY}
+    depends_on: [nats]
     restart: unless-stopped
 
 volumes:

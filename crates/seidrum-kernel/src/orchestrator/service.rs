@@ -117,7 +117,7 @@ impl OrchestratorService {
     /// - `consumes: trigger` is valid for first steps (they consume trigger events)
     /// - Subsequent steps must consume an event type that a previous step produces
     /// - Wildcard patterns (e.g., `channel.*.outbound`) are allowed in produces
-    fn validate_pipeline(&self, agent: &AgentConfig) -> Vec<String> {
+    pub fn validate_pipeline(&self, agent: &AgentConfig) -> Vec<String> {
         let mut warnings = Vec::new();
         let steps = &agent.pipeline.steps;
 

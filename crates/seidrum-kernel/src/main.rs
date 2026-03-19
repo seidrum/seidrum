@@ -1,5 +1,6 @@
 use clap::{Parser, Subcommand};
 use seidrum_common::config::{load_agent_config, load_platform_config, AgentConfigFile};
+use std::collections::{HashMap, HashSet};
 use std::path::Path;
 use std::process;
 use tracing::{error, info, warn};
@@ -201,18 +202,19 @@ async fn run_init() -> anyhow::Result<()> {
 /// Run full validation of platform config and all agent definitions.
 /// Returns true if everything is valid, false otherwise.
 fn run_validate(config_path: &str) -> bool {
-    let mut all_ok = true;
+    let mut errors: Vec<String> = Vec::new();
+    let mut warnings: Vec<String> = Vec::new();
+    let mut ok_checks: Vec<String> = Vec::new();
 
     // 1. Parse platform config
     let platform_path = Path::new(config_path);
     let platform_config = match load_platform_config(platform_path) {
         Ok(cfg) => {
-            info!("[OK] Platform config: {}", platform_path.display());
+            ok_checks.push(format!("Platform config: {}", platform_path.display()));
             Some(cfg)
         }
         Err(e) => {
-            error!("[FAIL] Platform config: {}", e);
-            all_ok = false;
+            errors.push(format!("Platform config: {}", e));
             None
         }
     };
@@ -225,7 +227,11 @@ fn run_validate(config_path: &str) -> bool {
     let agents_path = Path::new(agents_dir);
 
     if !agents_path.is_dir() {
-        error!("[FAIL] Agents directory not found: {}", agents_path.display());
+        errors.push(format!(
+            "Agents directory not found: {}",
+            agents_path.display()
+        ));
+        print_validation_summary(&ok_checks, &warnings, &errors);
         return false;
     }
 
@@ -233,7 +239,8 @@ fn run_validate(config_path: &str) -> bool {
     let entries = match std::fs::read_dir(agents_path) {
         Ok(entries) => entries,
         Err(e) => {
-            error!("[FAIL] Cannot read agents directory: {}", e);
+            errors.push(format!("Cannot read agents directory: {}", e));
+            print_validation_summary(&ok_checks, &warnings, &errors);
             return false;
         }
     };
@@ -244,8 +251,7 @@ fn run_validate(config_path: &str) -> bool {
         let entry = match entry {
             Ok(e) => e,
             Err(e) => {
-                error!("[FAIL] Error reading directory entry: {}", e);
-                all_ok = false;
+                errors.push(format!("Error reading directory entry: {}", e));
                 continue;
             }
         };
@@ -260,21 +266,81 @@ fn run_validate(config_path: &str) -> bool {
 
         match load_agent_config(&path) {
             Ok(agent_file) => {
-                info!(
-                    "[OK] Agent config: {} (id: {})",
+                ok_checks.push(format!(
+                    "Agent config: {} (id: {})",
                     path.display(),
                     agent_file.agent.id
-                );
+                ));
                 agent_configs.push((path.display().to_string(), agent_file));
             }
             Err(e) => {
-                error!("[FAIL] Agent config: {}", e);
-                all_ok = false;
+                errors.push(format!("Agent config {}: {}", path.display(), e));
             }
         }
     }
 
-    // 4. Check that prompt files referenced by agents exist
+    // 4. Check for duplicate agent IDs across YAML files
+    {
+        let mut seen_ids: HashMap<String, String> = HashMap::new();
+        for (source_path, agent_file) in &agent_configs {
+            let agent_id = &agent_file.agent.id;
+            if let Some(first_path) = seen_ids.get(agent_id) {
+                errors.push(format!(
+                    "Duplicate agent ID '{}': found in both '{}' and '{}'",
+                    agent_id, first_path, source_path
+                ));
+            } else {
+                seen_ids.insert(agent_id.clone(), source_path.clone());
+            }
+        }
+    }
+
+    // 5. Validate pipeline event type chains using OrchestratorService logic
+    let orchestrator = OrchestratorService::new();
+    for (source_path, agent_file) in &agent_configs {
+        let agent = &agent_file.agent;
+        let pipeline_warnings = orchestrator.validate_pipeline(agent);
+        for w in &pipeline_warnings {
+            warnings.push(format!(
+                "Agent '{}' ({}): {}",
+                agent.id, source_path, w
+            ));
+        }
+        if pipeline_warnings.is_empty() {
+            ok_checks.push(format!(
+                "Pipeline chain: agent '{}' event types are coherent",
+                agent.id
+            ));
+        }
+    }
+
+    // 6. Check that scopes follow the naming convention (scope_*)
+    for (source_path, agent_file) in &agent_configs {
+        let agent = &agent_file.agent;
+
+        // Collect all scopes referenced by this agent
+        let mut all_scopes: Vec<&str> = vec![agent.scope.as_str()];
+        for s in &agent.additional_scopes {
+            all_scopes.push(s.as_str());
+        }
+
+        for scope_name in &all_scopes {
+            if !scope_name.starts_with("scope_") {
+                warnings.push(format!(
+                    "Agent '{}' ({}): scope '{}' does not follow naming convention 'scope_*'",
+                    agent.id, source_path, scope_name
+                ));
+            }
+        }
+
+        ok_checks.push(format!(
+            "Scopes: agent '{}' references {} scope(s)",
+            agent.id,
+            all_scopes.len()
+        ));
+    }
+
+    // 7. Check that prompt files referenced by agents exist
     for (source_path, agent_file) in &agent_configs {
         let agent = &agent_file.agent;
 
@@ -285,16 +351,15 @@ fn run_validate(config_path: &str) -> bool {
                     if let Some(prompt_path) = prompt_val.as_str() {
                         let prompt_file = Path::new(prompt_path);
                         if prompt_file.exists() {
-                            info!(
-                                "[OK] Prompt file: {} (referenced by agent '{}', step '{}')",
+                            ok_checks.push(format!(
+                                "Prompt file: {} (agent '{}', step '{}')",
                                 prompt_path, agent.id, step.plugin
-                            );
+                            ));
                         } else {
-                            error!(
-                                "[FAIL] Prompt file not found: {} (referenced by agent '{}' in {}, step '{}')",
+                            errors.push(format!(
+                                "Prompt file not found: {} (agent '{}' in {}, step '{}')",
                                 prompt_path, agent.id, source_path, step.plugin
-                            );
-                            all_ok = false;
+                            ));
                         }
                     }
                 }
@@ -309,16 +374,15 @@ fn run_validate(config_path: &str) -> bool {
                         if let Some(prompt_path) = prompt_val.as_str() {
                             let prompt_file = Path::new(prompt_path);
                             if prompt_file.exists() {
-                                info!(
-                                    "[OK] Prompt file: {} (referenced by agent '{}', background step '{}')",
+                                ok_checks.push(format!(
+                                    "Prompt file: {} (agent '{}', background step '{}')",
                                     prompt_path, agent.id, step.plugin
-                                );
+                                ));
                             } else {
-                                error!(
-                                    "[FAIL] Prompt file not found: {} (referenced by agent '{}' in {}, background step '{}')",
+                                errors.push(format!(
+                                    "Prompt file not found: {} (agent '{}' in {}, background step '{}')",
                                     prompt_path, agent.id, source_path, step.plugin
-                                );
-                                all_ok = false;
+                                ));
                             }
                         }
                     }
@@ -327,15 +391,85 @@ fn run_validate(config_path: &str) -> bool {
         }
     }
 
-    // 5. Summary
-    if all_ok {
-        info!(
-            "Validation complete: all OK ({} agent(s) validated)",
-            agent_configs.len()
-        );
-    } else {
-        error!("Validation complete: errors found. See above for details.");
+    // 8. Check that referenced plugins are known
+    {
+        let known_plugins: HashSet<&str> = [
+            "content-ingester",
+            "graph-context-loader",
+            "llm-router",
+            "event-emitter",
+            "response-formatter",
+            "entity-extractor",
+            "fact-extractor",
+            "scope-classifier",
+            "task-detector",
+            "telegram",
+            "cli",
+        ]
+        .into_iter()
+        .collect();
+
+        for (source_path, agent_file) in &agent_configs {
+            let agent = &agent_file.agent;
+            for step in &agent.pipeline.steps {
+                if !known_plugins.contains(step.plugin.as_str()) {
+                    warnings.push(format!(
+                        "Agent '{}' ({}): pipeline step references unknown plugin '{}'",
+                        agent.id, source_path, step.plugin
+                    ));
+                }
+            }
+            if let Some(bg_steps) = &agent.background {
+                for step in bg_steps {
+                    if !known_plugins.contains(step.plugin.as_str()) {
+                        warnings.push(format!(
+                            "Agent '{}' ({}): background step references unknown plugin '{}'",
+                            agent.id, source_path, step.plugin
+                        ));
+                    }
+                }
+            }
+        }
     }
 
-    all_ok
+    // Print summary
+    print_validation_summary(&ok_checks, &warnings, &errors);
+
+    errors.is_empty()
+}
+
+/// Print a clear validation summary with all checks, warnings, and errors.
+fn print_validation_summary(ok_checks: &[String], warnings: &[String], errors: &[String]) {
+    println!();
+    println!("=== Seidrum Validation Summary ===");
+    println!();
+
+    for check in ok_checks {
+        info!("[OK]   {}", check);
+    }
+
+    for w in warnings {
+        warn!("[WARN] {}", w);
+    }
+
+    for e in errors {
+        error!("[FAIL] {}", e);
+    }
+
+    println!();
+    println!(
+        "Results: {} passed, {} warnings, {} errors",
+        ok_checks.len(),
+        warnings.len(),
+        errors.len()
+    );
+
+    if errors.is_empty() && warnings.is_empty() {
+        println!("Status: ALL OK");
+    } else if errors.is_empty() {
+        println!("Status: PASS (with warnings)");
+    } else {
+        println!("Status: FAILED");
+    }
+    println!();
 }
