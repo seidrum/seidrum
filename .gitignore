@@ -1,0 +1,22 @@
+# Environment secrets
+.env
+
+# Rust build artifacts
+target/
+
+# Editor swap files
+*.swp
+*.swo
+*~
+
+# macOS
+.DS_Store
+
+# IDE
+.idea/
+.vscode/
+*.iml
+
+# Docker volumes (if local)
+nats-data/
+arango-data/

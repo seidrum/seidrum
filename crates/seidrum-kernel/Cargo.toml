@@ -1,0 +1,54 @@
+[package]
+name = "seidrum-kernel"
+version = "0.1.0"
+edition = "2021"
+
+[[bin]]
+name = "seidrum-kernel"
+path = "src/main.rs"
+
+[dependencies]
+seidrum-common = { path = "../seidrum-common" }
+
+# Async runtime
+tokio = { version = "1", features = ["full"] }
+
+# NATS client
+async-nats = "0.38"
+
+# HTTP client for ArangoDB
+reqwest = { version = "0.12", features = ["json", "rustls-tls"] }
+
+# Serialization
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+serde_yaml = "0.9"
+
+# ArangoDB driver
+arangors = "0.6"
+
+# Validation
+garde = "0.20"
+
+# Configuration
+config = "0.14"
+
+# Logging
+tracing = "0.1"
+tracing-subscriber = "0.3"
+
+# CLI
+clap = { version = "4", features = ["derive"] }
+
+# Cron scheduling
+tokio-cron-scheduler = "0.13"
+
+# Token counting
+tiktoken-rs = "0.6"
+
+# Error handling
+anyhow = "1"
+thiserror = "2"
+
+# Date/time
+chrono = { version = "0.4", features = ["serde"] }

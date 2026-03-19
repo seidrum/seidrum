@@ -1,0 +1,19 @@
+services:
+  nats:
+    image: nats:latest
+    command: ["--jetstream", "--store_dir", "/data"]
+    ports: ["4222:4222", "8222:8222"]
+    volumes: ["nats-data:/data"]
+    restart: unless-stopped
+
+  arangodb:
+    image: arangodb:3.12
+    environment:
+      ARANGO_ROOT_PASSWORD: ${ARANGO_PASSWORD:-seidrum_dev}
+    ports: ["8529:8529"]
+    volumes: ["arango-data:/var/lib/arangodb3"]
+    restart: unless-stopped
+
+volumes:
+  nats-data:
+  arango-data:

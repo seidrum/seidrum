@@ -1,0 +1,7 @@
+[workspace]
+members = [
+    "crates/seidrum-common",
+    "crates/seidrum-kernel",
+    "crates/plugins/seidrum-cli",
+]
+resolver = "2"
