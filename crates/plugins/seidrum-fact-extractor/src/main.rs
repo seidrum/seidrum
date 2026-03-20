@@ -143,6 +143,8 @@ async fn main() -> Result<()> {
         consumes: vec!["brain.entity.upserted".to_string()],
         produces: vec!["brain.fact.upsert".to_string()],
         health_subject: format!("plugin.{PLUGIN_ID}.health"),
+        consumed_event_types: vec![],
+        produced_event_types: vec![],
     };
 
     let register_envelope = EventEnvelope::new(

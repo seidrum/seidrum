@@ -141,6 +141,8 @@ async fn main() -> Result<()> {
         consumes: vec!["llm.response".to_string()],
         produces: vec!["brain.task.upsert".to_string()],
         health_subject: format!("plugin.{PLUGIN_ID}.health"),
+        consumed_event_types: vec![],
+        produced_event_types: vec![],
     };
 
     let register_envelope =

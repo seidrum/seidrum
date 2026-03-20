@@ -56,6 +56,17 @@ struct Cli {
 // Event envelope (matches EVENT_CATALOG.md)
 // ---------------------------------------------------------------------------
 
+/// Origin channel info for response routing.
+#[derive(Serialize, Deserialize, Debug, Clone)]
+struct EventOrigin {
+    platform: String,
+    chat_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    thread_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    message_id: Option<String>,
+}
+
 #[derive(Serialize, Deserialize, Debug, Clone)]
 struct EventEnvelope {
     id: String,
@@ -65,6 +76,8 @@ struct EventEnvelope {
     correlation_id: Option<String>,
     scope: Option<String>,
     payload: serde_json::Value,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    origin: Option<EventOrigin>,
 }
 
 // ---------------------------------------------------------------------------
@@ -454,6 +467,7 @@ async fn handle_message(
         correlation_id,
         scope,
         payload: serde_json::to_value(&llm_response)?,
+        origin: envelope.origin.clone(),
     };
 
     let envelope_bytes = serde_json::to_vec(&out_envelope)?;

@@ -1,84 +1,13 @@
-# Personal Assistant agent definition
-
 agent:
   id: personal-assistant
-  name: Personal Assistant
-  description: General-purpose assistant with full knowledge graph access.
-  enabled: true
-
+  description: General-purpose personal assistant
+  prompt: ./prompts/assistant.md
+  tools:
+    - brain-query
+    - execute-code
+    - search-calendar
+    - send-email
   scope: scope_root
   additional_scopes:
     - scope_job_search
     - scope_projects
-
-  pipeline:
-    triggers:
-      - channel.telegram.inbound
-      - channel.cli.inbound
-      - task.completed.*
-
-    steps:
-      - plugin: content-ingester
-        consumes: trigger
-        produces: brain.content.stored
-
-      - plugin: graph-context-loader
-        consumes: trigger
-        produces: agent.context.loaded
-        config:
-          graph_depth: 3
-          max_facts: 50
-          min_confidence: 0.5
-          conversation_history_length: 20
-
-      - plugin: llm-router
-        consumes: agent.context.loaded
-        produces: llm.response
-        config:
-          provider: google
-          strategy: best-first
-          max_tokens: 4096
-          temperature: 0.7
-          max_context_tokens: 100000
-          prompt: ./prompts/assistant.md
-          tools:
-            max_dynamic_tools: 5
-
-      - plugin: event-emitter
-        consumes: llm.response
-        produces:
-          - task.created
-          - brain.fact.upsert
-
-      - plugin: response-formatter
-        consumes: llm.response
-        produces: channel.*.outbound
-
-  background:
-    - plugin: entity-extractor
-      consumes: brain.content.stored
-      produces: brain.entity.upsert
-      config:
-        extraction_model: claude-haiku-4-5-20251001
-
-    - plugin: fact-extractor
-      consumes: brain.entity.upserted
-      produces: brain.fact.upsert
-      config:
-        extraction_model: claude-haiku-4-5-20251001
-
-    - plugin: scope-classifier
-      consumes: brain.content.stored
-      produces: brain.scope.assign
-      config:
-        classification_model: claude-haiku-4-5-20251001
-
-    - plugin: task-detector
-      consumes: llm.response
-      produces: task.created
-      config:
-        detection_model: claude-haiku-4-5-20251001
-
-  rate_limit:
-    max_calls_per_minute: 30
-    max_daily_spend_usd: 5.00

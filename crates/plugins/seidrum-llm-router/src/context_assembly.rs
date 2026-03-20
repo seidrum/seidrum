@@ -497,6 +497,7 @@ mod tests {
                 correlation_id: Some("corr-1".to_string()),
                 scope: Some("scope_root".to_string()),
                 payload: inbound_payload,
+                origin: None,
             },
             entities: vec![],
             facts: vec![

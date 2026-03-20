@@ -25,6 +25,10 @@ pub struct PlatformConfig {
     #[serde(default = "default_agents_dir")]
     pub agents_dir: String,
 
+    /// Directory containing workflow YAML definitions.
+    #[serde(default = "default_workflows_dir")]
+    pub workflows_dir: String,
+
     /// Logging level (trace, debug, info, warn, error).
     #[serde(default = "default_log_level")]
     pub log_level: String,
@@ -36,6 +40,10 @@ fn default_arango_database() -> String {
 
 fn default_agents_dir() -> String {
     "agents/".to_string()
+}
+
+fn default_workflows_dir() -> String {
+    "workflows/".to_string()
 }
 
 fn default_log_level() -> String {
@@ -188,6 +196,97 @@ pub fn load_agent_config(path: &Path) -> anyhow::Result<AgentConfigFile> {
 }
 
 // ---------------------------------------------------------------------------
+// V2 Agent definition (simplified: prompt + tools + scope)
+// ---------------------------------------------------------------------------
+
+/// V2 agent config: just prompt + tools + scope.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AgentDefinitionFile {
+    pub agent: AgentDefinition,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AgentDefinition {
+    pub id: String,
+    pub prompt: String,
+    #[serde(default)]
+    pub tools: Vec<String>,
+    pub scope: String,
+    #[serde(default)]
+    pub additional_scopes: Vec<String>,
+    #[serde(default)]
+    pub description: Option<String>,
+}
+
+pub fn load_agent_definition(path: &Path) -> anyhow::Result<AgentDefinitionFile> {
+    let contents = std::fs::read_to_string(path)?;
+    let def: AgentDefinitionFile = serde_yaml::from_str(&contents)?;
+    Ok(def)
+}
+
+// ---------------------------------------------------------------------------
+// Workflow configuration (workflows/*.yaml)
+// ---------------------------------------------------------------------------
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct WorkflowFile {
+    pub workflow: WorkflowConfig,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct WorkflowConfig {
+    pub id: String,
+    #[serde(default)]
+    pub description: Option<String>,
+    #[serde(default)]
+    pub agents: HashMap<String, WorkflowAgentRef>,
+    pub on: String,
+    pub steps: Vec<WorkflowStep>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct WorkflowAgentRef {
+    #[serde(default)]
+    pub ref_id: Option<String>,
+    #[serde(default)]
+    pub prompt: Option<String>,
+    #[serde(default)]
+    pub tools: Vec<String>,
+    #[serde(default)]
+    pub scope: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(untagged)]
+pub enum WorkflowStep {
+    Plugin { plugin: String },
+    Agent { agent: String },
+    Output { output: WorkflowOutput },
+    Condition { condition: WorkflowCondition },
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(untagged)]
+pub enum WorkflowOutput {
+    Simple(String),
+    Detailed { channel: String, chat_id: Option<String>, template: Option<String> },
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct WorkflowCondition {
+    #[serde(rename = "if")]
+    pub condition_if: String,
+    pub then_step: Option<String>,
+    pub else_step: Option<String>,
+}
+
+pub fn load_workflow(path: &Path) -> anyhow::Result<WorkflowFile> {
+    let contents = std::fs::read_to_string(path)?;
+    let wf: WorkflowFile = serde_yaml::from_str(&contents)?;
+    Ok(wf)
+}
+
+// ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
 
@@ -282,6 +381,106 @@ agent:
         let rate = agent.rate_limit.as_ref().unwrap();
         assert_eq!(rate.max_calls_per_minute, 30);
         assert!((rate.max_daily_spend_usd - 5.0).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn test_platform_config_workflows_dir_default() {
+        let yaml = r#"
+nats_url: nats://localhost:4222
+arango_url: http://localhost:8529
+"#;
+        let config: PlatformConfig = serde_yaml::from_str(yaml).unwrap();
+        assert_eq!(config.workflows_dir, "workflows/");
+    }
+
+    #[test]
+    fn test_agent_definition_roundtrip() {
+        let yaml = r#"
+agent:
+  id: personal-assistant
+  description: General-purpose personal assistant
+  prompt: ./prompts/assistant.md
+  tools:
+    - brain-query
+    - execute-code
+  scope: scope_root
+  additional_scopes:
+    - scope_job_search
+"#;
+        let file: AgentDefinitionFile = serde_yaml::from_str(yaml).unwrap();
+        assert_eq!(file.agent.id, "personal-assistant");
+        assert_eq!(file.agent.prompt, "./prompts/assistant.md");
+        assert_eq!(file.agent.tools, vec!["brain-query", "execute-code"]);
+        assert_eq!(file.agent.scope, "scope_root");
+        assert_eq!(file.agent.additional_scopes, vec!["scope_job_search"]);
+        assert_eq!(file.agent.description.as_deref(), Some("General-purpose personal assistant"));
+
+        let json = serde_json::to_string(&file).unwrap();
+        let deserialized: AgentDefinitionFile = serde_json::from_str(&json).unwrap();
+        assert_eq!(file.agent.id, deserialized.agent.id);
+        assert_eq!(file.agent.tools, deserialized.agent.tools);
+    }
+
+    #[test]
+    fn test_workflow_config_roundtrip_plugin_and_agent_steps() {
+        let yaml = r#"
+workflow:
+  id: default
+  description: Default conversational workflow
+  agents:
+    assistant:
+      ref_id: personal-assistant
+  on: "channel.*.inbound"
+  steps:
+    - plugin: content-ingester
+    - agent: assistant
+    - output: origin
+"#;
+        let file: WorkflowFile = serde_yaml::from_str(yaml).unwrap();
+        let wf = &file.workflow;
+        assert_eq!(wf.id, "default");
+        assert_eq!(wf.on, "channel.*.inbound");
+        assert_eq!(wf.steps.len(), 3);
+        assert!(wf.agents.contains_key("assistant"));
+        assert_eq!(wf.agents["assistant"].ref_id.as_deref(), Some("personal-assistant"));
+
+        let json = serde_json::to_string(&file).unwrap();
+        let deserialized: WorkflowFile = serde_json::from_str(&json).unwrap();
+        assert_eq!(wf.id, deserialized.workflow.id);
+        assert_eq!(wf.steps.len(), deserialized.workflow.steps.len());
+    }
+
+    #[test]
+    fn test_workflow_config_with_condition_step() {
+        let yaml = r#"
+workflow:
+  id: conditional
+  on: "channel.*.inbound"
+  steps:
+    - plugin: content-ingester
+    - condition:
+        if: "payload.text starts_with '/'"
+        then_step: command-handler
+        else_step: assistant
+"#;
+        let file: WorkflowFile = serde_yaml::from_str(yaml).unwrap();
+        assert_eq!(file.workflow.steps.len(), 2);
+    }
+
+    #[test]
+    fn test_workflow_output_detailed() {
+        let yaml = r#"
+workflow:
+  id: output-test
+  on: "channel.*.inbound"
+  steps:
+    - output:
+        channel: telegram
+        chat_id: "12345"
+        template: response.md
+"#;
+        let file: WorkflowFile = serde_yaml::from_str(yaml).unwrap();
+        assert_eq!(file.workflow.steps.len(), 1);
     }
 
     #[test]

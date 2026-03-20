@@ -81,6 +81,8 @@ async fn main() -> Result<()> {
         consumes: vec!["capability.call".to_string()],
         produces: vec![],
         health_subject: "plugin.tool-dispatcher.health".to_string(),
+        consumed_event_types: vec![],
+        produced_event_types: vec![],
     };
     nats.publish_envelope("plugin.register", None, None, &register)
         .await?;

@@ -64,6 +64,23 @@ impl ChannelHint {
 }
 
 // ---------------------------------------------------------------------------
+// Channel hint extraction (origin-aware)
+// ---------------------------------------------------------------------------
+
+/// Extract channel routing info, preferring the origin field over correlation_id.
+fn extract_channel_hint(envelope: &EventEnvelope) -> ChannelHint {
+    // V2: use origin field if present (set by orchestrator)
+    if let Some(ref origin) = envelope.origin {
+        return ChannelHint {
+            platform: origin.platform.clone(),
+            chat_id: origin.chat_id.clone(),
+        };
+    }
+    // Fallback: parse correlation_id (backward compat)
+    ChannelHint::from_correlation_id(&envelope.correlation_id)
+}
+
+// ---------------------------------------------------------------------------
 // Formatting
 // ---------------------------------------------------------------------------
 
@@ -131,6 +148,8 @@ async fn main() -> Result<()> {
             "channel.cli.outbound".to_string(),
         ],
         health_subject: "plugin.response-formatter.health".to_string(),
+        consumed_event_types: vec![],
+        produced_event_types: vec![],
     };
     nats.publish_envelope("plugin.register", None, None, &register)
         .await?;
@@ -184,8 +203,8 @@ async fn handle_llm_response(payload: &[u8], nats: &NatsClient) -> Result<()> {
         }
     };
 
-    // Determine target channel from correlation_id
-    let hint = ChannelHint::from_correlation_id(&envelope.correlation_id);
+    // Determine target channel: prefer origin field, fall back to correlation_id
+    let hint = extract_channel_hint(&envelope);
 
     info!(
         platform = %hint.platform,

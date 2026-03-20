@@ -7,6 +7,21 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
 // ---------------------------------------------------------------------------
+// Event Origin (for response routing)
+// ---------------------------------------------------------------------------
+
+/// Origin channel info for response routing.
+#[derive(Serialize, Deserialize, Debug, Clone)]
+pub struct EventOrigin {
+    pub platform: String,
+    pub chat_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub thread_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub message_id: Option<String>,
+}
+
+// ---------------------------------------------------------------------------
 // Event Envelope
 // ---------------------------------------------------------------------------
 
@@ -26,6 +41,9 @@ pub struct EventEnvelope {
     pub scope: Option<String>,
     /// Event-specific data
     pub payload: serde_json::Value,
+    /// Origin channel info for response routing (set by orchestrator).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub origin: Option<EventOrigin>,
 }
 
 impl EventEnvelope {
@@ -45,6 +63,7 @@ impl EventEnvelope {
             correlation_id,
             scope,
             payload: serde_json::to_value(payload)?,
+            origin: None,
         })
     }
 }
@@ -371,6 +390,12 @@ pub struct PluginRegister {
     /// NATS subjects this plugin produces
     pub produces: Vec<String>,
     pub health_subject: String,
+    /// Event types this plugin consumes (e.g., "ChannelInbound").
+    #[serde(default)]
+    pub consumed_event_types: Vec<String>,
+    /// Event types this plugin produces (e.g., "LlmResponse").
+    #[serde(default)]
+    pub produced_event_types: Vec<String>,
 }
 
 /// Subject: `plugin.{id}.health` (request)
@@ -592,6 +617,7 @@ mod tests {
             correlation_id: Some("corr-123".to_string()),
             scope: Some("personal".to_string()),
             payload: serde_json::json!({"key": "value"}),
+            origin: None,
         };
 
         let json = serde_json::to_string(&envelope).unwrap();

@@ -1,0 +1,11 @@
+workflow:
+  id: default
+  description: Default conversational workflow
+  agents:
+    assistant:
+      ref_id: personal-assistant
+  on: "channel.*.inbound"
+  steps:
+    - plugin: content-ingester
+    - agent: assistant
+    - output: origin

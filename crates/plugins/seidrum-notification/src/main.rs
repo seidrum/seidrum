@@ -77,6 +77,8 @@ async fn main() -> Result<()> {
             "channel.cli.outbound".to_string(),
         ],
         health_subject: format!("plugin.{}.health", PLUGIN_ID),
+        consumed_event_types: vec![],
+        produced_event_types: vec![],
     };
 
     let register_envelope = EventEnvelope::new(

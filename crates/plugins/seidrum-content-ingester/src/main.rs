@@ -130,6 +130,8 @@ async fn main() -> Result<()> {
         consumes: vec!["channel.*.inbound".to_string()],
         produces: vec!["brain.content.store".to_string()],
         health_subject: "plugin.content-ingester.health".to_string(),
+        consumed_event_types: vec![],
+        produced_event_types: vec![],
     };
 
     let register_envelope = EventEnvelope::new(

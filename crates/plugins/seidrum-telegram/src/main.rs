@@ -87,6 +87,8 @@ async fn main() -> Result<()> {
             "command.execute".to_string(),
         ],
         health_subject: "plugin.telegram.health".to_string(),
+        consumed_event_types: vec![],
+        produced_event_types: vec![],
     };
     nats.publish_envelope("plugin.register", None, None, &register)
         .await?;

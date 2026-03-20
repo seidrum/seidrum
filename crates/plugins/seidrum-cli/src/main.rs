@@ -36,6 +36,8 @@ async fn main() -> Result<()> {
         consumes: vec!["channel.cli.outbound".into()],
         produces: vec!["channel.cli.inbound".into()],
         health_subject: "plugin.cli.health".into(),
+        consumed_event_types: vec![],
+        produced_event_types: vec![],
     };
     nats.publish_envelope("plugin.register", None, None, &registration)
         .await?;

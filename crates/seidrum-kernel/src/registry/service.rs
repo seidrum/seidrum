@@ -285,6 +285,8 @@ mod tests {
             consumes: vec!["channel.telegram.outbound".into()],
             produces: vec!["channel.telegram.inbound".into()],
             health_subject: "plugin.telegram.health".into(),
+            consumed_event_types: vec![],
+            produced_event_types: vec![],
         };
 
         svc.register_plugin(reg.clone()).await;
@@ -312,6 +314,8 @@ mod tests {
             consumes: vec![],
             produces: vec!["event.a".into()],
             health_subject: "plugin.a.health".into(),
+            consumed_event_types: vec![],
+            produced_event_types: vec![],
         })
         .await;
 
@@ -323,6 +327,8 @@ mod tests {
             consumes: vec!["event.a".into()],
             produces: vec!["event.b".into()],
             health_subject: "plugin.b.health".into(),
+            consumed_event_types: vec![],
+            produced_event_types: vec![],
         })
         .await;
 
@@ -342,6 +348,8 @@ mod tests {
             consumes: vec!["channel.telegram.inbound".into()],
             produces: vec!["brain.content.store".into()],
             health_subject: "plugin.ingester.health".into(),
+            consumed_event_types: vec![],
+            produced_event_types: vec![],
         })
         .await;
 
@@ -353,6 +361,8 @@ mod tests {
             consumes: vec!["channel.telegram.inbound".into()],
             produces: vec!["agent.context.loaded".into()],
             health_subject: "plugin.context-loader.health".into(),
+            consumed_event_types: vec![],
+            produced_event_types: vec![],
         })
         .await;
 
@@ -383,6 +393,8 @@ mod tests {
             consumes: vec![],
             produces: vec![],
             health_subject: "plugin.test.health".into(),
+            consumed_event_types: vec![],
+            produced_event_types: vec![],
         })
         .await;
 
@@ -394,6 +406,8 @@ mod tests {
             consumes: vec!["new.event".into()],
             produces: vec![],
             health_subject: "plugin.test.health".into(),
+            consumed_event_types: vec![],
+            produced_event_types: vec![],
         })
         .await;
 
@@ -418,6 +432,8 @@ mod tests {
             consumes: vec![],
             produces: vec![],
             health_subject: "plugin.telegram.health".into(),
+            consumed_event_types: vec![],
+            produced_event_types: vec![],
         })
         .await;
 

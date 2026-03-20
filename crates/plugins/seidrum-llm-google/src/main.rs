@@ -129,6 +129,8 @@ async fn main() -> Result<()> {
         consumes: vec!["llm.provider.google".to_string()],
         produces: vec!["llm.provider.google.response".to_string()],
         health_subject: "plugin.llm-google.health".to_string(),
+        consumed_event_types: vec![],
+        produced_event_types: vec![],
     };
     let register_envelope = EventEnvelope::new(
         "plugin.register",

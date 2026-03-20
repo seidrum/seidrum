@@ -270,9 +270,14 @@ fn build_inbound(
 
 /// Wrap a ChannelInbound in an EventEnvelope and publish to NATS.
 async fn publish_inbound(nats: &NatsClient, inbound: &ChannelInbound) -> Result<()> {
+    // Build correlation_id in the format "telegram:{chat_id}:{message_id}"
+    // The response formatter uses this to route outbound messages back to the right channel
+    let msg_id = inbound.metadata.get("message_id").cloned().unwrap_or_default();
+    let correlation_id = format!("telegram:{}:{}", inbound.chat_id, msg_id);
+
     nats.publish_envelope(
         "channel.telegram.inbound",
-        None,
+        Some(correlation_id),
         None,
         inbound,
     )

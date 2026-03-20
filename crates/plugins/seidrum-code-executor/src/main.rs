@@ -71,6 +71,8 @@ async fn main() -> Result<()> {
         consumes: vec!["capability.call.code-executor".to_string()],
         produces: vec![],
         health_subject: format!("plugin.{}.health", PLUGIN_ID),
+        consumed_event_types: vec![],
+        produced_event_types: vec![],
     };
 
     let register_envelope = EventEnvelope::new(
