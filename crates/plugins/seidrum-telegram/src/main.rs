@@ -1,3 +1,4 @@
+mod commands;
 mod inbound;
 mod markdown;
 mod media;
@@ -103,9 +104,17 @@ async fn main() -> Result<()> {
     let outbound_handle =
         tokio::spawn(async move { outbound::run_outbound_loop(outbound_bot, outbound_nats).await });
 
+    // Discover commands and set the Telegram "/" menu
+    let registry = commands::discover_commands(&nats).await;
+    commands::set_telegram_commands(&bot, &registry).await;
+
+    // Spawn live-refresh listener for new capability registrations
+    commands::spawn_capability_listener(nats.clone(), registry.clone(), bot.clone()).await;
+
     // Prepare shared state for the inbound handler
     let allowed = Arc::new(allowed_users);
     let nats_arc = Arc::new(nats);
+    let registry_arc = Arc::new(registry);
     let config = Arc::new(InboundConfig {
         token: cli.telegram_token.clone(),
         whisper_cli: cli.whisper_cli_path,
@@ -120,13 +129,15 @@ async fn main() -> Result<()> {
                 let config = config.clone();
                 let nats_arc = nats_arc.clone();
                 let allowed = allowed.clone();
-                move |_bot: Bot, msg: Message| {
+                let registry_arc = registry_arc.clone();
+                move |bot: Bot, msg: Message| {
                     let config = config.clone();
                     let nats_arc = nats_arc.clone();
                     let allowed = allowed.clone();
+                    let registry_arc = registry_arc.clone();
                     async move {
                         if let Err(err) =
-                            handle_inbound(&msg, &nats_arc, &config, &allowed, false).await
+                            handle_inbound(&msg, &nats_arc, &config, &allowed, false, &bot, &registry_arc).await
                         {
                             error!(%err, "Failed to handle inbound message");
                         }
@@ -140,13 +151,15 @@ async fn main() -> Result<()> {
                 let config = config.clone();
                 let nats_arc = nats_arc.clone();
                 let allowed = allowed.clone();
-                move |_bot: Bot, msg: Message| {
+                let registry_arc = registry_arc.clone();
+                move |bot: Bot, msg: Message| {
                     let config = config.clone();
                     let nats_arc = nats_arc.clone();
                     let allowed = allowed.clone();
+                    let registry_arc = registry_arc.clone();
                     async move {
                         if let Err(err) =
-                            handle_inbound(&msg, &nats_arc, &config, &allowed, true).await
+                            handle_inbound(&msg, &nats_arc, &config, &allowed, true, &bot, &registry_arc).await
                         {
                             error!(%err, "Failed to handle edited inbound message");
                         }
@@ -185,6 +198,8 @@ async fn handle_inbound(
     config: &InboundConfig,
     allowed: &[u64],
     is_edited: bool,
+    bot: &Bot,
+    registry: &commands::CommandRegistry,
 ) -> anyhow::Result<()> {
     let user_id = msg.from.as_ref().map(|u| u.id.0).unwrap_or(0);
 
@@ -194,7 +209,7 @@ async fn handle_inbound(
         return Ok(());
     }
 
-    inbound::handle_message(msg, nats, config, is_edited).await
+    inbound::handle_message(msg, nats, config, is_edited, bot, registry).await
 }
 
 #[cfg(test)]

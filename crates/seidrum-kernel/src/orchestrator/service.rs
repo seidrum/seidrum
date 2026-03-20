@@ -13,7 +13,7 @@ use futures::StreamExt;
 use tokio::sync::RwLock;
 use tracing::{error, info, warn};
 
-use seidrum_common::config::{load_agent_config, AgentConfig};
+use seidrum_common::config::{load_agent_config, load_agent_definition, AgentConfig, AgentDefinition};
 use seidrum_common::events::{ChannelInbound, EventEnvelope, EventOrigin};
 
 /// Loaded agent with validation status.
@@ -61,6 +61,48 @@ impl OrchestratorService {
 
             let ext = path.extension().and_then(|e| e.to_str()).unwrap_or("");
             if ext != "yaml" && ext != "yml" {
+                continue;
+            }
+
+            // Try V2 format first (prompt + tools + scope), then fall back to V1 (pipeline)
+            if let Ok(def_file) = load_agent_definition(&path) {
+                let def = def_file.agent;
+                info!(
+                    agent_id = %def.id,
+                    scope = %def.scope,
+                    tools = ?def.tools,
+                    "agent loaded (V2 format)"
+                );
+
+                // For V2 agents, create a minimal AgentConfig for compatibility
+                let agent = AgentConfig {
+                    id: def.id.clone(),
+                    name: def.description.clone().unwrap_or_else(|| def.id.clone()),
+                    description: def.description,
+                    enabled: true,
+                    scope: def.scope,
+                    additional_scopes: def.additional_scopes,
+                    pipeline: seidrum_common::config::Pipeline {
+                        triggers: vec![
+                            "channel.telegram.inbound".to_string(),
+                            "channel.cli.inbound".to_string(),
+                            "channel.email.inbound".to_string(),
+                        ],
+                        steps: vec![],
+                    },
+                    background: None,
+                    rate_limit: None,
+                };
+
+                let mut agents = self.agents.write().await;
+                agents.insert(
+                    agent.id.clone(),
+                    LoadedAgent {
+                        config: agent,
+                        warnings: vec![],
+                    },
+                );
+                loaded_count += 1;
                 continue;
             }
 
@@ -556,13 +598,10 @@ mod tests {
         // Navigate from crate root (CARGO_MANIFEST_DIR) to workspace root agents/
         let agents_dir = format!("{}/../../agents/", env!("CARGO_MANIFEST_DIR"));
         let result = svc.load_agents(&agents_dir).await;
-        // Agent YAMLs are now V2 format (AgentDefinition), which load_agents
-        // does not yet support (it uses V1 AgentConfigFile). The call succeeds
-        // but loads 0 agents because V2 files fail to parse as V1.
-        // TODO: update load_agents to support V2 AgentDefinitionFile format.
+        // Agent YAMLs are V2 format. The orchestrator now supports both V1 and V2.
         assert!(result.is_ok());
         let count = result.unwrap();
-        assert_eq!(count, 0, "V2 agent files should not parse as V1");
+        assert_eq!(count, 2, "Should load 2 V2 agent files");
     }
 
     #[tokio::test]
