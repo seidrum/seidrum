@@ -264,8 +264,9 @@ impl ToolRegistryService {
     }
 
     /// Handle `tool.search.request`: full-text search over summary_md and manual_md.
+    /// Falls back to returning all non-meta tools from cache if ArangoSearch returns empty.
     async fn handle_search(&self, req: ToolSearchRequest) -> ToolSearchResponse {
-        let limit = req.limit.unwrap_or(5);
+        let limit = req.limit.unwrap_or(5) as usize;
         let query = r#"
             FOR doc IN content_search
                 SEARCH ANALYZER(
@@ -283,6 +284,8 @@ impl ToolRegistryService {
                     parameters: doc.parameters
                 }
         "#;
+
+        let mut tools: Vec<ToolSummary> = Vec::new();
 
         match self
             .arango
@@ -302,19 +305,37 @@ impl ToolRegistryService {
                     .cloned()
                     .unwrap_or_default();
 
-                let tools: Vec<ToolSummary> = results
+                tools = results
                     .into_iter()
                     .filter_map(|v| serde_json::from_value(v).ok())
                     .collect();
 
-                debug!(count = tools.len(), "tool search completed");
-                ToolSearchResponse { tools }
+                debug!(count = tools.len(), "tool search via ArangoSearch");
             }
             Err(e) => {
-                error!(error = %e, "tool search AQL failed");
-                ToolSearchResponse { tools: vec![] }
+                warn!(error = %e, "tool search AQL failed, falling back to cache");
             }
         }
+
+        // Fallback: if ArangoSearch returned nothing, return all non-meta tools from cache
+        if tools.is_empty() {
+            let cache = self.tools.read().await;
+            let meta_ids = ["brain-query", "search-tools", "get-tool-manual"];
+            tools = cache
+                .values()
+                .filter(|t| !meta_ids.contains(&t.tool_id.as_str()))
+                .take(limit)
+                .map(|t| ToolSummary {
+                    tool_id: t.tool_id.clone(),
+                    name: t.name.clone(),
+                    summary_md: t.summary_md.clone(),
+                    parameters: t.parameters.clone(),
+                })
+                .collect();
+            debug!(count = tools.len(), "tool search fallback from cache");
+        }
+
+        ToolSearchResponse { tools }
     }
 
     /// Handle `tool.describe.request`: look up a tool by ID from the in-memory cache.

@@ -8,6 +8,20 @@ use crate::gemini_types::{
     GeminiContent, GeminiFunctionDeclaration, GeminiPart, GeminiResponse, GeminiToolDeclaration,
 };
 
+/// Sanitize a tool name for Gemini (replace hyphens with underscores).
+/// Gemini requires: alphanumeric, underscores, dots, colons, dashes — but
+/// the name must start with a letter or underscore. Hyphens in practice
+/// cause issues with some Gemini models, so we normalize to underscores.
+fn sanitize_tool_name(name: &str) -> String {
+    name.replace('-', "_")
+}
+
+/// Reverse the sanitization: convert underscores back to hyphens.
+/// Used when mapping Gemini function calls back to Seidrum tool IDs.
+fn unsanitize_tool_name(name: &str) -> String {
+    name.replace('_', "-")
+}
+
 /// Convert unified messages to Gemini content format.
 ///
 /// Mapping:
@@ -36,7 +50,7 @@ pub fn unified_to_gemini_contents(messages: &[UnifiedMessage]) -> Vec<GeminiCont
         // Add tool calls as function_call parts
         if let Some(tool_calls) = &msg.tool_calls {
             for tc in tool_calls {
-                parts.push(GeminiPart::function_call_part(&tc.name, tc.arguments.clone()));
+                parts.push(GeminiPart::function_call_part(&sanitize_tool_name(&tc.name), tc.arguments.clone()));
             }
         }
 
@@ -44,7 +58,7 @@ pub fn unified_to_gemini_contents(messages: &[UnifiedMessage]) -> Vec<GeminiCont
         if let Some(tool_results) = &msg.tool_results {
             for tr in tool_results {
                 parts.push(GeminiPart::function_response_part(
-                    &tr.tool_call_id,
+                    &sanitize_tool_name(&tr.tool_call_id),
                     serde_json::json!({
                         "result": tr.content,
                         "is_error": tr.is_error,
@@ -73,7 +87,7 @@ pub fn unified_to_gemini_tools(tools: &[ToolSchema]) -> Vec<GeminiToolDeclaratio
     let function_declarations: Vec<GeminiFunctionDeclaration> = tools
         .iter()
         .map(|t| GeminiFunctionDeclaration {
-            name: t.name.clone(),
+            name: sanitize_tool_name(&t.name),
             description: t.description.clone(),
             parameters: t.parameters.clone(),
         })
@@ -140,7 +154,7 @@ pub fn gemini_function_calls_to_tool_calls(parts: &[GeminiPart]) -> Vec<UnifiedT
         .filter_map(|p| {
             p.function_call.as_ref().map(|fc| UnifiedToolCall {
                 id: format!("call_{}", generate_call_id()),
-                name: fc.name.clone(),
+                name: unsanitize_tool_name(&fc.name),
                 arguments: fc.args.clone(),
             })
         })

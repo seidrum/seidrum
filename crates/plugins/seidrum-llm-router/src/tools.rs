@@ -127,7 +127,7 @@ pub async fn query_tool_registry(
                         .tools
                         .into_iter()
                         .map(|t| ToolSchema {
-                            name: t.name,
+                            name: t.tool_id,
                             description: t.summary_md,
                             parameters: t.parameters,
                         })

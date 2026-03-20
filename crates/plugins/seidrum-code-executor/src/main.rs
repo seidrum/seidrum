@@ -1,7 +1,7 @@
 use anyhow::{Context, Result};
 use clap::Parser;
 use futures::StreamExt;
-use seidrum_common::events::{EventEnvelope, PluginRegister};
+use seidrum_common::events::{EventEnvelope, PluginRegister, ToolCallRequest, ToolCallResponse, ToolRegister};
 use serde::{Deserialize, Serialize};
 use std::time::Duration;
 use tokio::process::Command;
@@ -68,7 +68,7 @@ async fn main() -> Result<()> {
         name: PLUGIN_NAME.to_string(),
         version: PLUGIN_VERSION.to_string(),
         description: "Sandboxed code execution as an LLM tool".to_string(),
-        consumes: vec!["tool.code-execute.request".to_string()],
+        consumes: vec!["tool.call.code-executor".to_string()],
         produces: vec![],
         health_subject: format!("plugin.{}.health", PLUGIN_ID),
     };
@@ -91,13 +91,52 @@ async fn main() -> Result<()> {
 
     info!("Plugin registered");
 
-    // Subscribe to tool.code-execute.request using NATS request/reply
-    let mut subscriber = client
-        .subscribe("tool.code-execute.request")
-        .await
-        .context("Failed to subscribe to tool.code-execute.request")?;
+    // Register tool with the kernel's tool registry (raw payload, not wrapped in envelope)
+    let tool_register = serde_json::json!({
+        "tool_id": "execute-code",
+        "plugin_id": PLUGIN_ID,
+        "name": "Execute Code",
+        "summary_md": "Run Python, Bash, or JavaScript code in a sandboxed environment with timeout. Returns stdout, stderr, and exit code.",
+        "manual_md": "# Execute Code\n\nRun code in a sandboxed subprocess.\n\n## Parameters\n- `language` (required): \"python\", \"bash\", or \"javascript\"\n- `code` (required): The source code to execute\n- `timeout_seconds` (optional): Max execution time, default 10, max 30\n\n## Returns\n- `stdout`: Standard output\n- `stderr`: Standard error\n- `exit_code`: Process exit code (0 = success)\n- `timed_out`: Whether execution was killed due to timeout",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "language": {
+                    "type": "string",
+                    "enum": ["python", "bash", "javascript"],
+                    "description": "Programming language to execute"
+                },
+                "code": {
+                    "type": "string",
+                    "description": "Source code to execute"
+                },
+                "timeout_seconds": {
+                    "type": "integer",
+                    "description": "Max execution time in seconds (default 10, max 30)"
+                }
+            },
+            "required": ["language", "code"]
+        },
+        "call_subject": "tool.call.code-executor"
+    });
 
-    info!("Subscribed to tool.code-execute.request, waiting for requests...");
+    client
+        .publish(
+            "tool.register",
+            serde_json::to_vec(&tool_register)?.into(),
+        )
+        .await
+        .context("Failed to publish tool.register")?;
+
+    info!("Tool 'execute-code' registered with kernel");
+
+    // Subscribe to tool.call.code-executor using NATS request/reply
+    let mut subscriber = client
+        .subscribe("tool.call.code-executor")
+        .await
+        .context("Failed to subscribe to tool.call.code-executor")?;
+
+    info!("Subscribed to tool.call.code-executor, waiting for requests...");
 
     while let Some(msg) = subscriber.next().await {
         let reply = match msg.reply {
@@ -108,15 +147,15 @@ async fn main() -> Result<()> {
             }
         };
 
-        let request: CodeExecuteRequest = match serde_json::from_slice(&msg.payload) {
+        // Parse the unified ToolCallRequest
+        let tool_request: ToolCallRequest = match serde_json::from_slice(&msg.payload) {
             Ok(r) => r,
             Err(err) => {
-                warn!(%err, "Failed to deserialize code-execute request");
-                let error_response = CodeExecuteResponse {
-                    stdout: String::new(),
-                    stderr: format!("Invalid request payload: {}", err),
-                    exit_code: -1,
-                    timed_out: false,
+                warn!(%err, "Failed to deserialize ToolCallRequest");
+                let error_response = ToolCallResponse {
+                    tool_id: "execute-code".to_string(),
+                    result: serde_json::json!({"error": format!("Invalid request: {}", err)}),
+                    is_error: true,
                 };
                 if let Err(e) = client
                     .publish(reply, serde_json::to_vec(&error_response)?.into())
@@ -126,6 +165,21 @@ async fn main() -> Result<()> {
                 }
                 continue;
             }
+        };
+
+        // Extract code execution params from arguments
+        let request = CodeExecuteRequest {
+            language: tool_request.arguments.get("language")
+                .and_then(|v| v.as_str())
+                .unwrap_or("bash")
+                .to_string(),
+            code: tool_request.arguments.get("code")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_string(),
+            timeout_seconds: tool_request.arguments.get("timeout_seconds")
+                .and_then(|v| v.as_u64())
+                .unwrap_or(DEFAULT_TIMEOUT_SECONDS),
         };
 
         info!(
@@ -142,11 +196,18 @@ async fn main() -> Result<()> {
             "Code execution completed"
         );
 
+        // Return as unified ToolCallResponse
+        let tool_response = ToolCallResponse {
+            tool_id: tool_request.tool_id,
+            result: serde_json::to_value(&response)?,
+            is_error: response.exit_code != 0,
+        };
+
         if let Err(err) = client
-            .publish(reply, serde_json::to_vec(&response)?.into())
+            .publish(reply, serde_json::to_vec(&tool_response)?.into())
             .await
         {
-            error!(%err, "Failed to publish code execution reply");
+            error!(%err, "Failed to publish tool call reply");
         }
     }
 
@@ -225,8 +286,7 @@ async fn try_execute_with_isolation(
     // If unshare failed with a permission error, retry without isolation
     if use_isolation
         && result.exit_code != 0
-        && result.stderr.contains("unshare")
-        && result.stderr.contains("ermission")
+        && (result.stderr.contains("unshare") || result.stderr.contains("Operation not permitted"))
     {
         info!("unshare failed with permission error, retrying without isolation");
         let child = Command::new(program)
