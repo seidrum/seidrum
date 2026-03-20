@@ -73,6 +73,10 @@ pub struct Attachment {
     pub file_id: Option<String>,
     pub mime_type: String,
     pub size_bytes: u64,
+    /// Base64-encoded content for inline transfer (e.g., images).
+    /// Optional to avoid bloating events that only reference files by ID.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub data: Option<String>,
 }
 
 /// Response from agent back to a channel plugin.
@@ -599,6 +603,7 @@ mod tests {
                 file_id: None,
                 mime_type: "image/png".to_string(),
                 size_bytes: 1024,
+                data: None,
             }],
             metadata: HashMap::from([("lang".to_string(), "en".to_string())]),
         };

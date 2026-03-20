@@ -20,3 +20,7 @@ anyhow = "1"
 chrono = { version = "0.4", features = ["serde"] }
 teloxide = { version = "0.13", features = ["macros"] }
 futures = "0.3"
+fancy-regex = "0.14"
+tempfile = "3"
+reqwest = { version = "0.12", features = ["rustls-tls", "json"] }
+base64 = "0.22"
