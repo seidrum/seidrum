@@ -17,5 +17,7 @@ members = [
     "crates/plugins/seidrum-notification",
     "crates/plugins/seidrum-email",
     "crates/plugins/seidrum-calendar",
+    "crates/plugins/seidrum-tool-dispatcher",
+    "crates/plugins/seidrum-llm-google",
 ]
 resolver = "2"

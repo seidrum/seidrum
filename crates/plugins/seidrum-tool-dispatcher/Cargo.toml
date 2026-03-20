@@ -1,10 +1,10 @@
 [package]
-name = "seidrum-llm-router"
-version = "0.2.0"
+name = "seidrum-tool-dispatcher"
+version = "0.1.0"
 edition = "2021"
 
 [[bin]]
-name = "seidrum-llm-router"
+name = "seidrum-tool-dispatcher"
 path = "src/main.rs"
 
 [dependencies]
@@ -17,7 +17,4 @@ tracing = "0.1"
 tracing-subscriber = "0.3"
 clap = { version = "4", features = ["derive", "env"] }
 anyhow = "1"
-chrono = { version = "0.4", features = ["serde"] }
 futures = "0.3"
-tera = "1"
-tiktoken-rs = "0.6"

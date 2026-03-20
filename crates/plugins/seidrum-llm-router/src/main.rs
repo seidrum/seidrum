@@ -10,8 +10,11 @@ use clap::Parser;
 use serde::{Deserialize, Serialize};
 use tracing::{error, info, warn};
 
+use seidrum_common::events::{
+    LlmCallConfig, LlmResponse, TokenUsage, UnifiedLlmRequest, UnifiedMessage,
+};
+
 use context_assembly::{assemble_context, ContextConfig};
-use tools::{GeminiTool, GeminiToolUse, ToolResult};
 
 // ---------------------------------------------------------------------------
 // CLI args
@@ -24,17 +27,9 @@ struct Cli {
     #[arg(long, env = "NATS_URL", default_value = "nats://localhost:4222")]
     nats_url: String,
 
-    /// Google API key (falls back to OpenClaw auth-profiles.json)
-    #[arg(long, env = "GOOGLE_API_KEY")]
-    google_api_key: Option<String>,
-
-    /// Model to use
-    #[arg(long, env = "LLM_MODEL", default_value = "gemini-2.5-flash")]
-    model: String,
-
-    /// Max tokens for response
-    #[arg(long, env = "LLM_MAX_TOKENS", default_value = "4096")]
-    max_tokens: u32,
+    /// Default LLM provider to use
+    #[arg(long, env = "LLM_PROVIDER", default_value = "google")]
+    provider: String,
 
     /// Path to the Tera prompt template file
     #[arg(long, env = "LLM_PROMPT_PATH", default_value = "./prompts/assistant.md")]
@@ -44,13 +39,17 @@ struct Cli {
     #[arg(long, env = "LLM_MAX_CONTEXT_TOKENS", default_value = "100000")]
     max_context_tokens: usize,
 
-    /// Maximum number of tool call rounds before forcing a final response
-    #[arg(long, env = "LLM_MAX_TOOL_ROUNDS", default_value = "10")]
-    max_tool_rounds: u32,
+    /// Max tokens for response
+    #[arg(long, env = "LLM_MAX_TOKENS", default_value = "4096")]
+    max_tokens: u32,
 
-    /// Maximum number of dynamic tools loaded from brain (0 = pinned only)
+    /// Maximum number of dynamic tools loaded from registry (0 = meta only)
     #[arg(long, env = "LLM_MAX_DYNAMIC_TOOLS", default_value = "5")]
     max_dynamic_tools: u32,
+
+    /// Timeout in seconds for the LLM provider request
+    #[arg(long, env = "LLM_PROVIDER_TIMEOUT", default_value = "120")]
+    provider_timeout: u64,
 }
 
 // ---------------------------------------------------------------------------
@@ -103,199 +102,6 @@ struct AgentContextLoaded {
 }
 
 // ---------------------------------------------------------------------------
-// LLM response event (published to NATS)
-// ---------------------------------------------------------------------------
-
-#[derive(Serialize, Deserialize, Debug, Clone)]
-struct LlmResponse {
-    agent_id: String,
-    content: Option<String>,
-    tool_calls: Option<Vec<serde_json::Value>>,
-    model_used: String,
-    provider: String,
-    tokens: TokenUsage,
-    duration_ms: u64,
-    finish_reason: String,
-}
-
-#[derive(Serialize, Deserialize, Debug, Clone)]
-struct TokenUsage {
-    prompt_tokens: u32,
-    completion_tokens: u32,
-    total_tokens: u32,
-    estimated_cost_usd: f64,
-}
-
-// ---------------------------------------------------------------------------
-// Gemini API types (reqwest, no SDK)
-// ---------------------------------------------------------------------------
-
-#[derive(Serialize, Debug)]
-#[serde(rename_all = "camelCase")]
-struct GeminiRequest {
-    contents: Vec<GeminiContent>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    system_instruction: Option<GeminiSystemInstruction>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    generation_config: Option<GeminiGenerationConfig>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    tools: Option<Vec<GeminiToolDeclaration>>,
-}
-
-#[derive(Serialize, Debug)]
-struct GeminiSystemInstruction {
-    parts: Vec<GeminiPart>,
-}
-
-#[derive(Serialize, Debug)]
-#[serde(rename_all = "camelCase")]
-struct GeminiGenerationConfig {
-    #[serde(skip_serializing_if = "Option::is_none")]
-    temperature: Option<f32>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    max_output_tokens: Option<u32>,
-}
-
-/// Gemini tool declaration wrapper.
-#[derive(Serialize, Debug, Clone)]
-#[serde(rename_all = "camelCase")]
-struct GeminiToolDeclaration {
-    function_declarations: Vec<GeminiFunctionDeclaration>,
-}
-
-/// A single function declaration in Gemini format.
-#[derive(Serialize, Debug, Clone)]
-struct GeminiFunctionDeclaration {
-    name: String,
-    description: String,
-    parameters: serde_json::Value,
-}
-
-/// Gemini message content (used for both request and response).
-#[derive(Serialize, Deserialize, Debug, Clone)]
-struct GeminiContent {
-    role: String,
-    parts: Vec<GeminiPart>,
-}
-
-/// A part in a Gemini message. Can be text, functionCall, or functionResponse.
-#[derive(Serialize, Deserialize, Debug, Clone)]
-#[serde(rename_all = "camelCase")]
-struct GeminiPart {
-    #[serde(skip_serializing_if = "Option::is_none")]
-    text: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    function_call: Option<GeminiFunctionCall>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    function_response: Option<GeminiFunctionResponse>,
-}
-
-#[derive(Serialize, Deserialize, Debug, Clone)]
-struct GeminiFunctionCall {
-    name: String,
-    args: serde_json::Value,
-}
-
-#[derive(Serialize, Deserialize, Debug, Clone)]
-struct GeminiFunctionResponse {
-    name: String,
-    response: serde_json::Value,
-}
-
-impl GeminiContent {
-    /// Create a simple text message.
-    fn text(role: &str, content: &str) -> Self {
-        Self {
-            role: role.to_string(),
-            parts: vec![GeminiPart {
-                text: Some(content.to_string()),
-                function_call: None,
-                function_response: None,
-            }],
-        }
-    }
-
-    /// Extract plain text content from the first text part.
-    fn text_content(&self) -> Option<&str> {
-        self.parts.iter().find_map(|p| p.text.as_deref())
-    }
-}
-
-// Gemini API response types
-
-#[derive(Deserialize, Debug)]
-struct GeminiResponse {
-    #[serde(default)]
-    candidates: Vec<GeminiCandidate>,
-    #[serde(rename = "usageMetadata")]
-    usage_metadata: Option<GeminiUsageMetadata>,
-    #[serde(default)]
-    error: Option<GeminiErrorDetail>,
-}
-
-#[derive(Deserialize, Debug)]
-#[serde(rename_all = "camelCase")]
-struct GeminiCandidate {
-    content: GeminiContent,
-    #[serde(default)]
-    finish_reason: Option<String>,
-}
-
-#[derive(Deserialize, Debug)]
-#[serde(rename_all = "camelCase")]
-struct GeminiUsageMetadata {
-    #[serde(default)]
-    prompt_token_count: u32,
-    #[serde(default)]
-    candidates_token_count: u32,
-    #[serde(default)]
-    total_token_count: u32,
-}
-
-#[derive(Deserialize, Debug)]
-struct GeminiErrorDetail {
-    message: String,
-    #[serde(default)]
-    code: Option<i32>,
-}
-
-// ---------------------------------------------------------------------------
-// API key resolution
-// ---------------------------------------------------------------------------
-
-/// Resolve the Google API key from env var or OpenClaw auth-profiles.json fallback.
-fn resolve_google_api_key(cli_key: &Option<String>) -> Result<String> {
-    // 1. CLI arg / env var
-    if let Some(key) = cli_key {
-        if !key.is_empty() {
-            info!("Using Google API key from GOOGLE_API_KEY env var");
-            return Ok(key.clone());
-        }
-    }
-
-    // 2. OpenClaw auth-profiles.json fallback
-    let auth_path = dirs::home_dir()
-        .map(|h| h.join(".openclaw/agents/main/agent/auth-profiles.json"))
-        .ok_or_else(|| anyhow::anyhow!("Could not determine home directory"))?;
-
-    let content = std::fs::read_to_string(&auth_path)
-        .map_err(|e| anyhow::anyhow!("Failed to read OpenClaw auth-profiles.json at {}: {}", auth_path.display(), e))?;
-
-    let profiles: serde_json::Value = serde_json::from_str(&content)
-        .map_err(|e| anyhow::anyhow!("Failed to parse OpenClaw auth-profiles.json: {}", e))?;
-
-    let key = profiles
-        .get("profiles")
-        .and_then(|p| p.get("google:default"))
-        .and_then(|v| v.get("key"))
-        .and_then(|v| v.as_str())
-        .ok_or_else(|| anyhow::anyhow!("No google:default.key found in OpenClaw auth-profiles.json"))?;
-
-    info!("Using Google API key from OpenClaw auth-profiles.json");
-    Ok(key.to_string())
-}
-
-// ---------------------------------------------------------------------------
 // Main
 // ---------------------------------------------------------------------------
 
@@ -305,10 +111,11 @@ async fn main() -> Result<()> {
 
     let cli = Cli::parse();
 
-    info!(nats_url = %cli.nats_url, model = %cli.model, "Starting seidrum-llm-router plugin...");
-
-    // Resolve API key
-    let api_key = resolve_google_api_key(&cli.google_api_key)?;
+    info!(
+        nats_url = %cli.nats_url,
+        provider = %cli.provider,
+        "Starting seidrum-llm-router plugin..."
+    );
 
     // Connect to NATS
     let nats = async_nats::connect(&cli.nats_url).await?;
@@ -318,8 +125,8 @@ async fn main() -> Result<()> {
     let register = serde_json::json!({
         "id": "llm-router",
         "name": "LLM Router",
-        "version": "0.1.0",
-        "description": "Routes messages to LLM providers and publishes responses",
+        "version": "0.2.0",
+        "description": "Provider-agnostic LLM router — assembles context, queries tool registry, dispatches to provider plugins",
         "consumes": ["agent.context.loaded", "channel.*.inbound"],
         "produces": ["llm.response"],
         "health_subject": "plugin.llm-router.health",
@@ -348,22 +155,17 @@ async fn main() -> Result<()> {
         }
     };
 
-    // Build the HTTP client once
-    let http = reqwest::Client::new();
-
-    // Merge both subscription streams into a single processing loop
+    // Shared state
     let nats_pub = nats.clone();
-    let model = cli.model.clone();
+    let provider = cli.provider.clone();
     let max_tokens = cli.max_tokens;
     let max_context_tokens = cli.max_context_tokens;
-    let max_tool_rounds = cli.max_tool_rounds;
     let max_dynamic_tools = cli.max_dynamic_tools;
+    let provider_timeout = cli.provider_timeout;
 
-    // We spawn two tasks: one per subscription. Both share the same processing logic.
-    let http1 = http.clone();
-    let api_key1 = api_key.clone();
-    let model1 = model.clone();
+    // Spawn two tasks: one per subscription
     let nats1 = nats_pub.clone();
+    let provider1 = provider.clone();
     let prompt_template1 = prompt_template.clone();
 
     let handle_context = tokio::spawn(async move {
@@ -374,13 +176,11 @@ async fn main() -> Result<()> {
             if let Err(e) = handle_message(
                 &msg.payload,
                 &msg.subject,
-                &http1,
-                &api_key1,
-                &model1,
+                &provider1,
                 max_tokens,
                 max_context_tokens,
-                max_tool_rounds,
                 max_dynamic_tools,
+                provider_timeout,
                 &prompt_template1,
                 &nats1,
             )
@@ -397,13 +197,11 @@ async fn main() -> Result<()> {
             if let Err(e) = handle_message(
                 &msg.payload,
                 &msg.subject,
-                &http,
-                &api_key,
-                &model,
+                &provider,
                 max_tokens,
                 max_context_tokens,
-                max_tool_rounds,
                 max_dynamic_tools,
+                provider_timeout,
                 &prompt_template,
                 &nats_pub,
             )
@@ -414,7 +212,7 @@ async fn main() -> Result<()> {
         }
     });
 
-    // Wait for both tasks (they run forever unless NATS disconnects)
+    // Wait for both tasks
     tokio::select! {
         r = handle_context => { if let Err(e) = r { error!(error = %e, "context handler panicked"); } }
         r = handle_inbound => { if let Err(e) = r { error!(error = %e, "inbound handler panicked"); } }
@@ -438,13 +236,11 @@ async fn futures_next(
 async fn handle_message(
     payload: &[u8],
     subject: &str,
-    http: &reqwest::Client,
-    api_key: &str,
-    model: &str,
+    provider: &str,
     max_tokens: u32,
     max_context_tokens: usize,
-    max_tool_rounds: u32,
     max_dynamic_tools: u32,
+    provider_timeout: u64,
     prompt_template: &str,
     nats: &async_nats::Client,
 ) -> Result<()> {
@@ -455,6 +251,7 @@ async fn handle_message(
         .correlation_id
         .clone()
         .or_else(|| Some(envelope.id.clone()));
+    let scope = envelope.scope.clone();
 
     // Branch based on event type
     let (system_prompt, messages, agent_id, user_text_for_tools) =
@@ -489,11 +286,23 @@ async fn handle_message(
                 "Context assembled from agent.context.loaded"
             );
 
-            (Some(assembled.system_prompt), assembled.messages, agent_id, user_text)
+            // Convert assembled messages to UnifiedMessage format
+            let unified_msgs: Vec<UnifiedMessage> = assembled
+                .messages
+                .iter()
+                .map(|m| UnifiedMessage {
+                    role: m.role.clone(),
+                    content: Some(m.content.clone()),
+                    tool_calls: None,
+                    tool_results: None,
+                })
+                .collect();
+
+            (Some(assembled.system_prompt), unified_msgs, agent_id, user_text)
         } else {
-            // Simple path for channel.*.inbound — just the user message
+            // Simple path for channel.*.inbound -- just the user message
             let inbound: ChannelInbound = serde_json::from_value(envelope.payload)?;
-            let agent_id = envelope.scope.unwrap_or_else(|| "default".to_string());
+            let agent_id = scope.clone().unwrap_or_else(|| "default".to_string());
 
             if inbound.text.is_empty() {
                 warn!(subject = %subject, "Empty user text, skipping");
@@ -501,228 +310,149 @@ async fn handle_message(
             }
 
             let user_text = inbound.text.clone();
-            let msgs = vec![GeminiContent::text("user", &inbound.text)];
+            let msgs = vec![UnifiedMessage {
+                role: "user".to_string(),
+                content: Some(inbound.text),
+                tool_calls: None,
+                tool_results: None,
+            }];
 
             (None, msgs, agent_id, user_text)
         };
 
-    // Collect tools (pinned + dynamic from brain)
-    let api_tools = tools::collect_tools(nats, &user_text_for_tools, max_dynamic_tools).await;
-    let tools_option = if api_tools.is_empty() {
-        None
-    } else {
-        // Convert GeminiTool list to Gemini tool declaration format
-        let function_declarations: Vec<GeminiFunctionDeclaration> = api_tools
-            .iter()
-            .map(|t| GeminiFunctionDeclaration {
-                name: t.name.clone(),
-                description: t.description.clone(),
-                parameters: t.parameters.clone(),
-            })
-            .collect();
-        Some(vec![GeminiToolDeclaration { function_declarations }])
-    };
-
-    // -----------------------------------------------------------------------
-    // Tool call loop: call LLM, execute tools, repeat until content or max rounds
-    // -----------------------------------------------------------------------
-    let mut messages = messages;
-    let mut total_input_tokens: u32 = 0;
-    let mut total_output_tokens: u32 = 0;
-    let mut final_model = model.to_string();
-    let mut final_finish_reason = "unknown".to_string();
-    let mut final_content: Option<String> = None;
-    let mut final_tool_calls: Option<Vec<serde_json::Value>> = None;
-    let start = Instant::now();
-
-    for round in 0..=max_tool_rounds {
-        info!(round, "LLM call round");
-
-        let system_instruction = system_prompt.as_ref().map(|s| GeminiSystemInstruction {
-            parts: vec![GeminiPart {
-                text: Some(s.clone()),
-                function_call: None,
-                function_response: None,
-            }],
-        });
-
-        let api_request = GeminiRequest {
-            contents: messages.clone(),
-            system_instruction,
-            generation_config: Some(GeminiGenerationConfig {
-                temperature: Some(0.7),
-                max_output_tokens: Some(max_tokens),
-            }),
-            tools: tools_option.clone(),
-        };
-
-        let url = format!(
-            "https://generativelanguage.googleapis.com/v1beta/models/{}:generateContent?key={}",
-            model, api_key
-        );
-
-        let response = http
-            .post(&url)
-            .header("content-type", "application/json")
-            .json(&api_request)
-            .send()
-            .await?;
-
-        let status = response.status();
-        let body_bytes = response.bytes().await?;
-
-        if !status.is_success() {
-            let err_msg = match serde_json::from_slice::<GeminiResponse>(&body_bytes) {
-                Ok(resp) => {
-                    if let Some(err) = resp.error {
-                        format!("code {:?}: {}", err.code, err.message)
-                    } else {
-                        String::from_utf8_lossy(&body_bytes).to_string()
-                    }
-                }
-                Err(_) => String::from_utf8_lossy(&body_bytes).to_string(),
-            };
-            anyhow::bail!("Gemini API error ({}): {}", status, err_msg);
+    // Query tool registry for available tools
+    let mut tool_schemas = tools::meta_tools();
+    let registry_tools = tools::query_tool_registry(nats, &user_text_for_tools, max_dynamic_tools).await;
+    // Deduplicate: only add registry tools whose names don't collide with meta tools
+    let meta_names: Vec<String> = tool_schemas.iter().map(|t| t.name.clone()).collect();
+    for t in registry_tools {
+        if !meta_names.contains(&t.name) {
+            tool_schemas.push(t);
         }
-
-        let api_response: GeminiResponse = serde_json::from_slice(&body_bytes)?;
-
-        if let Some(usage) = &api_response.usage_metadata {
-            total_input_tokens += usage.prompt_token_count;
-            total_output_tokens += usage.candidates_token_count;
-        }
-
-        let candidate = api_response.candidates.first()
-            .ok_or_else(|| anyhow::anyhow!("No candidates in Gemini response"))?;
-
-        final_finish_reason = candidate
-            .finish_reason
-            .clone()
-            .unwrap_or_else(|| "unknown".to_string());
-
-        info!(
-            model = %model,
-            input_tokens = total_input_tokens,
-            output_tokens = total_output_tokens,
-            finish_reason = %final_finish_reason,
-            round,
-            "Gemini API response received"
-        );
-
-        // Extract text content from parts
-        let content_text: String = candidate
-            .content
-            .parts
-            .iter()
-            .filter_map(|p| p.text.as_deref())
-            .collect::<Vec<_>>()
-            .join("\n");
-
-        // Extract functionCall parts
-        let tool_uses: Vec<GeminiToolUse> = candidate
-            .content
-            .parts
-            .iter()
-            .filter_map(|p| {
-                p.function_call.as_ref().map(|fc| GeminiToolUse {
-                    id: format!("call_{}", generate_ulid()),
-                    name: fc.name.clone(),
-                    args: fc.args.clone(),
-                })
-            })
-            .collect();
-
-        if tool_uses.is_empty() || round == max_tool_rounds {
-            // No tool calls or we've hit max rounds -- we're done
-            if round == max_tool_rounds && !tool_uses.is_empty() {
-                warn!(
-                    max_rounds = max_tool_rounds,
-                    "Hit maximum tool call rounds, returning partial content"
-                );
-            }
-            final_content = if content_text.is_empty() {
-                None
-            } else {
-                Some(content_text)
-            };
-            break;
-        }
-
-        // There are tool calls -- execute them and continue the loop
-        info!(
-            tool_count = tool_uses.len(),
-            round, "Executing tool calls"
-        );
-
-        // Append the model's response (with functionCall parts) to messages
-        messages.push(candidate.content.clone());
-
-        // Execute all tool calls and build functionResponse parts
-        let mut response_parts: Vec<GeminiPart> = Vec::new();
-        for tool_use in &tool_uses {
-            let result = tools::execute_tool_call(tool_use, nats).await;
-            response_parts.push(GeminiPart {
-                text: None,
-                function_call: None,
-                function_response: Some(GeminiFunctionResponse {
-                    name: tool_use.name.clone(),
-                    response: serde_json::json!({
-                        "result": result.content,
-                        "is_error": result.is_error,
-                    }),
-                }),
-            });
-        }
-
-        // Record tool calls for the LlmResponse event
-        final_tool_calls = Some(
-            tool_uses
-                .iter()
-                .map(|tu| {
-                    serde_json::json!({
-                        "id": tu.id,
-                        "function_name": tu.name,
-                        "arguments": serde_json::to_string(&tu.args).unwrap_or_default()
-                    })
-                })
-                .collect(),
-        );
-
-        // Append tool results as a user message with functionResponse parts
-        messages.push(GeminiContent {
-            role: "user".to_string(),
-            parts: response_parts,
-        });
     }
 
-    let duration_ms = start.elapsed().as_millis() as u64;
-    let total_tokens = total_input_tokens + total_output_tokens;
+    info!(tool_count = tool_schemas.len(), "Tools collected for LLM request");
 
-    // Build llm.response event
-    let llm_response = LlmResponse {
-        agent_id,
-        content: final_content,
-        tool_calls: final_tool_calls,
-        model_used: final_model,
-        provider: "google".to_string(),
-        tokens: TokenUsage {
-            prompt_tokens: total_input_tokens,
-            completion_tokens: total_output_tokens,
-            total_tokens,
-            estimated_cost_usd: 0.0, // Cost tracking deferred to future iteration
+    // Build UnifiedLlmRequest
+    let unified_request = UnifiedLlmRequest {
+        agent_id: agent_id.clone(),
+        messages,
+        system_prompt,
+        tools: tool_schemas,
+        config: LlmCallConfig {
+            temperature: Some(0.7),
+            max_tokens: Some(max_tokens),
+            top_p: None,
         },
-        duration_ms,
-        finish_reason: final_finish_reason,
+        routing_strategy: "best-first".to_string(),
+        model_preferences: vec![],
+        correlation_id: correlation_id.clone(),
+        scope: scope.clone(),
     };
 
-    // Wrap in EventEnvelope
+    // Send to provider via NATS request/reply
+    let provider_subject = format!("llm.provider.{}", provider);
+    let request_bytes = serde_json::to_vec(&unified_request)?;
+
+    info!(
+        provider = %provider,
+        subject = %provider_subject,
+        "Dispatching to LLM provider"
+    );
+
+    let start = Instant::now();
+
+    let provider_response = tokio::time::timeout(
+        std::time::Duration::from_secs(provider_timeout),
+        nats.request(provider_subject.clone(), request_bytes.into()),
+    )
+    .await;
+
+    let duration_ms = start.elapsed().as_millis() as u64;
+
+    let llm_response: LlmResponse = match provider_response {
+        Ok(Ok(resp_msg)) => {
+            match serde_json::from_slice::<LlmResponse>(&resp_msg.payload) {
+                Ok(resp) => {
+                    info!(
+                        provider = %provider,
+                        model = %resp.model_used,
+                        duration_ms,
+                        tokens = resp.tokens.total_tokens,
+                        "LLM provider response received"
+                    );
+                    resp
+                }
+                Err(e) => {
+                    error!(error = %e, "Failed to parse LLM provider response");
+                    LlmResponse {
+                        agent_id: agent_id.clone(),
+                        content: Some(format!("Error: failed to parse provider response: {}", e)),
+                        tool_calls: None,
+                        model_used: "unknown".to_string(),
+                        provider: provider.to_string(),
+                        tokens: TokenUsage {
+                            prompt_tokens: 0,
+                            completion_tokens: 0,
+                            total_tokens: 0,
+                            estimated_cost_usd: 0.0,
+                        },
+                        duration_ms,
+                        finish_reason: "error".to_string(),
+                    }
+                }
+            }
+        }
+        Ok(Err(e)) => {
+            error!(error = %e, provider = %provider, "NATS request to LLM provider failed");
+            LlmResponse {
+                agent_id: agent_id.clone(),
+                content: Some(format!("Error: LLM provider request failed: {}", e)),
+                tool_calls: None,
+                model_used: "unknown".to_string(),
+                provider: provider.to_string(),
+                tokens: TokenUsage {
+                    prompt_tokens: 0,
+                    completion_tokens: 0,
+                    total_tokens: 0,
+                    estimated_cost_usd: 0.0,
+                },
+                duration_ms,
+                finish_reason: "error".to_string(),
+            }
+        }
+        Err(_) => {
+            error!(
+                provider = %provider,
+                timeout_secs = provider_timeout,
+                "LLM provider request timed out"
+            );
+            LlmResponse {
+                agent_id: agent_id.clone(),
+                content: Some("Error: LLM provider request timed out".to_string()),
+                tool_calls: None,
+                model_used: "unknown".to_string(),
+                provider: provider.to_string(),
+                tokens: TokenUsage {
+                    prompt_tokens: 0,
+                    completion_tokens: 0,
+                    total_tokens: 0,
+                    estimated_cost_usd: 0.0,
+                },
+                duration_ms,
+                finish_reason: "timeout".to_string(),
+            }
+        }
+    };
+
+    // Publish llm.response event (same format as before for downstream compatibility)
     let out_envelope = EventEnvelope {
         id: generate_ulid(),
         event_type: "llm.response".to_string(),
         timestamp: Utc::now(),
         source: "llm-router".to_string(),
         correlation_id,
-        scope: None,
+        scope,
         payload: serde_json::to_value(&llm_response)?,
     };
 
@@ -740,7 +470,6 @@ async fn handle_message(
 // ---------------------------------------------------------------------------
 
 /// Generate a simple time-based unique ID (ULID-like).
-/// Uses timestamp + random suffix. A proper ULID crate can be added later.
 fn generate_ulid() -> String {
     use std::time::{SystemTime, UNIX_EPOCH};
     let ts = SystemTime::now()
@@ -764,7 +493,6 @@ fn rand_u64() -> u64 {
         );
     }
     STATE.with(|s| {
-        // xorshift64
         let mut x = s.get();
         x ^= x << 13;
         x ^= x >> 7;

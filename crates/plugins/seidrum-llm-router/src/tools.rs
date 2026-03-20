@@ -1,308 +1,153 @@
-//! Tool registry and tool call execution for the LLM router.
+//! Tool registry queries for the LLM router.
 //!
-//! - Registers built-in tools (brain-query).
-//! - Queries the brain for dynamically available tools via vector search.
-//! - Builds tool schemas in Gemini API format.
-//! - Executes tool calls by dispatching to the appropriate handler.
+//! - Provides meta_tools() for the 3 always-available tools.
+//! - Queries the tool registry via NATS request/reply to discover dynamic tools.
+//! - No tool execution code (that's handled by the provider + tool-dispatcher).
 
-use std::collections::HashMap;
 use std::time::Duration;
 
-use anyhow::{Context, Result};
-use serde::{Deserialize, Serialize};
-use tracing::{debug, error, info, warn};
+use tracing::{debug, warn};
+
+use seidrum_common::events::{ToolSchema, ToolSearchRequest, ToolSearchResponse};
 
 // ---------------------------------------------------------------------------
-// Gemini tool format types
+// Meta tools (always available)
 // ---------------------------------------------------------------------------
 
-/// Tool definition in the Gemini API format.
-#[derive(Serialize, Deserialize, Debug, Clone)]
-pub struct GeminiTool {
-    pub name: String,
-    pub description: String,
-    pub parameters: serde_json::Value,
-}
-
-/// A functionCall extracted from a Gemini API response.
-#[derive(Serialize, Deserialize, Debug, Clone)]
-pub struct GeminiToolUse {
-    pub id: String,
-    pub name: String,
-    pub args: serde_json::Value,
-}
-
-/// Result of executing a single tool call.
-#[derive(Debug, Clone)]
-pub struct ToolResult {
-    pub tool_use_id: String,
-    pub content: String,
-    pub is_error: bool,
-}
-
-// ---------------------------------------------------------------------------
-// Built-in tool definitions
-// ---------------------------------------------------------------------------
-
-/// Return the built-in brain-query tool schema in Gemini format.
-pub fn brain_query_tool() -> GeminiTool {
-    GeminiTool {
-        name: "brain-query".to_string(),
-        description: "Query your knowledge graph. Use AQL syntax to search entities, facts, content, and relationships stored in the brain.".to_string(),
-        parameters: serde_json::json!({
-            "type": "object",
-            "properties": {
-                "description": {
-                    "type": "string",
-                    "description": "What you want to find"
-                },
-                "aql": {
-                    "type": "string",
-                    "description": "AQL query to execute against the brain"
-                }
-            },
-            "required": ["description", "aql"]
-        }),
-    }
-}
-
-/// Return the list of pinned (always-included) tools.
-pub fn pinned_tools() -> Vec<GeminiTool> {
-    vec![brain_query_tool()]
-}
-
-// ---------------------------------------------------------------------------
-// Dynamic tool discovery via brain vector search
-// ---------------------------------------------------------------------------
-
-/// Query the brain for tools relevant to the user's message.
+/// Return the 3 always-available meta tools as ToolSchema.
 ///
-/// Sends a `brain.query.request` with `query_type: "vector_search"` over the
-/// `tools` collection. Returns any tool schemas found, converted to Gemini
-/// format.
-pub async fn query_dynamic_tools(
+/// These are provider-agnostic and always included in every LLM request:
+/// 1. brain-query: Query the knowledge graph
+/// 2. task-create: Create a new task
+/// 3. web-search: Search the web
+pub fn meta_tools() -> Vec<ToolSchema> {
+    vec![
+        ToolSchema {
+            name: "brain-query".to_string(),
+            description: "Query your knowledge graph. Use AQL syntax to search entities, facts, content, and relationships stored in the brain.".to_string(),
+            parameters: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "description": {
+                        "type": "string",
+                        "description": "What you want to find"
+                    },
+                    "aql": {
+                        "type": "string",
+                        "description": "AQL query to execute against the brain"
+                    }
+                },
+                "required": ["description", "aql"]
+            }),
+        },
+        ToolSchema {
+            name: "task-create".to_string(),
+            description: "Create a new task to track an actionable item. The task will be stored in the brain and can be assigned to an agent.".to_string(),
+            parameters: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "title": {
+                        "type": "string",
+                        "description": "Short title for the task"
+                    },
+                    "description": {
+                        "type": "string",
+                        "description": "Detailed description of what needs to be done"
+                    },
+                    "priority": {
+                        "type": "string",
+                        "enum": ["low", "normal", "high", "critical"],
+                        "description": "Task priority level"
+                    },
+                    "due_date": {
+                        "type": "string",
+                        "description": "Due date in ISO 8601 format (optional)"
+                    }
+                },
+                "required": ["title"]
+            }),
+        },
+        ToolSchema {
+            name: "web-search".to_string(),
+            description: "Search the web for current information. Use this when you need up-to-date data that may not be in the knowledge graph.".to_string(),
+            parameters: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "query": {
+                        "type": "string",
+                        "description": "The search query"
+                    },
+                    "max_results": {
+                        "type": "integer",
+                        "description": "Maximum number of results to return (default: 5)"
+                    }
+                },
+                "required": ["query"]
+            }),
+        },
+    ]
+}
+
+// ---------------------------------------------------------------------------
+// Tool registry query via NATS
+// ---------------------------------------------------------------------------
+
+/// Query the tool registry for tools relevant to the user's message.
+///
+/// Sends a ToolSearchRequest via NATS request/reply to "tool.search.request".
+/// Returns discovered tools as Vec<ToolSchema>.
+pub async fn query_tool_registry(
     nats: &async_nats::Client,
     message_text: &str,
-    max_dynamic_tools: u32,
-) -> Vec<GeminiTool> {
-    // We use a get_context query type since we don't have a pre-computed
-    // embedding vector here. The kernel can handle text-based tool lookup.
-    let query_request = serde_json::json!({
-        "query_type": "vector_search",
-        "collection": "tools",
-        "query_text": message_text,
-        "limit": max_dynamic_tools,
-    });
+    max_tools: u32,
+) -> Vec<ToolSchema> {
+    let search_request = ToolSearchRequest {
+        query_text: message_text.to_string(),
+        limit: Some(max_tools),
+    };
 
-    let payload = match serde_json::to_vec(&query_request) {
+    let payload = match serde_json::to_vec(&search_request) {
         Ok(p) => p,
         Err(e) => {
-            warn!(error = %e, "Failed to serialize tool query request");
+            warn!(error = %e, "Failed to serialize ToolSearchRequest");
             return Vec::new();
         }
     };
 
     match tokio::time::timeout(
         Duration::from_secs(5),
-        nats.request("brain.query.request", payload.into()),
+        nats.request("tool.search.request", payload.into()),
     )
     .await
     {
         Ok(Ok(response)) => {
-            match serde_json::from_slice::<BrainToolQueryResponse>(&response.payload) {
+            match serde_json::from_slice::<ToolSearchResponse>(&response.payload) {
                 Ok(resp) => {
-                    let tools = resp
-                        .results
+                    let tools: Vec<ToolSchema> = resp
+                        .tools
                         .into_iter()
-                        .filter_map(|t| {
-                            Some(GeminiTool {
-                                name: t.get("name")?.as_str()?.to_string(),
-                                description: t
-                                    .get("description")
-                                    .and_then(|v| v.as_str())
-                                    .unwrap_or("")
-                                    .to_string(),
-                                parameters: t
-                                    .get("parameters")
-                                    .cloned()
-                                    .unwrap_or(serde_json::json!({"type": "object"})),
-                            })
+                        .map(|t| ToolSchema {
+                            name: t.name,
+                            description: t.summary_md,
+                            parameters: t.parameters,
                         })
-                        .collect::<Vec<_>>();
-                    debug!(count = tools.len(), "Dynamic tools loaded from brain");
+                        .collect();
+                    debug!(count = tools.len(), "Tools loaded from registry");
                     tools
                 }
                 Err(e) => {
-                    warn!(error = %e, "Failed to parse brain tool query response");
+                    warn!(error = %e, "Failed to parse ToolSearchResponse");
                     Vec::new()
                 }
             }
         }
         Ok(Err(e)) => {
-            warn!(error = %e, "Brain tool query NATS request failed");
+            warn!(error = %e, "Tool registry NATS request failed");
             Vec::new()
         }
         Err(_) => {
-            warn!("Brain tool query timed out");
+            warn!("Tool registry query timed out");
             Vec::new()
-        }
-    }
-}
-
-#[derive(Deserialize, Debug)]
-struct BrainToolQueryResponse {
-    #[serde(default)]
-    results: Vec<serde_json::Value>,
-}
-
-// ---------------------------------------------------------------------------
-// Collect all tools (pinned + dynamic), deduplicated
-// ---------------------------------------------------------------------------
-
-/// Build the complete tool list for an LLM call.
-///
-/// Pinned tools are always present. Dynamic tools from the brain are appended
-/// if they don't collide by name with a pinned tool.
-pub async fn collect_tools(
-    nats: &async_nats::Client,
-    message_text: &str,
-    max_dynamic_tools: u32,
-) -> Vec<GeminiTool> {
-    let mut tools = pinned_tools();
-    let pinned_names: Vec<String> = tools.iter().map(|t| t.name.clone()).collect();
-
-    let dynamic = query_dynamic_tools(nats, message_text, max_dynamic_tools).await;
-    for tool in dynamic {
-        if !pinned_names.contains(&tool.name) {
-            tools.push(tool);
-        }
-    }
-
-    info!(tool_count = tools.len(), "Tools collected for LLM call");
-    tools
-}
-
-// ---------------------------------------------------------------------------
-// Tool call execution
-// ---------------------------------------------------------------------------
-
-/// Execute a single tool call and return the result.
-///
-/// Currently supported:
-/// - `brain-query`: sends an AQL query to the kernel via NATS request/reply
-pub async fn execute_tool_call(
-    tool_use: &GeminiToolUse,
-    nats: &async_nats::Client,
-) -> ToolResult {
-    info!(tool = %tool_use.name, id = %tool_use.id, "Executing tool call");
-
-    match tool_use.name.as_str() {
-        "brain-query" => execute_brain_query(tool_use, nats).await,
-        other => {
-            warn!(tool = %other, "Unknown tool requested");
-            ToolResult {
-                tool_use_id: tool_use.id.clone(),
-                content: format!("Error: unknown tool '{}'", other),
-                is_error: true,
-            }
-        }
-    }
-}
-
-/// Execute the brain-query built-in tool.
-async fn execute_brain_query(
-    tool_use: &GeminiToolUse,
-    nats: &async_nats::Client,
-) -> ToolResult {
-    let aql = tool_use
-        .args
-        .get("aql")
-        .and_then(|v| v.as_str())
-        .unwrap_or("");
-    let description = tool_use
-        .args
-        .get("description")
-        .and_then(|v| v.as_str())
-        .unwrap_or("");
-
-    if aql.is_empty() {
-        return ToolResult {
-            tool_use_id: tool_use.id.clone(),
-            content: "Error: 'aql' parameter is required for brain-query".to_string(),
-            is_error: true,
-        };
-    }
-
-    info!(
-        description = %description,
-        aql_len = aql.len(),
-        "Executing brain-query tool"
-    );
-
-    // Build a BrainQueryRequest for AQL execution
-    let query_request = serde_json::json!({
-        "query_type": "aql",
-        "aql": aql,
-        "bind_vars": null,
-        "embedding": null,
-        "collection": null,
-        "limit": null,
-        "start_vertex": null,
-        "direction": null,
-        "depth": null,
-        "query_text": null,
-        "max_facts": null,
-        "graph_depth": null,
-        "min_confidence": null,
-    });
-
-    let payload = match serde_json::to_vec(&query_request) {
-        Ok(p) => p,
-        Err(e) => {
-            error!(error = %e, "Failed to serialize brain query request");
-            return ToolResult {
-                tool_use_id: tool_use.id.clone(),
-                content: format!("Error: failed to build query request: {}", e),
-                is_error: true,
-            };
-        }
-    };
-
-    match tokio::time::timeout(
-        Duration::from_secs(10),
-        nats.request("brain.query.request", payload.into()),
-    )
-    .await
-    {
-        Ok(Ok(response)) => {
-            let result_str = String::from_utf8_lossy(&response.payload).to_string();
-            // Try to pretty-format the JSON for the LLM
-            let content = match serde_json::from_str::<serde_json::Value>(&result_str) {
-                Ok(val) => serde_json::to_string_pretty(&val).unwrap_or(result_str),
-                Err(_) => result_str,
-            };
-            info!(result_len = content.len(), "brain-query completed");
-            ToolResult {
-                tool_use_id: tool_use.id.clone(),
-                content,
-                is_error: false,
-            }
-        }
-        Ok(Err(e)) => {
-            error!(error = %e, "brain-query NATS request failed");
-            ToolResult {
-                tool_use_id: tool_use.id.clone(),
-                content: format!("Error: brain query failed: {}", e),
-                is_error: true,
-            }
-        }
-        Err(_) => {
-            warn!("brain-query timed out after 10s");
-            ToolResult {
-                tool_use_id: tool_use.id.clone(),
-                content: "Error: brain query timed out".to_string(),
-                is_error: true,
-            }
         }
     }
 }
@@ -316,14 +161,43 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_brain_query_tool_schema() {
-        let tool = brain_query_tool();
-        assert_eq!(tool.name, "brain-query");
-        assert!(!tool.description.is_empty());
+    fn test_meta_tools_count() {
+        let tools = meta_tools();
+        assert_eq!(tools.len(), 3);
+    }
 
-        // parameters must be a valid JSON object with properties
-        let schema = &tool.parameters;
-        assert_eq!(schema["type"], "object");
+    #[test]
+    fn test_meta_tools_names() {
+        let tools = meta_tools();
+        let names: Vec<&str> = tools.iter().map(|t| t.name.as_str()).collect();
+        assert!(names.contains(&"brain-query"));
+        assert!(names.contains(&"task-create"));
+        assert!(names.contains(&"web-search"));
+    }
+
+    #[test]
+    fn test_meta_tools_have_valid_schemas() {
+        for tool in meta_tools() {
+            assert!(!tool.name.is_empty());
+            assert!(!tool.description.is_empty());
+
+            // Parameters must be a valid JSON object
+            let schema = &tool.parameters;
+            assert_eq!(schema["type"], "object");
+            assert!(schema["properties"].is_object());
+
+            // Must have required array
+            let required = schema["required"].as_array();
+            assert!(required.is_some(), "Tool {} missing required array", tool.name);
+        }
+    }
+
+    #[test]
+    fn test_brain_query_tool_schema() {
+        let tools = meta_tools();
+        let brain = tools.iter().find(|t| t.name == "brain-query").unwrap();
+
+        let schema = &brain.parameters;
         assert!(schema["properties"]["aql"].is_object());
         assert!(schema["properties"]["description"].is_object());
 
@@ -334,33 +208,16 @@ mod tests {
     }
 
     #[test]
-    fn test_pinned_tools_includes_brain_query() {
-        let tools = pinned_tools();
-        assert!(!tools.is_empty());
-        assert!(tools.iter().any(|t| t.name == "brain-query"));
-    }
+    fn test_tool_schema_serialization() {
+        for tool in meta_tools() {
+            let json = serde_json::to_value(&tool).unwrap();
 
-    #[test]
-    fn test_gemini_tool_serialization() {
-        let tool = brain_query_tool();
-        let json = serde_json::to_value(&tool).unwrap();
-
-        // Gemini format requires name, description, parameters
-        assert!(json.get("name").is_some());
-        assert!(json.get("description").is_some());
-        assert!(json.get("parameters").is_some());
-        // Must NOT have "input_schema" key (that's Anthropic format)
-        assert!(json.get("input_schema").is_none());
-    }
-
-    #[test]
-    fn test_tool_result_structure() {
-        let result = ToolResult {
-            tool_use_id: "call_123".to_string(),
-            content: "query returned 5 results".to_string(),
-            is_error: false,
-        };
-        assert_eq!(result.tool_use_id, "call_123");
-        assert!(!result.is_error);
+            // Must have name, description, parameters
+            assert!(json.get("name").is_some());
+            assert!(json.get("description").is_some());
+            assert!(json.get("parameters").is_some());
+            // Must NOT have input_schema (that's Anthropic format)
+            assert!(json.get("input_schema").is_none());
+        }
     }
 }

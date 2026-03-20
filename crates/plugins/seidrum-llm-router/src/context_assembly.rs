@@ -4,7 +4,7 @@
 //! 1. Renders the Tera prompt template with injected variables.
 //! 2. Counts tokens using tiktoken-rs (cl100k_base).
 //! 3. Applies the budget algorithm from LLM_INTEGRATION.md.
-//! 4. Assembles the final messages array for the Gemini API call.
+//! 4. Assembles the final messages array as simple role/content pairs.
 
 use anyhow::{Context, Result};
 use chrono::Utc;
@@ -12,7 +12,18 @@ use serde_json::Value;
 use tiktoken_rs::cl100k_base;
 use tracing::{debug, info, warn};
 
-use crate::{AgentContextLoaded, GeminiContent, ChannelInbound};
+use crate::{AgentContextLoaded, ChannelInbound};
+
+// ---------------------------------------------------------------------------
+// Simple message type (provider-agnostic)
+// ---------------------------------------------------------------------------
+
+/// A simple role/content message pair for assembled context.
+#[derive(Debug, Clone)]
+pub struct SimpleMessage {
+    pub role: String,
+    pub content: String,
+}
 
 // ---------------------------------------------------------------------------
 // Token counting
@@ -189,7 +200,7 @@ fn render_prompt(template_content: &str, context: &AgentContextLoaded) -> Result
         &format_history(&context.conversation_history),
     );
 
-    // available_tools (placeholder for now, tools come from brain registry)
+    // available_tools (placeholder for now, tools come from registry)
     tera_ctx.insert("available_tools", "brain-query, web-search");
 
     tera.render("prompt", &tera_ctx)
@@ -235,12 +246,12 @@ pub struct ContextConfig {
     pub prompt_template: String,
 }
 
-/// Assembled messages ready for the Gemini API.
+/// Assembled messages ready for the LLM provider (provider-agnostic).
 pub struct AssembledContext {
     /// The rendered system prompt.
     pub system_prompt: String,
-    /// The messages array (conversation history + user message).
-    pub messages: Vec<GeminiContent>,
+    /// The messages array as simple role/content pairs.
+    pub messages: Vec<SimpleMessage>,
     /// Total tokens estimated for the assembled context.
     pub estimated_tokens: usize,
 }
@@ -311,26 +322,25 @@ pub fn assemble_context(
         history_budget,
     );
 
-    // 6. Build messages array
-    // Gemini uses "user" and "model" roles (not "assistant")
-    let mut messages: Vec<GeminiContent> = Vec::new();
+    // 6. Build messages array as simple role/content pairs
+    let mut messages: Vec<SimpleMessage> = Vec::new();
 
     // Add RAG context as a system-injected user context message if non-empty
     if !rag_text.is_empty() && rag_text != format_similar_content(&[]) {
-        messages.push(GeminiContent::text(
-            "user",
-            &format!(
+        messages.push(SimpleMessage {
+            role: "user".to_string(),
+            content: format!(
                 "[System context - relevant knowledge]\n{}\n[End system context]",
                 rag_text
             ),
-        ));
-        messages.push(GeminiContent::text(
-            "model",
-            "I've noted the relevant context. How can I help you?",
-        ));
+        });
+        messages.push(SimpleMessage {
+            role: "assistant".to_string(),
+            content: "I've noted the relevant context. How can I help you?".to_string(),
+        });
     }
 
-    // Add conversation history as alternating user/model messages
+    // Add conversation history as alternating user/assistant messages
     if !context.conversation_history.is_empty() {
         for msg in &context.conversation_history {
             let role = msg
@@ -347,21 +357,24 @@ pub fn assemble_context(
                 continue;
             }
 
-            // Normalize role to user/model (Gemini format)
+            // Normalize role to user/assistant (provider-agnostic)
             let normalized_role = match role {
                 "user" | "human" => "user",
-                "assistant" | "bot" | "agent" | "model" => "model",
+                "assistant" | "bot" | "agent" | "model" => "assistant",
                 _ => "user",
             };
 
-            messages.push(GeminiContent::text(normalized_role, content));
+            messages.push(SimpleMessage {
+                role: normalized_role.to_string(),
+                content: content.to_string(),
+            });
         }
     }
 
     // Check history token usage and truncate from the front if needed
     let history_tokens: usize = messages
         .iter()
-        .map(|m| count_tokens(m.text_content().unwrap_or("")) + 4)
+        .map(|m| count_tokens(&m.content) + 4)
         .sum();
     if history_tokens > history_budget + rag_budget {
         warn!(
@@ -372,7 +385,7 @@ pub fn assemble_context(
         while messages.len() > 2 {
             let total: usize = messages
                 .iter()
-                .map(|m| count_tokens(m.text_content().unwrap_or("")) + 4)
+                .map(|m| count_tokens(&m.content) + 4)
                 .sum();
             if total <= history_budget + rag_budget {
                 break;
@@ -382,7 +395,10 @@ pub fn assemble_context(
     }
 
     // Add the current user message at the end
-    messages.push(GeminiContent::text("user", &user_text));
+    messages.push(SimpleMessage {
+        role: "user".to_string(),
+        content: user_text,
+    });
 
     // Re-render system prompt with budgeted sections
     let budgeted_system = render_budgeted_system_prompt(
@@ -396,7 +412,7 @@ pub fn assemble_context(
     let estimated_tokens = count_tokens(&budgeted_system)
         + messages
             .iter()
-            .map(|m| count_tokens(m.text_content().unwrap_or("")) + 4)
+            .map(|m| count_tokens(&m.content) + 4)
             .sum::<usize>();
 
     info!(
@@ -587,7 +603,7 @@ mod tests {
         // Last message should be the user's current message
         let last = assembled.messages.last().unwrap();
         assert_eq!(last.role, "user");
-        assert_eq!(last.text_content().unwrap(), "What tasks do I have?");
+        assert_eq!(last.content, "What tasks do I have?");
         assert!(assembled.estimated_tokens > 0);
     }
 
