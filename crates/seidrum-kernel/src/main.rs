@@ -133,18 +133,24 @@ async fn run_serve() -> anyhow::Result<()> {
     let scheduler_handle = scheduler_service.spawn().await?;
     info!("scheduler service started");
 
-    // 6. Spawn the agent orchestrator.
+    // 6. Spawn the workflow engine (replaces the old orchestrator).
     let agents_dir = platform_config
         .as_ref()
         .map(|c| c.agents_dir.as_str())
         .unwrap_or("agents/")
         .to_string();
 
+    let workflows_dir = platform_config
+        .as_ref()
+        .map(|c| c.workflows_dir.as_str())
+        .unwrap_or("workflows/")
+        .to_string();
+
     let orchestrator = OrchestratorService::new();
     let orchestrator_handle = orchestrator
-        .spawn(nats_client.clone(), &agents_dir)
+        .spawn(nats_client.clone(), &agents_dir, &workflows_dir)
         .await?;
-    info!("orchestrator service started");
+    info!("workflow engine started");
 
     // 7. Wait for all services.
     tokio::select! {
