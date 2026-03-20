@@ -13,6 +13,7 @@ mod orchestrator;
 mod registry;
 mod scheduler;
 mod scope;
+mod tool_registry;
 
 #[derive(Parser)]
 #[command(name = "seidrum-kernel", about = "Seidrum kernel daemon")]
@@ -117,6 +118,13 @@ async fn run_serve() -> anyhow::Result<()> {
     });
     info!("brain service started");
 
+    // 4b. Spawn the tool registry service.
+    let tool_registry_arango =
+        brain::client::ArangoClient::new(&arango_url, &arango_database, &arango_password)?;
+    let tool_registry_service = tool_registry::service::ToolRegistryService::new(tool_registry_arango);
+    let tool_registry_handle = tool_registry_service.spawn(nats_client.clone()).await?;
+    info!("tool registry service started");
+
     // 5. Spawn the scheduler service (decay + health monitoring).
     let scheduler_arango =
         brain::client::ArangoClient::new(&arango_url, &arango_database, &arango_password)?;
@@ -145,6 +153,9 @@ async fn run_serve() -> anyhow::Result<()> {
         }
         _ = brain_handle => {
             warn!("brain service exited unexpectedly");
+        }
+        _ = tool_registry_handle => {
+            warn!("tool registry service exited unexpectedly");
         }
         _ = scheduler_handle => {
             warn!("scheduler service exited unexpectedly");

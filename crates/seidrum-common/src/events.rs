@@ -416,6 +416,146 @@ pub struct DecayCompleted {
 }
 
 // ---------------------------------------------------------------------------
+// Tool Registry Events
+// ---------------------------------------------------------------------------
+
+/// Plugin registers a tool with the kernel.
+/// Subject: `tool.register`
+#[derive(Serialize, Deserialize, Debug, Clone)]
+pub struct ToolRegister {
+    pub tool_id: String,
+    pub plugin_id: String,
+    pub name: String,
+    pub summary_md: String,
+    pub manual_md: String,
+    pub parameters: serde_json::Value,
+    pub call_subject: String,
+}
+
+/// Kernel confirms tool registration.
+/// Subject: `tool.registered`
+#[derive(Serialize, Deserialize, Debug, Clone)]
+pub struct ToolRegistered {
+    pub tool_id: String,
+    pub plugin_id: String,
+    pub name: String,
+}
+
+/// Search for tools by query text.
+/// Subject: `tool.search.request`
+#[derive(Serialize, Deserialize, Debug, Clone)]
+pub struct ToolSearchRequest {
+    pub query_text: String,
+    pub limit: Option<u32>,
+}
+
+/// Summary of a tool returned in search results.
+#[derive(Serialize, Deserialize, Debug, Clone)]
+pub struct ToolSummary {
+    pub tool_id: String,
+    pub name: String,
+    pub summary_md: String,
+    pub parameters: serde_json::Value,
+}
+
+/// Subject: `tool.search.response`
+#[derive(Serialize, Deserialize, Debug, Clone)]
+pub struct ToolSearchResponse {
+    pub tools: Vec<ToolSummary>,
+}
+
+/// Request full tool description.
+/// Subject: `tool.describe.request`
+#[derive(Serialize, Deserialize, Debug, Clone)]
+pub struct ToolDescribeRequest {
+    pub tool_id: String,
+}
+
+/// Full tool description.
+/// Subject: `tool.describe.response`
+#[derive(Serialize, Deserialize, Debug, Clone)]
+pub struct ToolDescribeResponse {
+    pub tool_id: String,
+    pub name: String,
+    pub summary_md: String,
+    pub manual_md: String,
+    pub parameters: serde_json::Value,
+    pub plugin_id: String,
+    pub call_subject: String,
+}
+
+/// Request to invoke a tool.
+/// Subject: `tool.call`
+#[derive(Serialize, Deserialize, Debug, Clone)]
+pub struct ToolCallRequest {
+    pub tool_id: String,
+    pub plugin_id: String,
+    pub arguments: serde_json::Value,
+    pub correlation_id: Option<String>,
+}
+
+/// Result of a tool invocation.
+/// Subject: `tool.call` (reply)
+#[derive(Serialize, Deserialize, Debug, Clone)]
+pub struct ToolCallResponse {
+    pub tool_id: String,
+    pub result: serde_json::Value,
+    pub is_error: bool,
+}
+
+// ---------------------------------------------------------------------------
+// Unified LLM Events (provider-agnostic)
+// ---------------------------------------------------------------------------
+
+/// Unified message format, not tied to any provider.
+#[derive(Serialize, Deserialize, Debug, Clone)]
+pub struct UnifiedMessage {
+    pub role: String,
+    pub content: Option<String>,
+    pub tool_calls: Option<Vec<UnifiedToolCall>>,
+    pub tool_results: Option<Vec<UnifiedToolResult>>,
+}
+
+/// A tool call within a unified message.
+#[derive(Serialize, Deserialize, Debug, Clone)]
+pub struct UnifiedToolCall {
+    pub id: String,
+    pub name: String,
+    pub arguments: serde_json::Value,
+}
+
+/// A tool result within a unified message.
+#[derive(Serialize, Deserialize, Debug, Clone)]
+pub struct UnifiedToolResult {
+    pub tool_call_id: String,
+    pub content: String,
+    pub is_error: bool,
+}
+
+/// Provider-agnostic LLM request.
+/// Subject: `llm.request`
+#[derive(Serialize, Deserialize, Debug, Clone)]
+pub struct UnifiedLlmRequest {
+    pub agent_id: String,
+    pub messages: Vec<UnifiedMessage>,
+    pub system_prompt: Option<String>,
+    pub tools: Vec<ToolSchema>,
+    pub config: LlmCallConfig,
+    pub routing_strategy: String,
+    pub model_preferences: Vec<String>,
+    pub correlation_id: Option<String>,
+    pub scope: Option<String>,
+}
+
+/// Configuration for an LLM call.
+#[derive(Serialize, Deserialize, Debug, Clone)]
+pub struct LlmCallConfig {
+    pub temperature: Option<f64>,
+    pub max_tokens: Option<u32>,
+    pub top_p: Option<f64>,
+}
+
+// ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
 
@@ -561,5 +701,135 @@ mod tests {
         let recovered: ChannelInbound =
             serde_json::from_value(envelope.payload).unwrap();
         assert_eq!(recovered.platform, "cli");
+    }
+
+    #[test]
+    fn roundtrip_tool_register() {
+        let event = ToolRegister {
+            tool_id: "tool-001".to_string(),
+            plugin_id: "plugin-code-exec".to_string(),
+            name: "run_python".to_string(),
+            summary_md: "Execute Python code in a sandbox".to_string(),
+            manual_md: "# run_python\nRuns Python 3 code.".to_string(),
+            parameters: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "code": {"type": "string"}
+                },
+                "required": ["code"]
+            }),
+            call_subject: "plugin.code-exec.tool.run_python".to_string(),
+        };
+
+        let json = serde_json::to_string(&event).unwrap();
+        let deserialized: ToolRegister = serde_json::from_str(&json).unwrap();
+
+        assert_eq!(event.tool_id, deserialized.tool_id);
+        assert_eq!(event.plugin_id, deserialized.plugin_id);
+        assert_eq!(event.name, deserialized.name);
+        assert_eq!(event.call_subject, deserialized.call_subject);
+        assert_eq!(event.parameters, deserialized.parameters);
+    }
+
+    #[test]
+    fn roundtrip_tool_call_request() {
+        let event = ToolCallRequest {
+            tool_id: "tool-001".to_string(),
+            plugin_id: "plugin-code-exec".to_string(),
+            arguments: serde_json::json!({"code": "print('hello')"}),
+            correlation_id: Some("corr-456".to_string()),
+        };
+
+        let json = serde_json::to_string(&event).unwrap();
+        let deserialized: ToolCallRequest = serde_json::from_str(&json).unwrap();
+
+        assert_eq!(event.tool_id, deserialized.tool_id);
+        assert_eq!(event.plugin_id, deserialized.plugin_id);
+        assert_eq!(event.arguments, deserialized.arguments);
+        assert_eq!(event.correlation_id, deserialized.correlation_id);
+    }
+
+    #[test]
+    fn roundtrip_tool_call_response() {
+        let event = ToolCallResponse {
+            tool_id: "tool-001".to_string(),
+            result: serde_json::json!({"stdout": "hello\n", "exit_code": 0}),
+            is_error: false,
+        };
+
+        let json = serde_json::to_string(&event).unwrap();
+        let deserialized: ToolCallResponse = serde_json::from_str(&json).unwrap();
+
+        assert_eq!(event.tool_id, deserialized.tool_id);
+        assert_eq!(event.result, deserialized.result);
+        assert_eq!(event.is_error, deserialized.is_error);
+    }
+
+    #[test]
+    fn roundtrip_unified_message() {
+        let msg = UnifiedMessage {
+            role: "assistant".to_string(),
+            content: Some("Let me check that.".to_string()),
+            tool_calls: Some(vec![UnifiedToolCall {
+                id: "tc-1".to_string(),
+                name: "brain_query".to_string(),
+                arguments: serde_json::json!({"query": "Rust projects"}),
+            }]),
+            tool_results: None,
+        };
+
+        let json = serde_json::to_string(&msg).unwrap();
+        let deserialized: UnifiedMessage = serde_json::from_str(&json).unwrap();
+
+        assert_eq!(msg.role, deserialized.role);
+        assert_eq!(msg.content, deserialized.content);
+        assert!(deserialized.tool_calls.is_some());
+        let calls = deserialized.tool_calls.unwrap();
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].name, "brain_query");
+        assert!(deserialized.tool_results.is_none());
+    }
+
+    #[test]
+    fn roundtrip_unified_llm_request() {
+        let event = UnifiedLlmRequest {
+            agent_id: "agent-main".to_string(),
+            messages: vec![UnifiedMessage {
+                role: "user".to_string(),
+                content: Some("What is Seidrum?".to_string()),
+                tool_calls: None,
+                tool_results: None,
+            }],
+            system_prompt: Some("You are a helpful assistant.".to_string()),
+            tools: vec![ToolSchema {
+                name: "brain_query".to_string(),
+                description: "Query the knowledge graph".to_string(),
+                parameters: serde_json::json!({"type": "object"}),
+            }],
+            config: LlmCallConfig {
+                temperature: Some(0.7),
+                max_tokens: Some(2048),
+                top_p: None,
+            },
+            routing_strategy: "best-first".to_string(),
+            model_preferences: vec!["gemini-2.5-pro".to_string()],
+            correlation_id: Some("corr-789".to_string()),
+            scope: Some("personal".to_string()),
+        };
+
+        let json = serde_json::to_string(&event).unwrap();
+        let deserialized: UnifiedLlmRequest = serde_json::from_str(&json).unwrap();
+
+        assert_eq!(event.agent_id, deserialized.agent_id);
+        assert_eq!(event.messages.len(), deserialized.messages.len());
+        assert_eq!(event.system_prompt, deserialized.system_prompt);
+        assert_eq!(event.tools.len(), deserialized.tools.len());
+        assert_eq!(event.config.temperature, deserialized.config.temperature);
+        assert_eq!(event.config.max_tokens, deserialized.config.max_tokens);
+        assert!(deserialized.config.top_p.is_none());
+        assert_eq!(event.routing_strategy, deserialized.routing_strategy);
+        assert_eq!(event.model_preferences, deserialized.model_preferences);
+        assert_eq!(event.correlation_id, deserialized.correlation_id);
+        assert_eq!(event.scope, deserialized.scope);
     }
 }

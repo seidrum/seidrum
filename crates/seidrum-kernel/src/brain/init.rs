@@ -13,6 +13,7 @@ const VERTEX_COLLECTIONS: &[&str] = &[
     "scopes",
     "tasks",
     "event_types",
+    "tools",
 ];
 
 /// Edge collections defined in BRAIN_SCHEMA.md.
@@ -234,6 +235,20 @@ async fn create_indexes(client: &ArangoClient) -> Result<()> {
         .await
         .context("mentions.mention_type index")?;
 
+    // -- tools --
+    client
+        .create_persistent_index("tools", &["tool_id"], true, false)
+        .await
+        .context("tools.tool_id index")?;
+    client
+        .create_persistent_index("tools", &["plugin_id"], false, false)
+        .await
+        .context("tools.plugin_id index")?;
+    client
+        .create_persistent_index("tools", &["name"], false, false)
+        .await
+        .context("tools.name index")?;
+
     // TODO: Vector indexes for entities.embedding and content.embedding.
     // ArangoDB 3.12+ supports vector indexes natively, but they require
     // specific server configuration. Add these once the ArangoDB instance
@@ -271,6 +286,16 @@ async fn create_search_view(client: &ArangoClient) -> Result<()> {
                 "fields": {
                     "name": {
                         "analyzers": ["text_en", "identity"]
+                    }
+                }
+            },
+            "tools": {
+                "fields": {
+                    "summary_md": {
+                        "analyzers": ["text_en"]
+                    },
+                    "manual_md": {
+                        "analyzers": ["text_en"]
                     }
                 }
             }
