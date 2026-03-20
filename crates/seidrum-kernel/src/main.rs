@@ -123,7 +123,7 @@ async fn run_serve() -> anyhow::Result<()> {
         brain::client::ArangoClient::new(&arango_url, &arango_database, &arango_password)?;
     let tool_registry_service = tool_registry::service::ToolRegistryService::new(tool_registry_arango);
     let tool_registry_handle = tool_registry_service.spawn(nats_client.clone()).await?;
-    info!("tool registry service started");
+    info!("capability registry service started");
 
     // 5. Spawn the scheduler service (decay + health monitoring).
     let scheduler_arango =
@@ -155,7 +155,7 @@ async fn run_serve() -> anyhow::Result<()> {
             warn!("brain service exited unexpectedly");
         }
         _ = tool_registry_handle => {
-            warn!("tool registry service exited unexpectedly");
+            warn!("capability registry service exited unexpectedly");
         }
         _ = scheduler_handle => {
             warn!("scheduler service exited unexpectedly");

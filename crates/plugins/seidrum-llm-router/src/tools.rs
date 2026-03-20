@@ -94,8 +94,9 @@ pub fn meta_tools() -> Vec<ToolSchema> {
 
 /// Query the tool registry for tools relevant to the user's message.
 ///
-/// Sends a ToolSearchRequest via NATS request/reply to "tool.search.request".
+/// Sends a ToolSearchRequest via NATS request/reply to "capability.search".
 /// Returns discovered tools as Vec<ToolSchema>.
+/// Only searches for capabilities with kind "tool" (LLM-invocable).
 pub async fn query_tool_registry(
     nats: &async_nats::Client,
     message_text: &str,
@@ -104,6 +105,7 @@ pub async fn query_tool_registry(
     let search_request = ToolSearchRequest {
         query_text: message_text.to_string(),
         limit: Some(max_tools),
+        kind_filter: Some("tool".to_string()),
     };
 
     let payload = match serde_json::to_vec(&search_request) {
@@ -116,7 +118,7 @@ pub async fn query_tool_registry(
 
     match tokio::time::timeout(
         Duration::from_secs(5),
-        nats.request("tool.search.request", payload.into()),
+        nats.request("capability.search", payload.into()),
     )
     .await
     {

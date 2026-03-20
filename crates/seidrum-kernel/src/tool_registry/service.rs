@@ -1,7 +1,7 @@
-//! Tool registry service.
+//! Capability registry service.
 //!
-//! Subscribes to `tool.register`, `tool.search.request`, and `tool.describe.request`
-//! NATS subjects. Persists tools in ArangoDB and maintains an in-memory cache
+//! Subscribes to `capability.register`, `capability.search`, and `capability.describe`
+//! NATS subjects. Persists capabilities in ArangoDB and maintains an in-memory cache
 //! for fast lookups.
 
 use std::collections::HashMap;
@@ -19,7 +19,7 @@ use crate::brain::client::ArangoClient;
 // Data types
 // ---------------------------------------------------------------------------
 
-/// In-memory representation of a registered tool.
+/// In-memory representation of a registered capability.
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct ToolEntry {
     pub tool_id: String,
@@ -29,9 +29,11 @@ pub struct ToolEntry {
     pub manual_md: String,
     pub parameters: serde_json::Value,
     pub call_subject: String,
+    /// Capability kind: "tool", "command", "both", or future types.
+    pub kind: String,
 }
 
-/// Registration payload received on `tool.register`.
+/// Registration payload received on `capability.register`.
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct ToolRegisterPayload {
     pub tool_id: String,
@@ -41,6 +43,14 @@ pub struct ToolRegisterPayload {
     pub manual_md: String,
     pub parameters: serde_json::Value,
     pub call_subject: String,
+    /// Capability kind: "tool", "command", "both", or future types.
+    /// Defaults to "tool" for backward compatibility.
+    #[serde(default = "default_kind")]
+    pub kind: String,
+}
+
+fn default_kind() -> String {
+    "tool".to_string()
 }
 
 /// Confirmation published on `tool.registered`.
@@ -51,11 +61,14 @@ pub struct ToolRegisteredConfirmation {
     pub name: String,
 }
 
-/// Request payload for `tool.search.request`.
+/// Request payload for `capability.search`.
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct ToolSearchRequest {
     pub query_text: String,
     pub limit: Option<u32>,
+    /// Optional filter by capability kind (e.g., "tool", "command", "both").
+    #[serde(default)]
+    pub kind_filter: Option<String>,
 }
 
 /// Summary returned in search results.
@@ -65,6 +78,8 @@ pub struct ToolSummary {
     pub name: String,
     pub summary_md: String,
     pub parameters: serde_json::Value,
+    /// Capability kind: "tool", "command", "both".
+    pub kind: String,
 }
 
 /// Response payload for `tool.search.request`.
@@ -79,7 +94,7 @@ pub struct ToolDescribeRequest {
     pub tool_id: String,
 }
 
-/// Full tool description returned by `tool.describe.request`.
+/// Full capability description returned by `capability.describe`.
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct ToolDescribeResponse {
     pub tool_id: String,
@@ -89,6 +104,8 @@ pub struct ToolDescribeResponse {
     pub parameters: serde_json::Value,
     pub plugin_id: String,
     pub call_subject: String,
+    /// Capability kind: "tool", "command", "both".
+    pub kind: String,
 }
 
 // ---------------------------------------------------------------------------
@@ -112,17 +129,17 @@ impl ToolRegistryService {
         }
     }
 
-    /// Load all existing tools from ArangoDB into the in-memory cache.
+    /// Load all existing capabilities from ArangoDB into the in-memory cache.
     async fn load_from_db(&self) -> Result<()> {
         let query = r#"
-            FOR tool IN tools
+            FOR tool IN capabilities
                 RETURN tool
         "#;
         let resp = self
             .arango
             .execute_aql(query, &serde_json::json!({}))
             .await
-            .context("failed to load tools from ArangoDB")?;
+            .context("failed to load capabilities from ArangoDB")?;
 
         let results = resp
             .get("result")
@@ -171,16 +188,21 @@ impl ToolRegistryService {
                     .and_then(|v| v.as_str())
                     .unwrap_or_default()
                     .to_string(),
+                kind: doc
+                    .get("kind")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("tool")
+                    .to_string(),
             };
             tools.insert(tool_id, entry);
         }
 
-        info!(count = tools.len(), "loaded tools from ArangoDB into cache");
+        info!(count = tools.len(), "loaded capabilities from ArangoDB into cache");
         Ok(())
     }
 
-    /// Register a tool: persist to ArangoDB, cache in memory, publish confirmation.
-    async fn register_tool(
+    /// Register a capability: persist to ArangoDB, cache in memory, publish confirmation.
+    async fn register_capability(
         &self,
         payload: ToolRegisterPayload,
         nats: &async_nats::Client,
@@ -188,6 +210,7 @@ impl ToolRegistryService {
         let tool_id = payload.tool_id.clone();
         let plugin_id = payload.plugin_id.clone();
         let name = payload.name.clone();
+        let kind = payload.kind.clone();
 
         // Persist to ArangoDB via UPSERT by tool_id
         let doc = serde_json::json!({
@@ -198,13 +221,14 @@ impl ToolRegistryService {
             "manual_md": &payload.manual_md,
             "parameters": &payload.parameters,
             "call_subject": &payload.call_subject,
+            "kind": &payload.kind,
         });
 
         let upsert_query = r#"
             UPSERT { tool_id: @tool_id }
             INSERT MERGE(@doc, { tool_id: @tool_id })
             UPDATE MERGE(OLD, @doc)
-            IN tools
+            IN capabilities
             RETURN NEW
         "#;
         self.arango
@@ -216,7 +240,7 @@ impl ToolRegistryService {
                 }),
             )
             .await
-            .with_context(|| format!("failed to upsert tool '{}'", tool_id))?;
+            .with_context(|| format!("failed to upsert capability '{}'", tool_id))?;
 
         // Cache in memory
         let entry = ToolEntry {
@@ -227,6 +251,7 @@ impl ToolRegistryService {
             manual_md: payload.manual_md,
             parameters: payload.parameters,
             call_subject: payload.call_subject,
+            kind: payload.kind,
         };
 
         {
@@ -243,14 +268,14 @@ impl ToolRegistryService {
         match serde_json::to_vec(&confirmation) {
             Ok(bytes) => {
                 if let Err(e) = nats
-                    .publish("tool.registered".to_string(), bytes.into())
+                    .publish("capability.registered".to_string(), bytes.into())
                     .await
                 {
-                    warn!(error = %e, "failed to publish tool.registered confirmation");
+                    warn!(error = %e, "failed to publish capability.registered confirmation");
                 }
             }
             Err(e) => {
-                warn!(error = %e, "failed to serialize tool.registered confirmation");
+                warn!(error = %e, "failed to serialize capability.registered confirmation");
             }
         }
 
@@ -258,46 +283,71 @@ impl ToolRegistryService {
             tool_id = %tool_id,
             plugin_id = %plugin_id,
             name = %name,
-            "tool registered"
+            kind = %kind,
+            "capability registered"
         );
         Ok(())
     }
 
-    /// Handle `tool.search.request`: full-text search over summary_md and manual_md.
-    /// Falls back to returning all non-meta tools from cache if ArangoSearch returns empty.
+    /// Handle `capability.search`: full-text search over summary_md and manual_md.
+    /// Falls back to returning all non-meta capabilities from cache if ArangoSearch returns empty.
+    /// Respects `kind_filter` to filter results by capability kind.
     async fn handle_search(&self, req: ToolSearchRequest) -> ToolSearchResponse {
         let limit = req.limit.unwrap_or(5) as usize;
-        let query = r#"
-            FOR doc IN content_search
-                SEARCH ANALYZER(
-                    doc.summary_md IN TOKENS(@query_text, "text_en")
-                    OR doc.manual_md IN TOKENS(@query_text, "text_en"),
-                    "text_en"
-                )
-                FILTER IS_SAME_COLLECTION("tools", doc)
-                SORT BM25(doc) DESC
-                LIMIT @limit
-                RETURN {
-                    tool_id: doc.tool_id,
-                    name: doc.name,
-                    summary_md: doc.summary_md,
-                    parameters: doc.parameters
-                }
-        "#;
+
+        // Build the AQL query, optionally filtering by kind
+        let query = if req.kind_filter.is_some() {
+            r#"
+                FOR doc IN content_search
+                    SEARCH ANALYZER(
+                        doc.summary_md IN TOKENS(@query_text, "text_en")
+                        OR doc.manual_md IN TOKENS(@query_text, "text_en"),
+                        "text_en"
+                    )
+                    FILTER IS_SAME_COLLECTION("capabilities", doc)
+                    FILTER doc.kind == @kind_filter OR doc.kind == "both"
+                    SORT BM25(doc) DESC
+                    LIMIT @limit
+                    RETURN {
+                        tool_id: doc.tool_id,
+                        name: doc.name,
+                        summary_md: doc.summary_md,
+                        parameters: doc.parameters,
+                        kind: doc.kind
+                    }
+            "#
+        } else {
+            r#"
+                FOR doc IN content_search
+                    SEARCH ANALYZER(
+                        doc.summary_md IN TOKENS(@query_text, "text_en")
+                        OR doc.manual_md IN TOKENS(@query_text, "text_en"),
+                        "text_en"
+                    )
+                    FILTER IS_SAME_COLLECTION("capabilities", doc)
+                    SORT BM25(doc) DESC
+                    LIMIT @limit
+                    RETURN {
+                        tool_id: doc.tool_id,
+                        name: doc.name,
+                        summary_md: doc.summary_md,
+                        parameters: doc.parameters,
+                        kind: doc.kind
+                    }
+            "#
+        };
+
+        let mut bind_vars = serde_json::json!({
+            "query_text": req.query_text,
+            "limit": limit,
+        });
+        if let Some(ref kf) = req.kind_filter {
+            bind_vars["kind_filter"] = serde_json::json!(kf);
+        }
 
         let mut tools: Vec<ToolSummary> = Vec::new();
 
-        match self
-            .arango
-            .execute_aql(
-                query,
-                &serde_json::json!({
-                    "query_text": req.query_text,
-                    "limit": limit,
-                }),
-            )
-            .await
-        {
+        match self.arango.execute_aql(query, &bind_vars).await {
             Ok(resp) => {
                 let results = resp
                     .get("result")
@@ -310,35 +360,43 @@ impl ToolRegistryService {
                     .filter_map(|v| serde_json::from_value(v).ok())
                     .collect();
 
-                debug!(count = tools.len(), "tool search via ArangoSearch");
+                debug!(count = tools.len(), "capability search via ArangoSearch");
             }
             Err(e) => {
-                warn!(error = %e, "tool search AQL failed, falling back to cache");
+                warn!(error = %e, "capability search AQL failed, falling back to cache");
             }
         }
 
-        // Fallback: if ArangoSearch returned nothing, return all non-meta tools from cache
+        // Fallback: if ArangoSearch returned nothing, return all non-meta capabilities from cache
         if tools.is_empty() {
             let cache = self.tools.read().await;
             let meta_ids = ["brain-query", "search-tools", "get-tool-manual"];
             tools = cache
                 .values()
                 .filter(|t| !meta_ids.contains(&t.tool_id.as_str()))
+                .filter(|t| {
+                    // Respect kind_filter in cache fallback
+                    match &req.kind_filter {
+                        Some(kf) => t.kind == *kf || t.kind == "both",
+                        None => true,
+                    }
+                })
                 .take(limit)
                 .map(|t| ToolSummary {
                     tool_id: t.tool_id.clone(),
                     name: t.name.clone(),
                     summary_md: t.summary_md.clone(),
                     parameters: t.parameters.clone(),
+                    kind: t.kind.clone(),
                 })
                 .collect();
-            debug!(count = tools.len(), "tool search fallback from cache");
+            debug!(count = tools.len(), "capability search fallback from cache");
         }
 
         ToolSearchResponse { tools }
     }
 
-    /// Handle `tool.describe.request`: look up a tool by ID from the in-memory cache.
+    /// Handle `capability.describe`: look up a capability by ID from the in-memory cache.
     async fn handle_describe(&self, req: ToolDescribeRequest) -> Option<ToolDescribeResponse> {
         let tools = self.tools.read().await;
         tools.get(&req.tool_id).map(|entry| ToolDescribeResponse {
@@ -349,6 +407,7 @@ impl ToolRegistryService {
             parameters: entry.parameters.clone(),
             plugin_id: entry.plugin_id.clone(),
             call_subject: entry.call_subject.clone(),
+            kind: entry.kind.clone(),
         })
     }
 
@@ -364,9 +423,9 @@ impl ToolRegistryService {
         tools.values().cloned().collect()
     }
 
-    /// Register the built-in meta-tools that the kernel itself provides.
-    async fn register_meta_tools(&self, nats: &async_nats::Client) -> Result<()> {
-        let meta_tools = vec![
+    /// Register the built-in meta-capabilities that the kernel itself provides.
+    async fn register_meta_capabilities(&self, nats: &async_nats::Client) -> Result<()> {
+        let meta_capabilities = vec![
             ToolRegisterPayload {
                 tool_id: "brain-query".to_string(),
                 plugin_id: "kernel".to_string(),
@@ -393,16 +452,17 @@ impl ToolRegistryService {
                     },
                     "required": ["query_type"]
                 }),
-                call_subject: "tool.call.kernel".to_string(),
+                call_subject: "capability.call.kernel".to_string(),
+                kind: "tool".to_string(),
             },
             ToolRegisterPayload {
                 tool_id: "search-tools".to_string(),
                 plugin_id: "kernel".to_string(),
-                name: "Search Tools".to_string(),
-                summary_md: "Search for available tools by description".to_string(),
+                name: "Search Capabilities".to_string(),
+                summary_md: "Search for available capabilities by description".to_string(),
                 manual_md: concat!(
                     "# search-tools\n\n",
-                    "Full-text search across all registered tool summaries and manuals.\n\n",
+                    "Full-text search across all registered capability summaries and manuals.\n\n",
                     "## Parameters\n\n",
                     "- `query_text` (string, required): Natural-language search query.\n",
                     "- `limit` (integer): Max results (default 5).\n",
@@ -416,18 +476,19 @@ impl ToolRegistryService {
                     },
                     "required": ["query_text"]
                 }),
-                call_subject: "tool.search.request".to_string(),
+                call_subject: "capability.search".to_string(),
+                kind: "both".to_string(),
             },
             ToolRegisterPayload {
                 tool_id: "get-tool-manual".to_string(),
                 plugin_id: "kernel".to_string(),
-                name: "Get Tool Manual".to_string(),
-                summary_md: "Get the full manual for a tool by ID".to_string(),
+                name: "Get Capability Manual".to_string(),
+                summary_md: "Get the full manual for a capability by ID".to_string(),
                 manual_md: concat!(
                     "# get-tool-manual\n\n",
-                    "Retrieve the full documentation (manual_md) for a specific tool.\n\n",
+                    "Retrieve the full documentation (manual_md) for a specific capability.\n\n",
                     "## Parameters\n\n",
-                    "- `tool_id` (string, required): The unique tool identifier.\n",
+                    "- `tool_id` (string, required): The unique capability identifier.\n",
                 )
                 .to_string(),
                 parameters: serde_json::json!({
@@ -437,57 +498,58 @@ impl ToolRegistryService {
                     },
                     "required": ["tool_id"]
                 }),
-                call_subject: "tool.describe.request".to_string(),
+                call_subject: "capability.describe".to_string(),
+                kind: "both".to_string(),
             },
         ];
 
-        for tool in meta_tools {
-            self.register_tool(tool, nats).await?;
+        for cap in meta_capabilities {
+            self.register_capability(cap, nats).await?;
         }
 
-        info!("meta-tools registered (brain-query, search-tools, get-tool-manual)");
+        info!("meta-capabilities registered (brain-query, search-tools, get-tool-manual)");
         Ok(())
     }
 
-    /// Spawn the tool registry service background tasks.
+    /// Spawn the capability registry service background tasks.
     ///
     /// Subscribes to:
-    /// - `tool.register` — for tool registration events
-    /// - `tool.search.request` — for full-text search (request/reply)
-    /// - `tool.describe.request` — for tool description lookup (request/reply)
+    /// - `capability.register` — for capability registration events
+    /// - `capability.search` — for full-text search (request/reply)
+    /// - `capability.describe` — for capability description lookup (request/reply)
     ///
     /// Returns a `JoinHandle` for the spawned task.
     pub async fn spawn(
         self,
         nats_client: async_nats::Client,
     ) -> Result<tokio::task::JoinHandle<()>> {
-        // Load existing tools from the database.
+        // Load existing capabilities from the database.
         if let Err(e) = self.load_from_db().await {
-            warn!(error = %e, "failed to load tools from ArangoDB (may not be initialized yet)");
+            warn!(error = %e, "failed to load capabilities from ArangoDB (may not be initialized yet)");
         }
 
-        // Register meta-tools.
-        if let Err(e) = self.register_meta_tools(&nats_client).await {
-            warn!(error = %e, "failed to register meta-tools");
+        // Register meta-capabilities.
+        if let Err(e) = self.register_meta_capabilities(&nats_client).await {
+            warn!(error = %e, "failed to register meta-capabilities");
         }
 
         let mut register_sub = nats_client
-            .subscribe("tool.register".to_string())
+            .subscribe("capability.register".to_string())
             .await
-            .context("failed to subscribe to tool.register")?;
-        info!("tool_registry: subscribed to tool.register");
+            .context("failed to subscribe to capability.register")?;
+        info!("capability_registry: subscribed to capability.register");
 
         let mut search_sub = nats_client
-            .subscribe("tool.search.request".to_string())
+            .subscribe("capability.search".to_string())
             .await
-            .context("failed to subscribe to tool.search.request")?;
-        info!("tool_registry: subscribed to tool.search.request");
+            .context("failed to subscribe to capability.search")?;
+        info!("capability_registry: subscribed to capability.search");
 
         let mut describe_sub = nats_client
-            .subscribe("tool.describe.request".to_string())
+            .subscribe("capability.describe".to_string())
             .await
-            .context("failed to subscribe to tool.describe.request")?;
-        info!("tool_registry: subscribed to tool.describe.request");
+            .context("failed to subscribe to capability.describe")?;
+        info!("capability_registry: subscribed to capability.describe");
 
         let handle = tokio::spawn(async move {
             loop {
@@ -495,14 +557,14 @@ impl ToolRegistryService {
                     Some(msg) = register_sub.next() => {
                         match serde_json::from_slice::<ToolRegisterPayload>(&msg.payload) {
                             Ok(payload) => {
-                                if let Err(e) = self.register_tool(payload, &nats_client).await {
-                                    error!(error = %e, "tool registration failed");
+                                if let Err(e) = self.register_capability(payload, &nats_client).await {
+                                    error!(error = %e, "capability registration failed");
                                 }
                             }
                             Err(e) => {
                                 warn!(
                                     error = %e,
-                                    "failed to deserialize tool.register payload"
+                                    "failed to deserialize capability.register payload"
                                 );
                             }
                         }
@@ -520,14 +582,14 @@ impl ToolRegistryService {
                                             {
                                                 warn!(
                                                     error = %e,
-                                                    "failed to publish tool.search.request response"
+                                                    "failed to publish capability.search response"
                                                 );
                                             }
                                         }
                                         Err(e) => {
                                             warn!(
                                                 error = %e,
-                                                "failed to serialize tool.search response"
+                                                "failed to serialize capability.search response"
                                             );
                                         }
                                     }
@@ -536,7 +598,7 @@ impl ToolRegistryService {
                             Err(e) => {
                                 warn!(
                                     error = %e,
-                                    "failed to deserialize tool.search.request payload"
+                                    "failed to deserialize capability.search payload"
                                 );
                                 if let Some(reply) = msg.reply {
                                     let err_resp = ToolSearchResponse { tools: vec![] };
@@ -560,14 +622,14 @@ impl ToolRegistryService {
                                             {
                                                 warn!(
                                                     error = %e,
-                                                    "failed to publish tool.describe.request response"
+                                                    "failed to publish capability.describe response"
                                                 );
                                             }
                                         }
                                         Err(e) => {
                                             warn!(
                                                 error = %e,
-                                                "failed to serialize tool.describe response"
+                                                "failed to serialize capability.describe response"
                                             );
                                         }
                                     }
@@ -576,7 +638,7 @@ impl ToolRegistryService {
                             Err(e) => {
                                 warn!(
                                     error = %e,
-                                    "failed to deserialize tool.describe.request payload"
+                                    "failed to deserialize capability.describe payload"
                                 );
                                 if let Some(reply) = msg.reply {
                                     let err_resp: Option<ToolDescribeResponse> = None;
@@ -590,7 +652,7 @@ impl ToolRegistryService {
                     else => break,
                 }
             }
-            info!("tool registry service stopped");
+            info!("capability registry service stopped");
         });
 
         Ok(handle)
@@ -623,7 +685,8 @@ mod tests {
             summary_md: format!("Summary for {}", name),
             manual_md: format!("# {}\n\nManual content.", name),
             parameters: serde_json::json!({"type": "object"}),
-            call_subject: format!("tool.call.{}", plugin_id),
+            call_subject: format!("capability.call.{}", plugin_id),
+            kind: "tool".to_string(),
         }
     }
 
@@ -644,6 +707,7 @@ mod tests {
         assert_eq!(found.tool_id, "brain-query");
         assert_eq!(found.plugin_id, "kernel");
         assert_eq!(found.name, "Brain Query");
+        assert_eq!(found.kind, "tool");
 
         // Not found
         assert!(svc.get_tool("nonexistent").await.is_none());
@@ -689,7 +753,8 @@ mod tests {
         assert_eq!(resp.plugin_id, "my-plugin");
         assert_eq!(resp.name, "My Tool");
         assert!(resp.manual_md.contains("Manual content"));
-        assert_eq!(resp.call_subject, "tool.call.my-plugin");
+        assert_eq!(resp.call_subject, "capability.call.my-plugin");
+        assert_eq!(resp.kind, "tool");
 
         // Missing tool
         let req = ToolDescribeRequest {
@@ -738,7 +803,8 @@ mod tests {
                     "query_type": { "type": "string" }
                 }
             }),
-            call_subject: "tool.call.kernel".to_string(),
+            call_subject: "capability.call.kernel".to_string(),
+            kind: "tool".to_string(),
         };
 
         let json = serde_json::to_string(&entry).unwrap();
@@ -748,6 +814,7 @@ mod tests {
         assert_eq!(entry.name, deserialized.name);
         assert_eq!(entry.summary_md, deserialized.summary_md);
         assert_eq!(entry.call_subject, deserialized.call_subject);
+        assert_eq!(entry.kind, deserialized.kind);
     }
 
     #[test]
@@ -759,12 +826,14 @@ mod tests {
                     name: "Brain Query".to_string(),
                     summary_md: "Query the knowledge graph".to_string(),
                     parameters: serde_json::json!({"type": "object"}),
+                    kind: "tool".to_string(),
                 },
                 ToolSummary {
                     tool_id: "search-tools".to_string(),
-                    name: "Search Tools".to_string(),
-                    summary_md: "Search for available tools".to_string(),
+                    name: "Search Capabilities".to_string(),
+                    summary_md: "Search for available capabilities".to_string(),
                     parameters: serde_json::json!({"type": "object"}),
+                    kind: "both".to_string(),
                 },
             ],
         };
@@ -773,7 +842,9 @@ mod tests {
         let deserialized: ToolSearchResponse = serde_json::from_str(&json).unwrap();
         assert_eq!(deserialized.tools.len(), 2);
         assert_eq!(deserialized.tools[0].tool_id, "brain-query");
+        assert_eq!(deserialized.tools[0].kind, "tool");
         assert_eq!(deserialized.tools[1].tool_id, "search-tools");
+        assert_eq!(deserialized.tools[1].kind, "both");
     }
 
     #[test]
@@ -785,13 +856,15 @@ mod tests {
             manual_md: "# Brain Query\n\nDetailed docs.".to_string(),
             parameters: serde_json::json!({"type": "object"}),
             plugin_id: "kernel".to_string(),
-            call_subject: "tool.call.kernel".to_string(),
+            call_subject: "capability.call.kernel".to_string(),
+            kind: "tool".to_string(),
         };
 
         let json = serde_json::to_string(&response).unwrap();
         let deserialized: ToolDescribeResponse = serde_json::from_str(&json).unwrap();
         assert_eq!(deserialized.tool_id, "brain-query");
         assert_eq!(deserialized.manual_md, "# Brain Query\n\nDetailed docs.");
-        assert_eq!(deserialized.call_subject, "tool.call.kernel");
+        assert_eq!(deserialized.call_subject, "capability.call.kernel");
+        assert_eq!(deserialized.kind, "tool");
     }
 }

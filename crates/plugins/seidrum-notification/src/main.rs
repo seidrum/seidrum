@@ -122,13 +122,14 @@ async fn main() -> Result<()> {
             },
             "required": ["message"]
         },
-        "call_subject": "tool.call.notification"
+        "call_subject": "capability.call.notification",
+        "kind": "command"
     });
 
     client
-        .publish("tool.register", serde_json::to_vec(&send_notification_tool)?.into())
+        .publish("capability.register", serde_json::to_vec(&send_notification_tool)?.into())
         .await
-        .context("Failed to publish tool.register for send-notification")?;
+        .context("Failed to publish capability.register for send-notification")?;
 
     info!("Tool 'send-notification' registered with kernel");
 
@@ -148,13 +149,13 @@ async fn main() -> Result<()> {
         .await
         .context("Failed to subscribe to system.health")?;
 
-    // Subscribe to tool.call.notification for tool dispatch
+    // Subscribe to capability.call.notification for capability dispatch
     let mut tool_sub = client
-        .subscribe("tool.call.notification")
+        .subscribe("capability.call.notification")
         .await
-        .context("Failed to subscribe to tool.call.notification")?;
+        .context("Failed to subscribe to capability.call.notification")?;
 
-    info!("Subscribed to task.created, task.completed.*, system.health, tool.call.notification");
+    info!("Subscribed to task.created, task.completed.*, system.health, capability.call.notification");
 
     let min_importance = Importance::from_level_filter(&args.notification_level);
     let channel = args.notification_channel.clone();
@@ -186,7 +187,7 @@ async fn main() -> Result<()> {
                 let reply = match msg.reply {
                     Some(ref r) => r.clone(),
                     None => {
-                        warn!("Received tool.call.notification without reply subject, skipping");
+                        warn!("Received capability.call.notification without reply subject, skipping");
                         continue;
                     }
                 };

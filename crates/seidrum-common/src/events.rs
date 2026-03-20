@@ -423,8 +423,8 @@ pub struct DecayCompleted {
 // Tool Registry Events
 // ---------------------------------------------------------------------------
 
-/// Plugin registers a tool with the kernel.
-/// Subject: `tool.register`
+/// Plugin registers a tool/capability with the kernel.
+/// Subject: `capability.register`
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct ToolRegister {
     pub tool_id: String,
@@ -434,6 +434,14 @@ pub struct ToolRegister {
     pub manual_md: String,
     pub parameters: serde_json::Value,
     pub call_subject: String,
+    /// Capability kind: "tool", "command", "both", or future types.
+    /// Defaults to "tool" for backward compatibility.
+    #[serde(default = "default_kind")]
+    pub kind: String,
+}
+
+fn default_kind() -> String {
+    "tool".to_string()
 }
 
 /// Kernel confirms tool registration.
@@ -445,21 +453,26 @@ pub struct ToolRegistered {
     pub name: String,
 }
 
-/// Search for tools by query text.
-/// Subject: `tool.search.request`
+/// Search for tools/capabilities by query text.
+/// Subject: `capability.search`
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct ToolSearchRequest {
     pub query_text: String,
     pub limit: Option<u32>,
+    /// Optional filter by capability kind (e.g., "tool", "command", "both").
+    #[serde(default)]
+    pub kind_filter: Option<String>,
 }
 
-/// Summary of a tool returned in search results.
+/// Summary of a tool/capability returned in search results.
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct ToolSummary {
     pub tool_id: String,
     pub name: String,
     pub summary_md: String,
     pub parameters: serde_json::Value,
+    /// Capability kind: "tool", "command", "both".
+    pub kind: String,
 }
 
 /// Subject: `tool.search.response`
@@ -475,8 +488,8 @@ pub struct ToolDescribeRequest {
     pub tool_id: String,
 }
 
-/// Full tool description.
-/// Subject: `tool.describe.response`
+/// Full tool/capability description.
+/// Subject: `capability.describe` (response)
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct ToolDescribeResponse {
     pub tool_id: String,
@@ -486,6 +499,8 @@ pub struct ToolDescribeResponse {
     pub parameters: serde_json::Value,
     pub plugin_id: String,
     pub call_subject: String,
+    /// Capability kind: "tool", "command", "both".
+    pub kind: String,
 }
 
 /// Request to invoke a tool.
@@ -724,6 +739,7 @@ mod tests {
                 "required": ["code"]
             }),
             call_subject: "plugin.code-exec.tool.run_python".to_string(),
+            kind: "tool".to_string(),
         };
 
         let json = serde_json::to_string(&event).unwrap();
@@ -734,6 +750,23 @@ mod tests {
         assert_eq!(event.name, deserialized.name);
         assert_eq!(event.call_subject, deserialized.call_subject);
         assert_eq!(event.parameters, deserialized.parameters);
+        assert_eq!(event.kind, deserialized.kind);
+    }
+
+    #[test]
+    fn tool_register_kind_defaults_to_tool() {
+        // Simulate an old-style registration without the `kind` field
+        let json = r##"{
+            "tool_id": "tool-old",
+            "plugin_id": "plugin-old",
+            "name": "old_tool",
+            "summary_md": "An old tool",
+            "manual_md": "# old_tool",
+            "parameters": {},
+            "call_subject": "tool.call.old"
+        }"##;
+        let deserialized: ToolRegister = serde_json::from_str(json).unwrap();
+        assert_eq!(deserialized.kind, "tool");
     }
 
     #[test]

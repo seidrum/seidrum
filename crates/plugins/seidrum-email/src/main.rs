@@ -366,10 +366,11 @@ async fn main() -> Result<()> {
             },
             "required": ["to", "subject", "body"]
         },
-        "call_subject": "tool.call.email"
+        "call_subject": "capability.call.email",
+        "kind": "tool"
     });
 
-    nats.publish("tool.register", serde_json::to_vec(&send_email_tool)?.into())
+    nats.publish("capability.register", serde_json::to_vec(&send_email_tool)?.into())
         .await?;
     info!("Tool 'send-email' registered with kernel");
 
@@ -454,9 +455,9 @@ async fn main() -> Result<()> {
         }
     });
 
-    // Subscribe to tool.call.email for tool dispatch
-    let mut tool_sub = nats.subscribe("tool.call.email").await?;
-    info!("Subscribed to tool.call.email");
+    // Subscribe to capability.call.email for tool dispatch
+    let mut tool_sub = nats.subscribe("capability.call.email").await?;
+    info!("Subscribed to capability.call.email");
 
     let tool_nats = nats.clone();
     let tool_smtp_host = cli.smtp_host.clone();
@@ -470,7 +471,7 @@ async fn main() -> Result<()> {
             let reply = match msg.reply {
                 Some(ref r) => r.clone(),
                 None => {
-                    warn!("Received tool.call.email without reply subject, skipping");
+                    warn!("Received capability.call.email without reply subject, skipping");
                     continue;
                 }
             };

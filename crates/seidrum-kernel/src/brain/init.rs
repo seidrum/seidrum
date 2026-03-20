@@ -13,7 +13,7 @@ const VERTEX_COLLECTIONS: &[&str] = &[
     "scopes",
     "tasks",
     "event_types",
-    "tools",
+    "capabilities",
 ];
 
 /// Edge collections defined in BRAIN_SCHEMA.md.
@@ -237,15 +237,15 @@ async fn create_indexes(client: &ArangoClient) -> Result<()> {
 
     // -- tools --
     client
-        .create_persistent_index("tools", &["tool_id"], true, false)
+        .create_persistent_index("capabilities", &["tool_id"], true, false)
         .await
         .context("tools.tool_id index")?;
     client
-        .create_persistent_index("tools", &["plugin_id"], false, false)
+        .create_persistent_index("capabilities", &["plugin_id"], false, false)
         .await
         .context("tools.plugin_id index")?;
     client
-        .create_persistent_index("tools", &["name"], false, false)
+        .create_persistent_index("capabilities", &["name"], false, false)
         .await
         .context("tools.name index")?;
 
@@ -289,7 +289,7 @@ async fn create_search_view(client: &ArangoClient) -> Result<()> {
                     }
                 }
             },
-            "tools": {
+            "capabilities": {
                 "fields": {
                     "summary_md": {
                         "analyzers": ["text_en"]

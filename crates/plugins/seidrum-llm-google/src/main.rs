@@ -389,14 +389,14 @@ async fn handle_provider_request(
         // Append the model's response (with function_call parts) to messages
         messages.push(candidate.content.clone());
 
-        // Dispatch each tool call via NATS request/reply to "tool.call"
+        // Dispatch each tool call via NATS request/reply to "capability.call"
         let mut response_parts: Vec<GeminiPart> = Vec::new();
         for tc in &tool_calls {
             let dispatch_req = tool_call_to_dispatch_request(tc, correlation_id);
 
-            // Wrap in EventEnvelope for tool dispatcher
+            // Wrap in EventEnvelope for capability dispatcher
             let envelope = EventEnvelope::new(
-                "tool.call",
+                "capability.call",
                 "llm-google",
                 correlation_id.map(|s| s.to_string()),
                 None,
@@ -406,7 +406,7 @@ async fn handle_provider_request(
 
             let tool_result = match tokio::time::timeout(
                 std::time::Duration::from_secs(30),
-                nats.request("tool.call", req_bytes.into()),
+                nats.request("capability.call", req_bytes.into()),
             )
             .await
             {
@@ -433,7 +433,7 @@ async fn handle_provider_request(
                     }
                 }
                 Ok(Err(e)) => {
-                    error!(error = %e, tool = %tc.name, "NATS request to tool.call failed");
+                    error!(error = %e, tool = %tc.name, "NATS request to capability.call failed");
                     ToolCallResponse {
                         tool_id: tc.name.clone(),
                         result: serde_json::json!({

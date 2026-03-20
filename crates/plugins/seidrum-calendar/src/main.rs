@@ -385,10 +385,11 @@ async fn main() -> Result<()> {
             },
             "required": ["query"]
         },
-        "call_subject": "tool.call.calendar"
+        "call_subject": "capability.call.calendar",
+        "kind": "tool"
     });
 
-    nats.publish("tool.register", serde_json::to_vec(&search_tool)?.into())
+    nats.publish("capability.register", serde_json::to_vec(&search_tool)?.into())
         .await?;
     info!("Tool 'search-calendar' registered with kernel");
 
@@ -424,10 +425,11 @@ async fn main() -> Result<()> {
             },
             "required": ["summary", "start", "end"]
         },
-        "call_subject": "tool.call.calendar"
+        "call_subject": "capability.call.calendar",
+        "kind": "tool"
     });
 
-    nats.publish("tool.register", serde_json::to_vec(&create_tool)?.into())
+    nats.publish("capability.register", serde_json::to_vec(&create_tool)?.into())
         .await?;
     info!("Tool 'create-calendar-event' registered with kernel");
 
@@ -501,9 +503,9 @@ async fn main() -> Result<()> {
         }
     });
 
-    // Subscribe to tool.call.calendar for tool dispatch
-    let mut tool_sub = nats.subscribe("tool.call.calendar").await?;
-    info!("Subscribed to tool.call.calendar");
+    // Subscribe to capability.call.calendar for tool dispatch
+    let mut tool_sub = nats.subscribe("capability.call.calendar").await?;
+    info!("Subscribed to capability.call.calendar");
 
     let tool_api_key = api_key.clone();
     let tool_calendar_id = cli.calendar_id.clone();
@@ -516,7 +518,7 @@ async fn main() -> Result<()> {
             let reply = match msg.reply {
                 Some(ref r) => r.clone(),
                 None => {
-                    warn!("Received tool.call.calendar without reply subject, skipping");
+                    warn!("Received capability.call.calendar without reply subject, skipping");
                     continue;
                 }
             };

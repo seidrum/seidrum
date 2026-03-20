@@ -21,7 +21,7 @@ use seidrum_common::nats_utils::NatsClient;
 #[derive(Parser)]
 #[command(
     name = "seidrum-tool-dispatcher",
-    about = "Seidrum tool dispatcher plugin — routes tool.call requests to owning plugins"
+    about = "Seidrum capability dispatcher plugin — routes capability.call requests to owning plugins"
 )]
 struct Cli {
     /// NATS server URL
@@ -76,9 +76,9 @@ async fn main() -> Result<()> {
         id: "tool-dispatcher".to_string(),
         name: "Tool Dispatcher".to_string(),
         version: "0.1.0".to_string(),
-        description: "Routes unified tool.call requests to the plugin that owns the tool"
+        description: "Routes unified capability.call requests to the plugin that owns the capability"
             .to_string(),
-        consumes: vec!["tool.call".to_string()],
+        consumes: vec!["capability.call".to_string()],
         produces: vec![],
         health_subject: "plugin.tool-dispatcher.health".to_string(),
     };
@@ -94,13 +94,13 @@ async fn main() -> Result<()> {
     let nats_bg = nats.clone();
     tokio::spawn(async move {
         if let Err(e) = listen_tool_registered(&nats_bg, cache_bg).await {
-            error!(error = %e, "tool.registered listener failed");
+            error!(error = %e, "capability.registered listener failed");
         }
     });
 
-    // Subscribe to tool.call (request/reply service)
-    let mut sub = nats.inner().subscribe("tool.call".to_string()).await?;
-    info!("Subscribed to tool.call (request/reply)");
+    // Subscribe to capability.call (request/reply service)
+    let mut sub = nats.inner().subscribe("capability.call".to_string()).await?;
+    info!("Subscribed to capability.call (request/reply)");
 
     while let Some(msg) = sub.next().await {
         let nats_clone = nats.clone();
@@ -109,12 +109,12 @@ async fn main() -> Result<()> {
             if let Err(e) =
                 handle_tool_call(msg, &nats_clone, &cache_clone, timeout).await
             {
-                error!(error = %e, "Failed to handle tool.call");
+                error!(error = %e, "Failed to handle capability.call");
             }
         });
     }
 
-    warn!("tool.call subscription ended, shutting down");
+    warn!("capability.call subscription ended, shutting down");
     Ok(())
 }
 
@@ -123,8 +123,8 @@ async fn main() -> Result<()> {
 // ---------------------------------------------------------------------------
 
 async fn listen_tool_registered(nats: &NatsClient, cache: ToolCache) -> Result<()> {
-    let mut sub = nats.subscribe("tool.registered").await?;
-    info!("Subscribed to tool.registered (cache updater)");
+    let mut sub = nats.subscribe("capability.registered").await?;
+    info!("Subscribed to capability.registered (cache updater)");
 
     while let Some(msg) = sub.next().await {
         match serde_json::from_slice::<EventEnvelope>(&msg.payload) {
@@ -134,10 +134,10 @@ async fn listen_tool_registered(nats: &NatsClient, cache: ToolCache) -> Result<(
                         info!(
                             tool_id = %registered.tool_id,
                             plugin_id = %registered.plugin_id,
-                            "Cached tool from tool.registered event"
+                            "Cached tool from capability.registered event"
                         );
                         // We only have tool_id and plugin_id from ToolRegistered.
-                        // We need the call_subject — fetch it via tool.describe.request.
+                        // We need the call_subject — fetch it via capability.describe.
                         match describe_tool(nats, &registered.tool_id).await {
                             Ok(desc) => {
                                 let mut w = cache.write().await;
@@ -153,7 +153,7 @@ async fn listen_tool_registered(nats: &NatsClient, cache: ToolCache) -> Result<(
                                 warn!(
                                     tool_id = %registered.tool_id,
                                     error = %e,
-                                    "Failed to describe tool after registration, skipping cache"
+                                    "Failed to describe capability after registration, skipping cache"
                                 );
                             }
                         }
@@ -164,7 +164,7 @@ async fn listen_tool_registered(nats: &NatsClient, cache: ToolCache) -> Result<(
                 }
             }
             Err(e) => {
-                warn!(error = %e, "Failed to parse tool.registered envelope");
+                warn!(error = %e, "Failed to parse capability.registered envelope");
             }
         }
     }
@@ -180,7 +180,7 @@ async fn describe_tool(nats: &NatsClient, tool_id: &str) -> Result<ToolDescribeR
     let req = ToolDescribeRequest {
         tool_id: tool_id.to_string(),
     };
-    let resp: ToolDescribeResponse = nats.request("tool.describe.request", &req).await?;
+    let resp: ToolDescribeResponse = nats.request("capability.describe", &req).await?;
     Ok(resp)
 }
 
@@ -197,7 +197,7 @@ async fn handle_tool_call(
     let reply = match &msg.reply {
         Some(r) => r.clone(),
         None => {
-            warn!("Received tool.call without reply subject, ignoring");
+            warn!("Received capability.call without reply subject, ignoring");
             return Ok(());
         }
     };
@@ -212,7 +212,7 @@ async fn handle_tool_call(
     info!(
         tool_id = %tool_id,
         correlation_id = ?call_req.correlation_id,
-        "Received tool.call request"
+        "Received capability.call request"
     );
 
     // 1. Look up in cache
@@ -224,8 +224,8 @@ async fn handle_tool_call(
     let entry = match entry {
         Some(e) => e,
         None => {
-            // 2. Cache miss — query kernel via tool.describe.request
-            info!(tool_id = %tool_id, "Cache miss, querying tool.describe.request");
+            // 2. Cache miss — query kernel via capability.describe
+            info!(tool_id = %tool_id, "Cache miss, querying capability.describe");
             match describe_tool(nats, tool_id).await {
                 Ok(desc) => {
                     let entry = ToolEntry {

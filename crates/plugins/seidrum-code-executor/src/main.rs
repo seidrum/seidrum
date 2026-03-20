@@ -1,7 +1,7 @@
 use anyhow::{Context, Result};
 use clap::Parser;
 use futures::StreamExt;
-use seidrum_common::events::{EventEnvelope, PluginRegister, ToolCallRequest, ToolCallResponse, ToolRegister};
+use seidrum_common::events::{EventEnvelope, PluginRegister, ToolCallRequest, ToolCallResponse};
 use serde::{Deserialize, Serialize};
 use std::time::Duration;
 use tokio::process::Command;
@@ -68,7 +68,7 @@ async fn main() -> Result<()> {
         name: PLUGIN_NAME.to_string(),
         version: PLUGIN_VERSION.to_string(),
         description: "Sandboxed code execution as an LLM tool".to_string(),
-        consumes: vec!["tool.call.code-executor".to_string()],
+        consumes: vec!["capability.call.code-executor".to_string()],
         produces: vec![],
         health_subject: format!("plugin.{}.health", PLUGIN_ID),
     };
@@ -117,26 +117,27 @@ async fn main() -> Result<()> {
             },
             "required": ["language", "code"]
         },
-        "call_subject": "tool.call.code-executor"
+        "call_subject": "capability.call.code-executor",
+        "kind": "both"
     });
 
     client
         .publish(
-            "tool.register",
+            "capability.register",
             serde_json::to_vec(&tool_register)?.into(),
         )
         .await
-        .context("Failed to publish tool.register")?;
+        .context("Failed to publish capability.register")?;
 
     info!("Tool 'execute-code' registered with kernel");
 
-    // Subscribe to tool.call.code-executor using NATS request/reply
+    // Subscribe to capability.call.code-executor using NATS request/reply
     let mut subscriber = client
-        .subscribe("tool.call.code-executor")
+        .subscribe("capability.call.code-executor")
         .await
-        .context("Failed to subscribe to tool.call.code-executor")?;
+        .context("Failed to subscribe to capability.call.code-executor")?;
 
-    info!("Subscribed to tool.call.code-executor, waiting for requests...");
+    info!("Subscribed to capability.call.code-executor, waiting for requests...");
 
     while let Some(msg) = subscriber.next().await {
         let reply = match msg.reply {
