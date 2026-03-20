@@ -4,10 +4,11 @@ use anyhow::Result;
 use clap::Parser;
 use futures::StreamExt;
 use seidrum_common::events::{
-    ChannelInbound, ChannelOutbound, EventEnvelope, PluginRegister,
+    ChannelInbound, ChannelOutbound, EventEnvelope, PluginRegister, ToolCallRequest, ToolCallResponse,
 };
 use tokio_util::compat::TokioAsyncReadCompatExt;
 use tracing::{error, info, warn};
+use anyhow::Context;
 
 #[derive(Parser)]
 #[command(name = "seidrum-email", about = "Seidrum Email channel plugin")]
@@ -256,6 +257,47 @@ fn send_email(cli: &Cli, outbound: &ChannelOutbound) -> Result<()> {
     Ok(())
 }
 
+/// Send an email via SMTP, used by the tool.call.email handler.
+fn send_email_tool_impl(
+    smtp_host: &str,
+    smtp_port: u16,
+    smtp_user: &str,
+    smtp_password: &str,
+    smtp_from: &str,
+    to: &str,
+    subject: &str,
+    body: &str,
+    in_reply_to: Option<&str>,
+) -> Result<()> {
+    use lettre::message::header::ContentType;
+    use lettre::transport::smtp::authentication::Credentials;
+    use lettre::{Message, SmtpTransport, Transport};
+
+    let mut builder = Message::builder()
+        .from(smtp_from.parse().context("Invalid from address")?)
+        .to(to.parse().context("Invalid to address")?)
+        .subject(subject)
+        .header(ContentType::TEXT_PLAIN);
+
+    if let Some(reply_id) = in_reply_to {
+        builder = builder.in_reply_to(reply_id.to_string());
+    }
+
+    let email = builder.body(body.to_string())?;
+
+    let creds = Credentials::new(smtp_user.to_string(), smtp_password.to_string());
+
+    let mailer = SmtpTransport::starttls_relay(smtp_host)?
+        .port(smtp_port)
+        .credentials(creds)
+        .build();
+
+    mailer.send(&email)?;
+
+    info!(to = %to, subject = %subject, "Sent email via SMTP (tool call)");
+    Ok(())
+}
+
 #[tokio::main]
 async fn main() -> Result<()> {
     tracing_subscriber::fmt::init();
@@ -294,6 +336,42 @@ async fn main() -> Result<()> {
     let register_bytes = serde_json::to_vec(&register_envelope)?;
     nats.publish("plugin.register", register_bytes.into()).await?;
     info!("Published plugin.register event");
+
+    // Register tool with the kernel's tool registry
+    let send_email_tool = serde_json::json!({
+        "tool_id": "send-email",
+        "plugin_id": "email",
+        "name": "Send Email",
+        "summary_md": "Send an email via SMTP with subject, body, and optional in-reply-to header for threading.",
+        "manual_md": "# Send Email\n\nSend an email via the configured SMTP server.\n\n## Parameters\n- `to` (string, required): Recipient email address\n- `subject` (string, required): Email subject line\n- `body` (string, required): Email body text\n- `in_reply_to` (string, optional): Message-ID to reply to for threading\n\n## Returns\nConfirmation that the email was sent.",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "to": {
+                    "type": "string",
+                    "description": "Recipient email address"
+                },
+                "subject": {
+                    "type": "string",
+                    "description": "Email subject line"
+                },
+                "body": {
+                    "type": "string",
+                    "description": "Email body text"
+                },
+                "in_reply_to": {
+                    "type": "string",
+                    "description": "Message-ID to reply to for threading"
+                }
+            },
+            "required": ["to", "subject", "body"]
+        },
+        "call_subject": "tool.call.email"
+    });
+
+    nats.publish("tool.register", serde_json::to_vec(&send_email_tool)?.into())
+        .await?;
+    info!("Tool 'send-email' registered with kernel");
 
     // Subscribe to outbound emails
     let mut outbound_sub = nats.subscribe("channel.email.outbound").await?;
@@ -376,6 +454,107 @@ async fn main() -> Result<()> {
         }
     });
 
+    // Subscribe to tool.call.email for tool dispatch
+    let mut tool_sub = nats.subscribe("tool.call.email").await?;
+    info!("Subscribed to tool.call.email");
+
+    let tool_nats = nats.clone();
+    let tool_smtp_host = cli.smtp_host.clone();
+    let tool_smtp_port = cli.smtp_port;
+    let tool_smtp_user = cli.smtp_user.clone();
+    let tool_smtp_password = cli.smtp_password.clone();
+    let tool_smtp_from = cli.smtp_from.clone();
+
+    let tool_handle = tokio::spawn(async move {
+        while let Some(msg) = tool_sub.next().await {
+            let reply = match msg.reply {
+                Some(ref r) => r.clone(),
+                None => {
+                    warn!("Received tool.call.email without reply subject, skipping");
+                    continue;
+                }
+            };
+
+            let tool_request: ToolCallRequest = match serde_json::from_slice(&msg.payload) {
+                Ok(r) => r,
+                Err(err) => {
+                    warn!(%err, "Failed to deserialize ToolCallRequest");
+                    let error_response = ToolCallResponse {
+                        tool_id: "send-email".to_string(),
+                        result: serde_json::json!({"error": format!("Invalid request: {}", err)}),
+                        is_error: true,
+                    };
+                    if let Err(e) = tool_nats
+                        .publish(reply, serde_json::to_vec(&error_response).unwrap_or_default().into())
+                        .await
+                    {
+                        error!(%e, "Failed to publish error reply");
+                    }
+                    continue;
+                }
+            };
+
+            let tool_response = match tool_request.tool_id.as_str() {
+                "send-email" => {
+                    let to = tool_request.arguments.get("to")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("")
+                        .to_string();
+                    let subject = tool_request.arguments.get("subject")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("")
+                        .to_string();
+                    let body = tool_request.arguments.get("body")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("")
+                        .to_string();
+                    let in_reply_to = tool_request.arguments.get("in_reply_to")
+                        .and_then(|v| v.as_str())
+                        .map(|s| s.to_string());
+
+                    info!(to = %to, subject = %subject, "Sending email via tool");
+
+                    match send_email_tool_impl(
+                        &tool_smtp_host,
+                        tool_smtp_port,
+                        &tool_smtp_user,
+                        &tool_smtp_password,
+                        &tool_smtp_from,
+                        &to,
+                        &subject,
+                        &body,
+                        in_reply_to.as_deref(),
+                    ) {
+                        Ok(()) => ToolCallResponse {
+                            tool_id: tool_request.tool_id,
+                            result: serde_json::json!({"status": "sent", "to": to, "subject": subject}),
+                            is_error: false,
+                        },
+                        Err(err) => ToolCallResponse {
+                            tool_id: tool_request.tool_id,
+                            result: serde_json::json!({"error": format!("{}", err)}),
+                            is_error: true,
+                        },
+                    }
+                }
+                other => {
+                    ToolCallResponse {
+                        tool_id: other.to_string(),
+                        result: serde_json::json!({"error": format!("Unknown tool_id: {}", other)}),
+                        is_error: true,
+                    }
+                }
+            };
+
+            if let Err(err) = tool_nats
+                .publish(reply, serde_json::to_vec(&tool_response).unwrap_or_default().into())
+                .await
+            {
+                error!(%err, "Failed to publish tool call reply");
+            }
+        }
+    });
+
     tokio::select! {
         result = imap_handle => {
             match result {
@@ -387,6 +566,12 @@ async fn main() -> Result<()> {
             match result {
                 Ok(()) => info!("Outbound handler stopped"),
                 Err(err) => error!(%err, "Outbound handler panicked"),
+            }
+        }
+        result = tool_handle => {
+            match result {
+                Ok(()) => info!("Tool call handler stopped"),
+                Err(err) => error!(%err, "Tool call handler panicked"),
             }
         }
     }

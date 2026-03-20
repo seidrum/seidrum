@@ -46,7 +46,25 @@ services:
       dockerfile: crates/plugins/seidrum-llm-router/Dockerfile
     environment:
       NATS_URL: nats://nats:4222
+    depends_on: [nats]
+    restart: unless-stopped
+
+  llm-google:
+    build:
+      context: .
+      dockerfile: crates/plugins/seidrum-llm-google/Dockerfile
+    environment:
+      NATS_URL: nats://nats:4222
       GOOGLE_API_KEY: ${GOOGLE_API_KEY}
+    depends_on: [nats]
+    restart: unless-stopped
+
+  tool-dispatcher:
+    build:
+      context: .
+      dockerfile: crates/plugins/seidrum-tool-dispatcher/Dockerfile
+    environment:
+      NATS_URL: nats://nats:4222
     depends_on: [nats]
     restart: unless-stopped
 

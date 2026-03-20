@@ -3,6 +3,7 @@ use clap::Parser;
 use futures::StreamExt;
 use seidrum_common::events::{
     ChannelOutbound, EventEnvelope, PluginRegister, SystemHealth, TaskCompleted, TaskCreated,
+    ToolCallRequest, ToolCallResponse,
 };
 use tracing::{error, info, warn};
 
@@ -96,6 +97,41 @@ async fn main() -> Result<()> {
 
     info!("Plugin registered");
 
+    // Register tool with the kernel's tool registry
+    let send_notification_tool = serde_json::json!({
+        "tool_id": "send-notification",
+        "plugin_id": PLUGIN_ID,
+        "name": "Send Notification",
+        "summary_md": "Send a notification message to a channel (telegram or cli) with configurable priority.",
+        "manual_md": "# Send Notification\n\nSend a notification to a configured channel.\n\n## Parameters\n- `message` (string, required): The notification message text\n- `channel` (string, default \"telegram\"): Target channel — \"telegram\" or \"cli\"\n- `priority` (string, default \"normal\"): Priority level — \"normal\", \"important\", or \"critical\"\n\n## Returns\nConfirmation that the notification was sent.",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "message": {
+                    "type": "string",
+                    "description": "The notification message text"
+                },
+                "channel": {
+                    "type": "string",
+                    "description": "Target channel: telegram or cli (default: telegram)"
+                },
+                "priority": {
+                    "type": "string",
+                    "description": "Priority level: normal, important, or critical (default: normal)"
+                }
+            },
+            "required": ["message"]
+        },
+        "call_subject": "tool.call.notification"
+    });
+
+    client
+        .publish("tool.register", serde_json::to_vec(&send_notification_tool)?.into())
+        .await
+        .context("Failed to publish tool.register for send-notification")?;
+
+    info!("Tool 'send-notification' registered with kernel");
+
     // Subscribe to all consumed subjects
     let mut task_created_sub = client
         .subscribe("task.created")
@@ -112,7 +148,13 @@ async fn main() -> Result<()> {
         .await
         .context("Failed to subscribe to system.health")?;
 
-    info!("Subscribed to task.created, task.completed.*, system.health");
+    // Subscribe to tool.call.notification for tool dispatch
+    let mut tool_sub = client
+        .subscribe("tool.call.notification")
+        .await
+        .context("Failed to subscribe to tool.call.notification")?;
+
+    info!("Subscribed to task.created, task.completed.*, system.health, tool.call.notification");
 
     let min_importance = Importance::from_level_filter(&args.notification_level);
     let channel = args.notification_channel.clone();
@@ -138,6 +180,93 @@ async fn main() -> Result<()> {
             Some(msg) = system_health_sub.next() => {
                 if let Err(err) = handle_system_health(&client, &msg.payload, &channel, min_importance).await {
                     error!(%err, "Failed to handle system.health");
+                }
+            }
+            Some(msg) = tool_sub.next() => {
+                let reply = match msg.reply {
+                    Some(ref r) => r.clone(),
+                    None => {
+                        warn!("Received tool.call.notification without reply subject, skipping");
+                        continue;
+                    }
+                };
+
+                let tool_request: ToolCallRequest = match serde_json::from_slice(&msg.payload) {
+                    Ok(r) => r,
+                    Err(err) => {
+                        warn!(%err, "Failed to deserialize ToolCallRequest");
+                        let error_response = ToolCallResponse {
+                            tool_id: "send-notification".to_string(),
+                            result: serde_json::json!({"error": format!("Invalid request: {}", err)}),
+                            is_error: true,
+                        };
+                        if let Err(e) = client
+                            .publish(reply, serde_json::to_vec(&error_response).unwrap_or_default().into())
+                            .await
+                        {
+                            error!(%e, "Failed to publish error reply");
+                        }
+                        continue;
+                    }
+                };
+
+                let tool_response = match tool_request.tool_id.as_str() {
+                    "send-notification" => {
+                        let message = tool_request.arguments.get("message")
+                            .and_then(|v| v.as_str())
+                            .unwrap_or("")
+                            .to_string();
+                        let target_channel = tool_request.arguments.get("channel")
+                            .and_then(|v| v.as_str())
+                            .unwrap_or("telegram")
+                            .to_string();
+                        let priority = tool_request.arguments.get("priority")
+                            .and_then(|v| v.as_str())
+                            .unwrap_or("normal")
+                            .to_string();
+
+                        info!(channel = %target_channel, priority = %priority, "Sending notification via tool");
+
+                        let format = if target_channel == "telegram" { "markdown" } else { "plain" };
+
+                        match send_notification(
+                            &client,
+                            &target_channel,
+                            &message,
+                            format,
+                            tool_request.correlation_id.clone(),
+                            None,
+                        ).await {
+                            Ok(()) => ToolCallResponse {
+                                tool_id: tool_request.tool_id,
+                                result: serde_json::json!({
+                                    "status": "sent",
+                                    "channel": target_channel,
+                                    "priority": priority,
+                                }),
+                                is_error: false,
+                            },
+                            Err(err) => ToolCallResponse {
+                                tool_id: tool_request.tool_id,
+                                result: serde_json::json!({"error": format!("{}", err)}),
+                                is_error: true,
+                            },
+                        }
+                    }
+                    other => {
+                        ToolCallResponse {
+                            tool_id: other.to_string(),
+                            result: serde_json::json!({"error": format!("Unknown tool_id: {}", other)}),
+                            is_error: true,
+                        }
+                    }
+                };
+
+                if let Err(err) = client
+                    .publish(reply, serde_json::to_vec(&tool_response).unwrap_or_default().into())
+                    .await
+                {
+                    error!(%err, "Failed to publish tool call reply");
                 }
             }
             else => break,

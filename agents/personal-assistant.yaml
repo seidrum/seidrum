@@ -35,18 +35,13 @@ agent:
         consumes: agent.context.loaded
         produces: llm.response
         config:
+          provider: google
           strategy: best-first
-          models:
-            - claude-sonnet-4-20250514
-            - gpt-4o
-            - claude-haiku-4-5-20251001
           max_tokens: 4096
           temperature: 0.7
           max_context_tokens: 100000
           prompt: ./prompts/assistant.md
           tools:
-            registry_access: true
-            pinned: [brain-query, web-search]
             max_dynamic_tools: 5
 
       - plugin: event-emitter
