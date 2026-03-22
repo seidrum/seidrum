@@ -55,7 +55,7 @@ There is no architectural distinction between a Telegram adapter, an LLM provide
 | Workflow Engine | Loads workflow YAML, wires plugins, manages routing |
 | Scheduler | Cron jobs — fact confidence decay, health monitoring, auto-cleanup |
 
-### Plugins (19)
+### Plugins (20)
 
 | Plugin | Type | Description |
 |--------|------|-------------|
@@ -67,6 +67,7 @@ There is no architectural distinction between a Telegram adapter, an LLM provide
 | `seidrum-llm-google` | LLM | Google Gemini provider adapter |
 | `seidrum-claude-code` | Tool | Claude Code CLI — agentic coding tasks |
 | `seidrum-code-executor` | Tool | Sandboxed Python/Bash/JS execution |
+| `seidrum-api-gateway` | Infra | WebSocket + REST API for external plugins in any language |
 | `seidrum-tool-dispatcher` | Infra | Routes capability calls to owning plugins |
 | `seidrum-content-ingester` | Processing | Ingests messages into the knowledge graph |
 | `seidrum-entity-extractor` | Processing | Extracts entities (people, orgs, tools) from content |
@@ -161,7 +162,8 @@ seidrum/
 │       ├── seidrum-event-emitter/
 │       ├── seidrum-notification/
 │       ├── seidrum-email/
-│       └── seidrum-calendar/
+│       ├── seidrum-calendar/
+│       └── seidrum-api-gateway/
 ├── agents/                    # Agent YAML definitions
 ├── workflows/                 # Workflow YAML definitions
 ├── prompts/                   # Tera-templated system prompts
@@ -205,7 +207,34 @@ async fn main() -> anyhow::Result<()> {
 }
 ```
 
-Plugins can be written in any language that speaks NATS.
+Plugins can also be written in **any language** using the API gateway. The gateway exposes a WebSocket and REST API that bridges to NATS:
+
+```bash
+# Start the API gateway
+GATEWAY_API_KEY=my-secret target/debug/seidrum-api-gateway
+```
+
+**WebSocket** (`ws://localhost:8080/ws?api_key=my-secret`):
+
+```json
+{"type": "register", "plugin": {"id": "my-plugin", "name": "My Plugin", "version": "0.1.0", "description": "Does things"}}
+{"type": "register_capability", "capability": {"tool_id": "my-tool", "plugin_id": "my-plugin", "name": "My Tool", "summary_md": "Does something", "manual_md": "...", "parameters": {}, "call_subject": "capability.call.my-plugin", "kind": "tool"}}
+{"type": "subscribe", "subjects": ["channel.*.inbound"]}
+```
+
+**REST** (`Authorization: Bearer my-secret`):
+
+```bash
+# Call a capability
+curl -X POST http://localhost:8080/api/v1/capabilities/execute-code/call \
+  -H "Authorization: Bearer my-secret" \
+  -d '{"arguments": {"language": "python", "code": "print(42)"}}'
+
+# Storage operations
+curl -X POST http://localhost:8080/api/v1/storage/set \
+  -H "Authorization: Bearer my-secret" \
+  -d '{"plugin_id": "my-plugin", "key": "count", "value": 42}'
+```
 
 ## Documentation
 

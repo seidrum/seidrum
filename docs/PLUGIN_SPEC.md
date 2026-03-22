@@ -472,7 +472,37 @@ Env:
 > Plugins use this for persisting state across restarts — e.g., conversation
 > context, user preferences, polling cursors, or cached data.
 
+### api-gateway
+
+WebSocket + REST API bridge that enables external plugins written in any language.
+
+**Plugin ID:** `api-gateway`
+**Kind:** Infrastructure
+**Consumes:** (dynamic — proxies for connected external plugins)
+**Produces:** (dynamic — proxies for connected external plugins)
+
+**WebSocket API** (`ws://gateway:8080/ws?api_key=KEY`):
+- Bidirectional JSON protocol with `type`-tagged messages
+- Each connection represents one external plugin
+- Full lifecycle: register, capability calls, health pings, event subscriptions, storage
+- Automatic timeout reaping for pending requests (5s interval)
+
+**REST API** (`/api/v1/*`, `Authorization: Bearer KEY`):
+- `GET /api/v1/health` — Gateway health (public)
+- `GET /api/v1/plugins` — List connected external plugins
+- `DELETE /api/v1/plugins/{id}` — Deregister a plugin
+- `POST /api/v1/capabilities/{id}/call` — Call a capability synchronously
+- `GET /api/v1/capabilities` — Search capabilities
+- `POST /api/v1/storage/{get,set,delete,list}` — Storage operations
+
+**CLI arguments:**
+- `--nats-url` (env: `NATS_URL`, default: `nats://localhost:4222`)
+- `--listen-addr` (env: `GATEWAY_LISTEN_ADDR`, default: `0.0.0.0:8080`)
+- `--api-key` (env: `GATEWAY_API_KEY`, required)
+
 ## Writing a Custom Plugin
+
+### Via NATS (Rust or any NATS client)
 
 A custom plugin in any language follows this pattern:
 
@@ -481,6 +511,18 @@ A custom plugin in any language follows this pattern:
 3. Subscribe to your declared `consumes` subjects
 4. For each received event, process and publish to your `produces` subjects
 5. Respond to health pings on your declared health subject
+
+### Via API Gateway (any language, no NATS client needed)
+
+For languages without a NATS client, use the API gateway's WebSocket API:
+
+1. Connect to `ws://gateway:8080/ws?api_key=KEY`
+2. Send `{"type": "register", "plugin": {...}}`
+3. Send `{"type": "register_capability", "capability": {...}}` for each capability
+4. Receive `{"type": "capability_call", "request_id": "...", "request": {...}}` when called
+5. Respond with `{"type": "capability_response", "request_id": "...", "response": {...}}`
+6. Receive `{"type": "health_check", "request_id": "..."}` and respond with `{"type": "health_response", ...}`
+7. Subscribe to events with `{"type": "subscribe", "subjects": [...]}`
 
 Example in Python:
 
