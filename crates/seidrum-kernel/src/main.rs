@@ -440,6 +440,7 @@ fn run_validate(config_path: &str) -> bool {
             "telegram",
             "cli",
             "claude-code",
+            "api-gateway",
         ]
         .into_iter()
         .collect();
