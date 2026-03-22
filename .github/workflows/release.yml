@@ -56,6 +56,8 @@ jobs:
         run: cargo install cross --git https://github.com/cross-rs/cross
 
       - name: Build release binaries
+        env:
+          OPENSSL_STATIC: "1"
         run: |
           if [ "${{ matrix.cross }}" = "true" ]; then
             cross build --workspace --release --target ${{ matrix.target }}
