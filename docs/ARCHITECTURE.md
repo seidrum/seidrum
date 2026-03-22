@@ -1,4 +1,4 @@
-# ARCHITECTURE_V2.md — Seidrum System Architecture
+# ARCHITECTURE.md — Seidrum System Architecture
 
 ## Core Principle
 

@@ -434,3 +434,120 @@ struct DecayCompleted {
     duration_ms: u64,
 }
 ```
+
+---
+
+## Plugin Storage Events
+
+### `storage.get` (request/reply)
+
+Plugin requests a value from its namespaced key-value store.
+
+```rust
+struct StorageGetRequest {
+    plugin_id: String,
+    namespace: String,
+    key: String,
+}
+
+struct StorageGetResponse {
+    found: bool,
+    value: Option<serde_json::Value>,
+}
+```
+
+### `storage.set` (request/reply)
+
+Plugin stores a value in its namespaced key-value store.
+
+```rust
+struct StorageSetRequest {
+    plugin_id: String,
+    namespace: String,
+    key: String,
+    value: serde_json::Value,
+}
+
+struct StorageSetResponse {
+    success: bool,
+    error: Option<String>,
+}
+```
+
+### `storage.delete` (request/reply)
+
+Plugin deletes a key from its namespaced store.
+
+```rust
+struct StorageDeleteRequest {
+    plugin_id: String,
+    namespace: String,
+    key: String,
+}
+
+struct StorageDeleteResponse {
+    success: bool,
+    existed: bool,
+}
+```
+
+### `storage.list` (request/reply)
+
+Plugin lists all keys in a namespace.
+
+```rust
+struct StorageListRequest {
+    plugin_id: String,
+    namespace: String,
+}
+
+struct StorageListResponse {
+    keys: Vec<String>,
+}
+```
+
+---
+
+## Plugin Lifecycle Events
+
+### `plugin.deregister`
+
+Plugin announces shutdown. Triggers cleanup in registry and capability registry.
+
+```rust
+struct PluginDeregister {
+    id: String,
+}
+```
+
+---
+
+## Capability Events
+
+### `capability.registered`
+
+Published by kernel when a capability is registered.
+
+```rust
+struct CapabilityRegistered {
+    tool_id: String,
+    plugin_id: String,
+    name: String,
+    summary_md: String,
+    manual_md: String,
+    parameters: serde_json::Value,
+    call_subject: String,
+    kind: String,
+}
+```
+
+### `capability.deregistered`
+
+Published by kernel when a capability is removed.
+
+```rust
+struct CapabilityDeregistered {
+    tool_id: String,
+    plugin_id: String,
+}
+```

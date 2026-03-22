@@ -84,6 +84,23 @@ async fn main() -> Result<()> {
 }
 ```
 
+### Capability Registration
+
+Plugins can register capabilities during bootstrap by publishing a
+`capability.register` event:
+
+- **kind: "tool"** — Available to the LLM via the capability registry for
+  tool-use calls.
+- **kind: "command"** — Auto-discovered by the Telegram plugin as `/` commands
+  for direct user invocation.
+- **kind: "both"** — Registered as both a tool and a command.
+
+Capabilities with kind `"command"` or `"both"` are automatically surfaced by
+the Telegram plugin via `setMyCommands`, so users see them in the command menu.
+Capabilities with kind `"tool"` or `"both"` are made available to the LLM
+through the capability registry, allowing the model to invoke them during
+tool-use rounds.
+
 ## Brain Access from Plugins
 
 Plugins never connect to ArangoDB. They use NATS request/reply to the kernel:
@@ -286,6 +303,174 @@ Behavior:
 2. For each detected task: publish brain.task.upsert to kernel
 3. Kernel stores task and publishes task.created
 ```
+
+### tool-dispatcher
+
+```
+Consumes: capability.call
+Produces: (forwards to owning plugin via NATS request/reply)
+
+Behavior:
+1. Subscribe to capability.call events
+2. Look up the target capability from an in-memory cache of registered
+   capabilities (populated from capability.register events)
+3. Forward the call payload to the owning plugin's call_subject via
+   NATS request/reply with a 30s timeout
+4. Return the plugin's response to the original caller
+5. If the target capability is unknown or the owning plugin does not
+   respond within the timeout, return an error payload
+
+Config:
+  timeout: NATS request/reply timeout (default: 30s)
+```
+
+### code-executor
+
+```
+Consumes: capability.call.code-executor
+Produces: capability.call.code-executor (reply)
+
+Behavior:
+1. Registers as a capability with kind "both" and
+   call_subject capability.call.code-executor
+2. Receives execution requests containing language and code
+3. Supported languages: Python, Bash, JavaScript
+4. Spawns a sandboxed subprocess for the requested language
+5. Network isolation via Linux unshare (CLONE_NEWNET) to prevent
+   untrusted code from making network calls
+6. Captures stdout, stderr, and exit code
+7. Enforces a hard timeout of 30s per execution — kills the process
+   if exceeded
+8. Returns structured result with stdout, stderr, exit_code, and
+   timed_out flag
+
+Config:
+  max_timeout: maximum execution time per request (default: 30s)
+  allowed_languages: list of enabled languages (default: [python, bash, javascript])
+```
+
+### claude-code
+
+```
+Consumes: capability.call.claude-code
+Produces: capability.call.claude-code (reply)
+
+Behavior:
+1. Registers as a capability with kind "both" and
+   command_alias "claude"
+2. Receives coding requests with a prompt and optional working_dir
+3. Spawns `claude -p` with --output-format json, passing the prompt
+   via stdin
+4. Streams output and collects the final JSON result
+5. Supports per-request working_dir to scope the Claude Code session
+   to a specific project directory
+6. Enforces a configurable timeout (default: 5 minutes) — kills the
+   process if exceeded
+7. Returns structured result with the Claude Code JSON output,
+   exit_code, and timed_out flag
+
+Config:
+  timeout: maximum execution time per request (default: 5m)
+  working_dir: default working directory if not specified per-request
+  claude_bin: path to the claude CLI binary (default: "claude")
+```
+
+### notification
+
+```
+Consumes: notification.send
+Produces: channel.{target}.outbound
+
+Behavior:
+1. Receives notification.send events containing a message, importance
+   level, and optional target channel override
+2. Evaluates importance level against configured thresholds to decide
+   whether to deliver or suppress the notification
+3. Routes the notification to the appropriate channel by publishing a
+   channel.{target}.outbound event
+4. If no target is specified, uses the default channel from config
+5. Supports importance levels: low, normal, high, critical
+6. Critical notifications are always delivered regardless of quiet
+   hours or suppression rules
+
+Config:
+  default_channel: default output channel (e.g., "telegram")
+  min_importance: minimum importance level to deliver (default: normal)
+```
+
+### email (Channel Plugin)
+
+```
+Consumes: channel.email.outbound
+Produces: channel.email.inbound
+
+Behavior:
+1. Connects to IMAP server and polls for new messages at a
+   configurable interval
+2. New emails → channel.email.inbound events with sender, subject,
+   body, and attachment metadata
+3. channel.email.outbound events → sends email via SMTP with
+   subject, body, recipients, and optional attachments
+4. Tracks seen message UIDs to avoid re-processing
+5. Supports TLS for both IMAP and SMTP connections
+6. Bidirectional channel plugin: both receives and sends
+
+Config:
+  imap_host: IMAP server hostname
+  imap_port: IMAP server port (default: 993)
+  smtp_host: SMTP server hostname
+  smtp_port: SMTP server port (default: 587)
+  poll_interval: how often to check for new mail (default: 60s)
+
+Env:
+  - EMAIL_ADDRESS
+  - EMAIL_PASSWORD
+```
+
+### calendar
+
+```
+Consumes: capability.call.search-calendar
+Produces: calendar.event.upcoming, capability.call.search-calendar (reply)
+
+Behavior:
+1. Connects to Google Calendar API via OAuth2 service account
+2. Polls for upcoming events at a configurable interval and publishes
+   calendar.event.upcoming events for events starting within the
+   lookahead window
+3. Registers a search-calendar capability with kind "both" so the LLM
+   and users can query the calendar
+4. Search requests accept a date range and optional query string,
+   returning matching calendar events
+5. Caches calendar data locally to reduce API calls
+
+Config:
+  poll_interval: how often to check for upcoming events (default: 5m)
+  lookahead: time window for upcoming event notifications (default: 1h)
+  calendars: list of calendar IDs to monitor
+
+Env:
+  - GOOGLE_CALENDAR_CREDENTIALS (service account JSON)
+```
+
+### Plugin Storage (Kernel Service)
+
+> **Note:** Plugin storage is not a plugin — it is a kernel-provided service.
+> It offers a persistent key-value store that any plugin can use via NATS
+> request/reply. This avoids plugins needing their own database connections.
+>
+> **Subjects:**
+> - `storage.get` — Retrieve a value by plugin ID and key
+> - `storage.set` — Store or update a value by plugin ID and key
+> - `storage.delete` — Remove a value by plugin ID and key
+> - `storage.list` — List all keys (with optional prefix filter) for a plugin
+>
+> **Backing store:** ArangoDB `plugin_storage` collection, keyed by
+> `(plugin_id, key)`. Values are stored as arbitrary JSON. The kernel handles
+> serialization, TTL expiry (if set), and collection management.
+>
+> Plugins use this for persisting state across restarts — e.g., conversation
+> context, user preferences, polling cursors, or cached data.
 
 ## Writing a Custom Plugin
 
