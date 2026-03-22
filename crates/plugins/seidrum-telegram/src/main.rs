@@ -37,7 +37,7 @@ struct Cli {
     #[arg(
         long,
         env = "WHISPER_CLI_PATH",
-        default_value = "/home/luisj/bin/whisper.cpp/build/bin/whisper-cli"
+        default_value = "whisper-cli"
     )]
     whisper_cli_path: String,
 
@@ -45,7 +45,7 @@ struct Cli {
     #[arg(
         long,
         env = "WHISPER_MODEL_PATH",
-        default_value = "/home/luisj/bin/whisper.cpp/models/ggml-small.en.bin"
+        default_value = "ggml-small.en.bin"
     )]
     whisper_model_path: String,
 }
