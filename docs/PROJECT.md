@@ -58,7 +58,7 @@ Rust binary. Plugins can be written in any language that speaks NATS.
 
 - **The brain is a graph, not a log.** Relationships between entities matter
   more than chronological message history. The graph enables traversal:
-  "Luis mentioned Infrahub in a Telegram message to Damien, referencing a
+  "Alice mentioned a tool in a Telegram message to Bob, referencing a
   GitHub repo" — that's a graph query.
 
 - **Scopes are boundaries.** An agent operating in the "job search" scope

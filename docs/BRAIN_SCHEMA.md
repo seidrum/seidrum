@@ -37,15 +37,14 @@ Core nodes: people, organizations, projects, tools, locations, concepts.
 
 ```json
 {
-  "_key": "entity_luis",
+  "_key": "entity_alice",
   "type": "person",
-  "name": "Luis Palomo",
-  "aliases": ["Luis Jose Palomo Fleming", "luis-palomo-f"],
+  "name": "Alice Smith",
+  "aliases": ["alice-s"],
   "properties": {
-    "email": "luis@mindysm.com",
-    "linkedin": "linkedin.com/in/luis-palomo-f",
-    "location": "Tallinn, Estonia",
-    "role": "Fractional CTO"
+    "email": "alice@example.com",
+    "location": "Berlin, Germany",
+    "role": "Software Engineer"
   },
   "embedding": [0.12, -0.34, ...],
   "created_at": "2024-01-15T10:00:00Z",
@@ -67,17 +66,17 @@ Raw ingested content. Messages, emails, documents, files. Immutable.
   "type": "message",
   "channel": "telegram",
   "channel_id": "chat_12345",
-  "raw_text": "Hey Luis, the MindSpa migration to Hetzner is done...",
-  "summary": "MindSpa infrastructure migration to Hetzner completed",
+  "raw_text": "Hey Alice, the Acme API migration is done...",
+  "summary": "Acme API infrastructure migration completed",
   "language": "en",
   "sentiment": 0.7,
   "embedding": [0.45, -0.12, ...],
   "timestamp": "2026-03-08T09:15:00Z",
   "ingested_at": "2026-03-08T09:15:02Z",
   "metadata": {
-    "from": "entity_platon",
-    "to": "entity_luis",
-    "thread_id": "thread_mindspa_migration",
+    "from": "entity_bob",
+    "to": "entity_alice",
+    "thread_id": "thread_api_migration",
     "has_attachments": false
   }
 }
@@ -139,7 +138,7 @@ Context boundaries for knowledge isolation.
 scope_root (identity — always accessible)
 ├── scope_career
 │   ├── scope_job_search
-│   └── scope_mindysm
+│   └── scope_acme
 ├── scope_projects
 │   ├── scope_talk_careers
 │   └── scope_seidrum
@@ -154,11 +153,11 @@ Persistent task objects that survive agent sessions.
 ```json
 {
   "_key": "task_001",
-  "title": "Migrate MindSpa DNS to Hetzner",
+  "title": "Migrate Acme DNS to new provider",
   "status": "in_progress",
   "priority": "high",
   "assigned_agent": "personal-assistant",
-  "created_by": "entity_luis",
+  "created_by": "entity_alice",
   "created_from": "content_msg_20260308_001",
   "due_date": "2026-03-10T00:00:00Z",
   "completion_event": "task.completed.task_001",
@@ -196,15 +195,15 @@ Registry of all event types in the system.
 
 ```json
 {
-  "_from": "entities/entity_luis",
-  "_to": "entities/entity_mindysm",
-  "type": "owns",
-  "properties": { "ownership_pct": 100 },
-  "valid_from": "2020-01-01T00:00:00Z",
+  "_from": "entities/entity_alice",
+  "_to": "entities/entity_acme",
+  "type": "works_at",
+  "properties": { "role": "engineer" },
+  "valid_from": "2024-01-01T00:00:00Z",
   "valid_to": null,
   "confidence": 1.0,
   "source_content": "content_registration_doc",
-  "scopes": ["scope_career", "scope_mindysm"]
+  "scopes": ["scope_career", "scope_acme"]
 }
 ```
 
@@ -213,11 +212,11 @@ Registry of all event types in the system.
 ```json
 {
   "_from": "content/content_msg_20260308_001",
-  "_to": "entities/entity_mindspa",
-  "context_snippet": "...the MindSpa migration...",
+  "_to": "entities/entity_acme",
+  "context_snippet": "...the Acme API migration...",
   "mention_type": "direct",
   "sentiment_toward": 0.3,
-  "scopes": ["scope_mindspa"]
+  "scopes": ["scope_acme"]
 }
 ```
 
@@ -225,8 +224,8 @@ Registry of all event types in the system.
 
 ```json
 {
-  "_from": "entities/entity_infrahub",
-  "_to": "scopes/scope_job_search",
+  "_from": "entities/entity_some_tool",
+  "_to": "scopes/scope_projects",
   "relevance": 0.9,
   "added_at": "2026-02-17T00:00:00Z",
   "added_by": "system"
@@ -252,7 +251,7 @@ Registry of all event types in the system.
 {
   "_from": "facts/fact_042",
   "_to": "facts/fact_001",
-  "reason": "User confirmed MindSpa wind-down complete",
+  "reason": "User confirmed project shutdown complete",
   "superseded_at": "2026-01-15T00:00:00Z"
 }
 ```
@@ -261,7 +260,7 @@ Registry of all event types in the system.
 
 ```json
 {
-  "_from": "entities/entity_luis",
+  "_from": "entities/entity_alice",
   "_to": "content/content_msg_20260308_001",
   "role": "recipient",
   "channel": "telegram",

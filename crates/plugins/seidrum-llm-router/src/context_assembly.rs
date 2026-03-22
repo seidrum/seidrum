@@ -487,12 +487,12 @@ mod tests {
     fn make_test_context() -> AgentContextLoaded {
         let inbound_payload = serde_json::json!({
             "platform": "cli",
-            "user_id": "luis",
+            "user_id": "user-1",
             "chat_id": "chat-1",
             "text": "What tasks do I have?",
             "reply_to": null,
             "attachments": [],
-            "metadata": {"user_name": "Luis"}
+            "metadata": {"user_name": "Alice"}
         });
 
         AgentContextLoaded {
@@ -509,13 +509,13 @@ mod tests {
             entities: vec![],
             facts: vec![
                 serde_json::json!({
-                    "subject_name": "Luis",
+                    "subject_name": "Alice",
                     "predicate": "works_at",
                     "object_name": "Acme Corp",
                     "confidence": 0.95
                 }),
                 serde_json::json!({
-                    "subject_name": "Luis",
+                    "subject_name": "Alice",
                     "predicate": "lives_in",
                     "value": "San Francisco",
                     "confidence": 0.8
@@ -545,13 +545,13 @@ mod tests {
     #[test]
     fn test_format_facts() {
         let facts = vec![serde_json::json!({
-            "subject_name": "Luis",
+            "subject_name": "Alice",
             "predicate": "works_at",
             "object_name": "Acme",
             "confidence": 0.95
         })];
         let result = format_facts(&facts);
-        assert!(result.contains("Luis"));
+        assert!(result.contains("Alice"));
         assert!(result.contains("works_at"));
         assert!(result.contains("Acme"));
         assert!(result.contains("95%"));
@@ -591,7 +591,7 @@ mod tests {
         let template = "Hello {{ user_name }}, time is {{ current_time }}.";
         let ctx = make_test_context();
         let result = render_prompt(template, &ctx).unwrap();
-        assert!(result.contains("Hello Luis"));
+        assert!(result.contains("Hello Alice"));
     }
 
     #[test]
@@ -605,7 +605,7 @@ mod tests {
 
         let assembled = assemble_context(&config, &ctx).unwrap();
         assert!(!assembled.system_prompt.is_empty());
-        assert!(assembled.system_prompt.contains("Luis"));
+        assert!(assembled.system_prompt.contains("Alice"));
         // Should have at least the user message
         assert!(!assembled.messages.is_empty());
         // Last message should be the user's current message
@@ -619,6 +619,6 @@ mod tests {
     fn test_extract_user_name_from_metadata() {
         let ctx = make_test_context();
         let name = extract_user_name(&ctx);
-        assert_eq!(name, "Luis");
+        assert_eq!(name, "Alice");
     }
 }
