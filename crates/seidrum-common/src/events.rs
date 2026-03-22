@@ -398,6 +398,13 @@ pub struct PluginRegister {
     pub produced_event_types: Vec<String>,
 }
 
+/// Plugin announces it is shutting down.
+/// Subject: `plugin.deregister`
+#[derive(Serialize, Deserialize, Debug, Clone)]
+pub struct PluginDeregister {
+    pub id: String,
+}
+
 /// Subject: `plugin.{id}.health` (request)
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct PluginHealthRequest {}
@@ -597,6 +604,75 @@ pub struct LlmCallConfig {
     pub temperature: Option<f64>,
     pub max_tokens: Option<u32>,
     pub top_p: Option<f64>,
+}
+
+// ---------------------------------------------------------------------------
+// Plugin Storage Events
+// ---------------------------------------------------------------------------
+
+/// Request to get a value from plugin storage.
+/// Subject: `storage.get` (request/reply)
+#[derive(Serialize, Deserialize, Debug, Clone)]
+pub struct StorageGetRequest {
+    pub plugin_id: String,
+    pub namespace: String,
+    pub key: String,
+}
+
+/// Response to a storage get request.
+#[derive(Serialize, Deserialize, Debug, Clone)]
+pub struct StorageGetResponse {
+    pub found: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub value: Option<serde_json::Value>,
+}
+
+/// Request to set a value in plugin storage.
+/// Subject: `storage.set` (request/reply)
+#[derive(Serialize, Deserialize, Debug, Clone)]
+pub struct StorageSetRequest {
+    pub plugin_id: String,
+    pub namespace: String,
+    pub key: String,
+    pub value: serde_json::Value,
+}
+
+/// Response to a storage set request.
+#[derive(Serialize, Deserialize, Debug, Clone)]
+pub struct StorageSetResponse {
+    pub success: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+}
+
+/// Request to delete a value from plugin storage.
+/// Subject: `storage.delete` (request/reply)
+#[derive(Serialize, Deserialize, Debug, Clone)]
+pub struct StorageDeleteRequest {
+    pub plugin_id: String,
+    pub namespace: String,
+    pub key: String,
+}
+
+/// Response to a storage delete request.
+#[derive(Serialize, Deserialize, Debug, Clone)]
+pub struct StorageDeleteResponse {
+    pub success: bool,
+    pub existed: bool,
+}
+
+/// Request to list keys in a plugin storage namespace.
+/// Subject: `storage.list` (request/reply)
+#[derive(Serialize, Deserialize, Debug, Clone)]
+pub struct StorageListRequest {
+    pub plugin_id: String,
+    pub namespace: String,
+}
+
+/// Response to a storage list request.
+#[derive(Serialize, Deserialize, Debug, Clone)]
+pub struct StorageListResponse {
+    pub keys: Vec<String>,
 }
 
 // ---------------------------------------------------------------------------

@@ -10,6 +10,7 @@ use registry::service::RegistryService;
 
 mod brain;
 mod orchestrator;
+mod plugin_storage;
 mod registry;
 mod scheduler;
 mod scope;
@@ -125,6 +126,13 @@ async fn run_serve() -> anyhow::Result<()> {
     let tool_registry_handle = tool_registry_service.spawn(nats_client.clone()).await?;
     info!("capability registry service started");
 
+    // 4c. Spawn the plugin storage service.
+    let storage_arango =
+        brain::client::ArangoClient::new(&arango_url, &arango_database, &arango_password)?;
+    let storage_service = plugin_storage::service::PluginStorageService::new(storage_arango);
+    let storage_handle = storage_service.spawn(nats_client.clone()).await?;
+    info!("plugin storage service started");
+
     // 5. Spawn the scheduler service (decay + health monitoring).
     let scheduler_arango =
         brain::client::ArangoClient::new(&arango_url, &arango_database, &arango_password)?;
@@ -162,6 +170,9 @@ async fn run_serve() -> anyhow::Result<()> {
         }
         _ = tool_registry_handle => {
             warn!("capability registry service exited unexpectedly");
+        }
+        _ = storage_handle => {
+            warn!("plugin storage service exited unexpectedly");
         }
         _ = scheduler_handle => {
             warn!("scheduler service exited unexpectedly");
@@ -428,6 +439,7 @@ fn run_validate(config_path: &str) -> bool {
             "notification",
             "telegram",
             "cli",
+            "claude-code",
         ]
         .into_iter()
         .collect();
