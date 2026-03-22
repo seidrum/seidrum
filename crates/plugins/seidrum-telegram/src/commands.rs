@@ -4,14 +4,32 @@ use std::time::Duration;
 use anyhow::Result;
 use futures::StreamExt;
 use seidrum_common::events::{
-    EventEnvelope, ToolCallRequest, ToolCallResponse, ToolRegister, ToolSearchRequest,
-    ToolSearchResponse,
+    PluginRegister, StorageDeleteRequest, StorageDeleteResponse, StorageGetRequest,
+    StorageGetResponse, StorageSetRequest, StorageSetResponse, ToolCallRequest, ToolCallResponse,
+    ToolSearchRequest, ToolSearchResponse,
 };
 use seidrum_common::nats_utils::NatsClient;
+use serde::{Deserialize, Serialize};
 use teloxide::prelude::*;
 use teloxide::types::{BotCommand, ThreadId};
 use tokio::sync::RwLock;
 use tracing::{error, info, warn};
+
+/// Mirror of kernel's RegistryQuery for request/reply to registry.query.
+#[derive(Serialize)]
+#[serde(tag = "query_type")]
+enum RegistryQuery {
+    #[serde(rename = "list_plugins")]
+    ListPlugins,
+}
+
+/// Mirror of kernel's RegistryQueryResponse.
+#[derive(Deserialize)]
+struct RegistryQueryResponse {
+    #[allow(dead_code)]
+    success: bool,
+    plugins: Option<Vec<PluginRegister>>,
+}
 
 /// A single command entry in the registry.
 #[derive(Debug, Clone)]
@@ -64,6 +82,20 @@ impl CommandRegistry {
         let cmds = self.commands.read().await;
         cmds.iter().find(|c| c.name == name).cloned()
     }
+
+    /// Remove a command by its capability_id. Returns true if removed.
+    async fn remove_by_capability_id(&self, capability_id: &str) -> bool {
+        let mut cmds = self.commands.write().await;
+        let before = cmds.len();
+        cmds.retain(|c| {
+            if let CommandKind::Capability { capability_id: ref cid, .. } = c.kind {
+                cid != capability_id
+            } else {
+                true
+            }
+        });
+        cmds.len() < before
+    }
 }
 
 /// Built-in commands that the Telegram plugin handles directly.
@@ -84,6 +116,30 @@ fn builtin_commands() -> Vec<CommandEntry> {
         CommandEntry {
             name: "info".to_string(),
             description: "Show chat and thread info".to_string(),
+            usage: None,
+            kind: CommandKind::BuiltIn,
+        },
+        CommandEntry {
+            name: "plugins".to_string(),
+            description: "List active plugins".to_string(),
+            usage: None,
+            kind: CommandKind::BuiltIn,
+        },
+        CommandEntry {
+            name: "link".to_string(),
+            description: "Link this thread to a project directory".to_string(),
+            usage: Some("<path>".to_string()),
+            kind: CommandKind::BuiltIn,
+        },
+        CommandEntry {
+            name: "unlink".to_string(),
+            description: "Unlink this thread from its project directory".to_string(),
+            usage: None,
+            kind: CommandKind::BuiltIn,
+        },
+        CommandEntry {
+            name: "restart".to_string(),
+            description: "Restart the Telegram plugin".to_string(),
             usage: None,
             kind: CommandKind::BuiltIn,
         },
@@ -110,6 +166,8 @@ pub async fn discover_commands(nats: &NatsClient) -> CommandRegistry {
 async fn query_capability_commands(nats: &NatsClient) -> Vec<CommandEntry> {
     let mut entries = Vec::new();
 
+    let mut seen_ids = std::collections::HashSet::new();
+
     for kind_filter in &["command", "both"] {
         let req = ToolSearchRequest {
             query_text: String::new(),
@@ -125,6 +183,9 @@ async fn query_capability_commands(nats: &NatsClient) -> Vec<CommandEntry> {
         {
             Ok(Ok(resp)) => {
                 for tool in resp.tools {
+                    if !seen_ids.insert(tool.tool_id.clone()) {
+                        continue;
+                    }
                     let short_name = extract_command_name(&tool.tool_id, &tool.parameters);
                     // We need the full describe to get plugin_id and call_subject
                     let (plugin_id, call_subject) =
@@ -239,7 +300,7 @@ pub async fn execute_command(
     match entry {
         Some(entry) => match &entry.kind {
             CommandKind::BuiltIn => {
-                execute_builtin(cmd_name, args, chat_id, thread_id, user_id, registry, bot)
+                execute_builtin(cmd_name, args, chat_id, thread_id, user_id, registry, bot, nats)
                     .await
             }
             CommandKind::Capability {
@@ -275,12 +336,13 @@ pub async fn execute_command(
 /// Handle built-in commands.
 async fn execute_builtin(
     command: &str,
-    _args: &str,
+    args: &str,
     chat_id: i64,
     thread_id: Option<ThreadId>,
     user_id: u64,
     registry: &CommandRegistry,
     bot: &Bot,
+    nats: &NatsClient,
 ) -> Result<()> {
     match command {
         "start" => {
@@ -295,7 +357,7 @@ async fn execute_builtin(
         }
         "help" => {
             let commands = registry.list().await;
-            let mut text = String::from("\u{2699}\u{fe0f} *Available Commands*\n\n");
+            let mut text = String::from("\u{2699}\u{fe0f} <b>Available Commands</b>\n\n");
             for cmd in &commands {
                 text.push_str(&format!("/{}", cmd.name));
                 if let Some(ref usage) = cmd.usage {
@@ -303,20 +365,163 @@ async fn execute_builtin(
                 }
                 text.push_str(&format!(" — {}\n", cmd.description));
             }
-            send_reply(bot, chat_id, thread_id, &text).await
+            send_html_reply(bot, chat_id, thread_id, &text).await
         }
         "info" => {
             let thread_str = thread_id
                 .map(|t| format!("{}", t.0))
                 .unwrap_or_else(|| "none".to_string());
             let text = format!(
-                "\u{2139}\u{fe0f} *Chat Info*\n\n\
-                 Chat ID: `{}`\n\
-                 Thread ID: `{}`\n\
-                 User ID: `{}`",
+                "\u{2139}\u{fe0f} <b>Chat Info</b>\n\n\
+                 Chat ID: <code>{}</code>\n\
+                 Thread ID: <code>{}</code>\n\
+                 User ID: <code>{}</code>",
                 chat_id, thread_str, user_id
             );
-            send_reply(bot, chat_id, thread_id, &text).await
+            send_html_reply(bot, chat_id, thread_id, &text).await
+        }
+        "plugins" => {
+            let text = match tokio::time::timeout(
+                Duration::from_secs(3),
+                nats.request::<_, RegistryQueryResponse>("registry.query", &RegistryQuery::ListPlugins),
+            )
+            .await
+            {
+                Ok(Ok(resp)) => {
+                    let plugins = resp.plugins.unwrap_or_default();
+                    if plugins.is_empty() {
+                        "No plugins registered.".to_string()
+                    } else {
+                        let mut text = format!("<b>Active Plugins</b> ({})\n\n", plugins.len());
+                        for p in &plugins {
+                            text.push_str(&format!(
+                                "<b>{}</b> v{}\n{}\n\n",
+                                p.name, p.version, p.description
+                            ));
+                        }
+                        text
+                    }
+                }
+                Ok(Err(err)) => format!("Failed to query plugins: {}", err),
+                Err(_) => "Plugin registry query timed out.".to_string(),
+            };
+            send_html_reply(bot, chat_id, thread_id, &text).await
+        }
+        "link" => {
+            let tid = match thread_id {
+                Some(tid) => tid,
+                None => {
+                    return send_reply(
+                        bot,
+                        chat_id,
+                        thread_id,
+                        "/link can only be used inside a thread.",
+                    )
+                    .await;
+                }
+            };
+
+            let path = args.trim();
+            if path.is_empty() {
+                return send_reply(
+                    bot,
+                    chat_id,
+                    thread_id,
+                    "Usage: /link <path>\nExample: /link /home/user/projects/myapp",
+                )
+                .await;
+            }
+
+            let storage_key = format!("{}:{}", chat_id, tid.0);
+            let req = StorageSetRequest {
+                plugin_id: "telegram".to_string(),
+                namespace: "thread_links".to_string(),
+                key: storage_key,
+                value: serde_json::json!({ "working_dir": path }),
+            };
+
+            match tokio::time::timeout(
+                Duration::from_secs(5),
+                nats.request::<_, StorageSetResponse>("storage.set", &req),
+            )
+            .await
+            {
+                Ok(Ok(resp)) if resp.success => {
+                    info!(%chat_id, thread_id = %tid.0, %path, "Thread linked to project");
+                    send_html_reply(
+                        bot,
+                        chat_id,
+                        thread_id,
+                        &format!("Thread linked to <code>{}</code>", path),
+                    )
+                    .await
+                }
+                Ok(Ok(resp)) => {
+                    let err_msg = resp.error.unwrap_or_else(|| "unknown error".to_string());
+                    send_reply(
+                        bot,
+                        chat_id,
+                        thread_id,
+                        &format!("Failed to save link: {}", err_msg),
+                    )
+                    .await
+                }
+                Ok(Err(err)) => {
+                    warn!(%err, "storage.set request failed");
+                    send_reply(bot, chat_id, thread_id, "Failed to save link.").await
+                }
+                Err(_) => {
+                    send_reply(bot, chat_id, thread_id, "Storage request timed out.").await
+                }
+            }
+        }
+        "unlink" => {
+            let tid = match thread_id {
+                Some(tid) => tid,
+                None => {
+                    return send_reply(
+                        bot,
+                        chat_id,
+                        thread_id,
+                        "/unlink can only be used inside a thread.",
+                    )
+                    .await;
+                }
+            };
+
+            let storage_key = format!("{}:{}", chat_id, tid.0);
+            let req = StorageDeleteRequest {
+                plugin_id: "telegram".to_string(),
+                namespace: "thread_links".to_string(),
+                key: storage_key,
+            };
+
+            match tokio::time::timeout(
+                Duration::from_secs(5),
+                nats.request::<_, StorageDeleteResponse>("storage.delete", &req),
+            )
+            .await
+            {
+                Ok(Ok(resp)) if resp.existed => {
+                    info!(%chat_id, thread_id = %tid.0, "Thread unlinked");
+                    send_reply(bot, chat_id, thread_id, "Thread unlinked from project.").await
+                }
+                Ok(Ok(_)) => {
+                    send_reply(bot, chat_id, thread_id, "This thread is not linked to any project.").await
+                }
+                Ok(Err(err)) => {
+                    warn!(%err, "storage.delete request failed");
+                    send_reply(bot, chat_id, thread_id, "Failed to unlink.").await
+                }
+                Err(_) => {
+                    send_reply(bot, chat_id, thread_id, "Storage request timed out.").await
+                }
+            }
+        }
+        "restart" => {
+            send_reply(bot, chat_id, thread_id, "Restarting Telegram plugin...").await?;
+            info!("Restart requested via /restart command");
+            std::process::exit(0);
         }
         _ => {
             send_reply(
@@ -327,6 +532,33 @@ async fn execute_builtin(
             )
             .await
         }
+    }
+}
+
+/// Look up the linked project directory for a thread via plugin storage.
+async fn get_thread_working_dir(
+    nats: &NatsClient,
+    chat_id: i64,
+    thread_id: Option<ThreadId>,
+) -> Option<String> {
+    let tid = thread_id?;
+    let storage_key = format!("{}:{}", chat_id, tid.0);
+    let req = StorageGetRequest {
+        plugin_id: "telegram".to_string(),
+        namespace: "thread_links".to_string(),
+        key: storage_key,
+    };
+
+    match tokio::time::timeout(
+        Duration::from_secs(3),
+        nats.request::<_, StorageGetResponse>("storage.get", &req),
+    )
+    .await
+    {
+        Ok(Ok(resp)) if resp.found => resp
+            .value
+            .and_then(|v| v.get("working_dir").and_then(|d| d.as_str().map(|s| s.to_string()))),
+        _ => None,
     }
 }
 
@@ -341,10 +573,18 @@ async fn execute_capability(
     bot: &Bot,
     nats: &NatsClient,
 ) -> Result<()> {
-    let arguments = serde_json::json!({
+    let mut arguments = serde_json::json!({
         "args": args,
         "chat_id": chat_id.to_string(),
     });
+
+    // Inject linked working_dir if this thread is linked to a project
+    if let Some(working_dir) = get_thread_working_dir(nats, chat_id, thread_id).await {
+        arguments
+            .as_object_mut()
+            .unwrap()
+            .insert("working_dir".to_string(), serde_json::json!(working_dir));
+    }
 
     let req = ToolCallRequest {
         tool_id: capability_id.to_string(),
@@ -354,24 +594,26 @@ async fn execute_capability(
     };
 
     match tokio::time::timeout(
-        Duration::from_secs(30),
+        Duration::from_secs(120),
         nats.request::<_, ToolCallResponse>(call_subject, &req),
     )
     .await
     {
         Ok(Ok(resp)) => {
             let text = if resp.is_error {
-                format!(
-                    "\u{274c} Command failed: {}",
-                    resp.result
-                        .as_str()
-                        .unwrap_or(&resp.result.to_string())
-                )
+                let msg = resp.result.as_str()
+                    .map(|s| s.to_string())
+                    .unwrap_or_else(|| resp.result.to_string());
+                format!("\u{274c} Command failed: {}", msg)
             } else {
+                // Handle both string results and JSON objects with a "result" field
                 resp.result
                     .as_str()
-                    .unwrap_or(&resp.result.to_string())
-                    .to_string()
+                    .map(|s| s.to_string())
+                    .or_else(|| {
+                        resp.result.get("result").and_then(|v| v.as_str()).map(|s| s.to_string())
+                    })
+                    .unwrap_or_else(|| resp.result.to_string())
             };
             send_reply(bot, chat_id, thread_id, &text).await
         }
@@ -397,7 +639,7 @@ async fn execute_capability(
     }
 }
 
-/// Send a text reply to the given chat, optionally in a thread.
+/// Send a plain text reply to the given chat, optionally in a thread.
 async fn send_reply(bot: &Bot, chat_id: i64, thread_id: Option<ThreadId>, text: &str) -> Result<()> {
     let chat = ChatId(chat_id);
     let mut req = bot.send_message(chat, text);
@@ -408,15 +650,61 @@ async fn send_reply(bot: &Bot, chat_id: i64, thread_id: Option<ThreadId>, text: 
     Ok(())
 }
 
-/// Spawn a background task that listens for `capability.registered` events
-/// and refreshes the command registry + Telegram menu when new commands appear.
+/// Send an HTML-formatted reply to the given chat, optionally in a thread.
+/// Falls back to plain text if Telegram rejects the HTML.
+async fn send_html_reply(bot: &Bot, chat_id: i64, thread_id: Option<ThreadId>, text: &str) -> Result<()> {
+    let chat = ChatId(chat_id);
+    let mut req = bot.send_message(chat, text);
+    req = req.parse_mode(teloxide::types::ParseMode::Html);
+    if let Some(tid) = thread_id {
+        req = req.message_thread_id(tid);
+    }
+
+    match req.send().await {
+        Ok(_) => Ok(()),
+        Err(err) => {
+            warn!(%err, "HTML send failed, retrying as plain text");
+            let mut req = bot.send_message(chat, &crate::markdown::strip_markdown(text));
+            if let Some(tid) = thread_id {
+                req = req.message_thread_id(tid);
+            }
+            req.send().await?;
+            Ok(())
+        }
+    }
+}
+
+/// Capability entry published by the kernel on `capability.registered`.
+#[derive(Deserialize)]
+struct CapabilityRegistered {
+    tool_id: String,
+    plugin_id: String,
+    #[allow(dead_code)]
+    name: String,
+    summary_md: String,
+    parameters: serde_json::Value,
+    call_subject: String,
+    #[serde(default)]
+    kind: String,
+}
+
+/// Event published by the kernel on `capability.deregistered`.
+#[derive(Deserialize)]
+struct CapabilityDeregistered {
+    tool_id: String,
+    #[allow(dead_code)]
+    plugin_id: String,
+}
+
+/// Spawn a background task that listens for `capability.registered` and
+/// `capability.deregistered` events to keep the command registry in sync.
 pub async fn spawn_capability_listener(
     nats: NatsClient,
     registry: CommandRegistry,
     bot: Bot,
 ) {
     tokio::spawn(async move {
-        let mut sub = match nats.subscribe("capability.registered").await {
+        let mut reg_sub = match nats.subscribe("capability.registered").await {
             Ok(sub) => sub,
             Err(err) => {
                 error!(%err, "Failed to subscribe to capability.registered");
@@ -424,46 +712,66 @@ pub async fn spawn_capability_listener(
             }
         };
 
-        info!("Listening for capability.registered events");
-
-        while let Some(msg) = sub.next().await {
-            let envelope: EventEnvelope = match serde_json::from_slice(&msg.payload) {
-                Ok(e) => e,
-                Err(err) => {
-                    warn!(%err, "Failed to parse capability.registered envelope");
-                    continue;
-                }
-            };
-
-            let reg: ToolRegister = match serde_json::from_value(envelope.payload) {
-                Ok(r) => r,
-                Err(err) => {
-                    warn!(%err, "Failed to parse ToolRegister from envelope payload");
-                    continue;
-                }
-            };
-
-            if reg.kind != "command" && reg.kind != "both" {
-                continue;
+        let mut dereg_sub = match nats.subscribe("capability.deregistered").await {
+            Ok(sub) => sub,
+            Err(err) => {
+                error!(%err, "Failed to subscribe to capability.deregistered");
+                return;
             }
+        };
 
-            info!(tool_id = %reg.tool_id, kind = %reg.kind, "New command capability registered");
+        info!("Listening for capability.registered and capability.deregistered events");
 
-            let short_name = extract_command_name(&reg.tool_id, &reg.parameters);
+        loop {
+            tokio::select! {
+                Some(msg) = reg_sub.next() => {
+                    let reg: CapabilityRegistered = match serde_json::from_slice(&msg.payload) {
+                        Ok(r) => r,
+                        Err(err) => {
+                            warn!(%err, "Failed to parse capability.registered event");
+                            continue;
+                        }
+                    };
 
-            let entry = CommandEntry {
-                name: short_name,
-                description: reg.summary_md,
-                usage: None,
-                kind: CommandKind::Capability {
-                    capability_id: reg.tool_id,
-                    plugin_id: reg.plugin_id,
-                    call_subject: reg.call_subject,
-                },
-            };
+                    if reg.kind != "command" && reg.kind != "both" {
+                        continue;
+                    }
 
-            registry.add(entry).await;
-            set_telegram_commands(&bot, &registry).await;
+                    info!(tool_id = %reg.tool_id, kind = %reg.kind, "New command capability registered");
+
+                    let short_name = extract_command_name(&reg.tool_id, &reg.parameters);
+
+                    let entry = CommandEntry {
+                        name: short_name,
+                        description: reg.summary_md,
+                        usage: None,
+                        kind: CommandKind::Capability {
+                            capability_id: reg.tool_id,
+                            plugin_id: reg.plugin_id,
+                            call_subject: reg.call_subject,
+                        },
+                    };
+
+                    registry.add(entry).await;
+                    set_telegram_commands(&bot, &registry).await;
+                }
+                Some(msg) = dereg_sub.next() => {
+                    let dereg: CapabilityDeregistered = match serde_json::from_slice(&msg.payload) {
+                        Ok(r) => r,
+                        Err(err) => {
+                            warn!(%err, "Failed to parse capability.deregistered event");
+                            continue;
+                        }
+                    };
+
+                    info!(tool_id = %dereg.tool_id, "Command capability deregistered");
+
+                    if registry.remove_by_capability_id(&dereg.tool_id).await {
+                        set_telegram_commands(&bot, &registry).await;
+                    }
+                }
+                else => break,
+            }
         }
     });
 }

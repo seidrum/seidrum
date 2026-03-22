@@ -11,8 +11,13 @@ use chrono::Utc;
 use tokio_cron_scheduler::{Job, JobScheduler};
 use tracing::{error, info, warn};
 
+use std::collections::HashMap;
+use std::sync::Arc;
+use tokio::sync::Mutex;
+
 use seidrum_common::events::{
-    DecayCompleted, EventEnvelope, PluginHealthRequest, PluginHealthResponse, SystemHealth,
+    DecayCompleted, EventEnvelope, PluginDeregister, PluginHealthRequest, PluginHealthResponse,
+    SystemHealth,
 };
 
 use crate::brain::client::ArangoClient;
@@ -118,13 +123,18 @@ impl SchedulerService {
         let health_nats = self.nats.clone();
         let health_registry = self.registry.clone();
         let health_start_time = self.start_time;
+        let failure_counts: Arc<Mutex<HashMap<String, u32>>> =
+            Arc::new(Mutex::new(HashMap::new()));
 
         let health_job = Job::new_async("0/30 * * * * *", move |_uuid, _lock| {
             let nats = health_nats.clone();
             let registry = health_registry.clone();
             let start_time = health_start_time;
+            let failures = failure_counts.clone();
             Box::pin(async move {
-                if let Err(e) = run_health_check(&nats, &registry, start_time).await {
+                if let Err(e) =
+                    run_health_check(&nats, &registry, start_time, &failures).await
+                {
                     error!(error = %e, "scheduler: health check failed");
                 }
             })
@@ -177,14 +187,21 @@ async fn run_confidence_decay(arango: &ArangoClient) -> Result<u32> {
     Ok(count)
 }
 
+/// Number of consecutive health check failures before auto-deregistering a plugin.
+/// At 30s intervals, 3 failures = 90 seconds unresponsive.
+const MAX_HEALTH_FAILURES: u32 = 3;
+
 /// Ping every registered plugin via NATS request/reply and publish a SystemHealth event.
+/// Tracks consecutive failures and auto-deregisters unresponsive plugins.
 async fn run_health_check(
     nats: &async_nats::Client,
     registry: &RegistryService,
     start_time: chrono::DateTime<Utc>,
+    failure_counts: &Mutex<HashMap<String, u32>>,
 ) -> Result<()> {
     let plugins = registry.list_plugins().await;
     let mut active_plugins: Vec<String> = Vec::new();
+    let mut failed_plugins: Vec<String> = Vec::new();
 
     for plugin in &plugins {
         let health_subject = &plugin.health_subject;
@@ -193,7 +210,7 @@ async fn run_health_check(
         let request_payload =
             serde_json::to_vec(&PluginHealthRequest {}).unwrap_or_default();
 
-        match tokio::time::timeout(
+        let is_responsive = match tokio::time::timeout(
             Duration::from_secs(5),
             nats.request(health_subject.clone(), request_payload.into()),
         )
@@ -202,18 +219,16 @@ async fn run_health_check(
             Ok(Ok(response)) => {
                 match serde_json::from_slice::<PluginHealthResponse>(&response.payload) {
                     Ok(health) => {
-                        if health.status == "healthy" {
-                            active_plugins.push(plugin.id.clone());
-                        } else {
+                        if health.status != "healthy" {
                             warn!(
                                 plugin_id = %plugin.id,
                                 status = %health.status,
                                 last_error = ?health.last_error,
                                 "plugin reports non-healthy status"
                             );
-                            // Still consider it active if it responded.
-                            active_plugins.push(plugin.id.clone());
                         }
+                        // Any response = responsive
+                        true
                     }
                     Err(e) => {
                         warn!(
@@ -221,6 +236,7 @@ async fn run_health_check(
                             error = %e,
                             "failed to parse health response from plugin"
                         );
+                        false
                     }
                 }
             }
@@ -230,12 +246,55 @@ async fn run_health_check(
                     error = %e,
                     "health ping failed for plugin"
                 );
+                false
             }
             Err(_) => {
                 warn!(
                     plugin_id = %plugin.id,
                     "plugin health ping timed out (5s)"
                 );
+                false
+            }
+        };
+
+        if is_responsive {
+            active_plugins.push(plugin.id.clone());
+        } else {
+            failed_plugins.push(plugin.id.clone());
+        }
+    }
+
+    // Update failure counts and auto-deregister dead plugins
+    {
+        let mut counts = failure_counts.lock().await;
+
+        // Reset counters for responsive plugins
+        for id in &active_plugins {
+            counts.remove(id);
+        }
+
+        // Increment counters for failed plugins
+        for id in &failed_plugins {
+            let count = counts.entry(id.clone()).or_insert(0);
+            *count += 1;
+
+            if *count >= MAX_HEALTH_FAILURES {
+                warn!(
+                    plugin_id = %id,
+                    consecutive_failures = *count,
+                    "auto-deregistering unresponsive plugin"
+                );
+
+                // Publish plugin.deregister — the registry and tool registry
+                // both subscribe to this and will clean up
+                let dereg = PluginDeregister { id: id.clone() };
+                if let Ok(bytes) = serde_json::to_vec(&dereg) {
+                    if let Err(e) = nats.publish("plugin.deregister", bytes.into()).await {
+                        error!(error = %e, plugin_id = %id, "failed to publish auto-deregister");
+                    }
+                }
+
+                counts.remove(id);
             }
         }
     }
@@ -244,9 +303,9 @@ async fn run_health_check(
 
     let system_health = SystemHealth {
         nats_connected: true,
-        arangodb_connected: true, // If we got this far, NATS is up
+        arangodb_connected: true,
         active_plugins,
-        active_agents: 0, // Will be populated when orchestrator is wired
+        active_agents: 0,
         uptime_seconds,
     };
 

@@ -53,14 +53,6 @@ fn default_kind() -> String {
     "tool".to_string()
 }
 
-/// Confirmation published on `tool.registered`.
-#[derive(Serialize, Deserialize, Debug, Clone)]
-pub struct ToolRegisteredConfirmation {
-    pub tool_id: String,
-    pub plugin_id: String,
-    pub name: String,
-}
-
 /// Request payload for `capability.search`.
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct ToolSearchRequest {
@@ -259,25 +251,24 @@ impl ToolRegistryService {
             tools.insert(entry.tool_id.clone(), entry);
         }
 
-        // Publish confirmation
-        let confirmation = ToolRegisteredConfirmation {
-            tool_id: tool_id.clone(),
-            plugin_id: plugin_id.clone(),
-            name: name.clone(),
-        };
-        match serde_json::to_vec(&confirmation) {
-            Ok(bytes) => {
-                if let Err(e) = nats
-                    .publish("capability.registered".to_string(), bytes.into())
-                    .await
-                {
-                    warn!(error = %e, "failed to publish capability.registered confirmation");
+        // Publish the full entry so subscribers (e.g., telegram) can discover it live
+        let tools = self.tools.read().await;
+        if let Some(registered_entry) = tools.get(&tool_id) {
+            match serde_json::to_vec(registered_entry) {
+                Ok(bytes) => {
+                    if let Err(e) = nats
+                        .publish("capability.registered".to_string(), bytes.into())
+                        .await
+                    {
+                        warn!(error = %e, "failed to publish capability.registered");
+                    }
+                }
+                Err(e) => {
+                    warn!(error = %e, "failed to serialize capability.registered");
                 }
             }
-            Err(e) => {
-                warn!(error = %e, "failed to serialize capability.registered confirmation");
-            }
         }
+        drop(tools);
 
         info!(
             tool_id = %tool_id,
@@ -287,6 +278,58 @@ impl ToolRegistryService {
             "capability registered"
         );
         Ok(())
+    }
+
+    /// Remove all capabilities belonging to a plugin (on plugin deregistration).
+    /// Returns the removed tool_ids.
+    async fn deregister_by_plugin(
+        &self,
+        plugin_id: &str,
+        nats: &async_nats::Client,
+    ) -> Vec<String> {
+        let mut tools = self.tools.write().await;
+        let tool_ids: Vec<String> = tools
+            .values()
+            .filter(|t| t.plugin_id == plugin_id)
+            .map(|t| t.tool_id.clone())
+            .collect();
+
+        for tid in &tool_ids {
+            tools.remove(tid);
+        }
+        drop(tools);
+
+        // Remove from ArangoDB
+        if !tool_ids.is_empty() {
+            let query = r#"
+                FOR doc IN capabilities
+                    FILTER doc.plugin_id == @plugin_id
+                    REMOVE doc IN capabilities
+                    RETURN OLD.tool_id
+            "#;
+            let bind_vars = serde_json::json!({ "plugin_id": plugin_id });
+            if let Err(e) = self.arango.execute_aql(query, &bind_vars).await {
+                warn!(error = %e, %plugin_id, "failed to remove capabilities from ArangoDB");
+            }
+
+            // Publish deregistration events so subscribers (telegram) can update
+            for tid in &tool_ids {
+                let event = serde_json::json!({ "tool_id": tid, "plugin_id": plugin_id });
+                if let Ok(bytes) = serde_json::to_vec(&event) {
+                    let _ = nats
+                        .publish("capability.deregistered".to_string(), bytes.into())
+                        .await;
+                }
+            }
+
+            info!(
+                %plugin_id,
+                count = tool_ids.len(),
+                "capabilities deregistered"
+            );
+        }
+
+        tool_ids
     }
 
     /// Handle `capability.search`: full-text search over summary_md and manual_md.
@@ -539,6 +582,12 @@ impl ToolRegistryService {
             .context("failed to subscribe to capability.register")?;
         info!("capability_registry: subscribed to capability.register");
 
+        let mut plugin_dereg_sub = nats_client
+            .subscribe("plugin.deregister".to_string())
+            .await
+            .context("failed to subscribe to plugin.deregister")?;
+        info!("capability_registry: subscribed to plugin.deregister");
+
         let mut search_sub = nats_client
             .subscribe("capability.search".to_string())
             .await
@@ -567,6 +616,11 @@ impl ToolRegistryService {
                                     "failed to deserialize capability.register payload"
                                 );
                             }
+                        }
+                    }
+                    Some(msg) = plugin_dereg_sub.next() => {
+                        if let Ok(dereg) = serde_json::from_slice::<seidrum_common::events::PluginDeregister>(&msg.payload) {
+                            self.deregister_by_plugin(&dereg.id, &nats_client).await;
                         }
                     }
                     Some(msg) = search_sub.next() => {

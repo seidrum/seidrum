@@ -13,7 +13,7 @@ use serde::{Deserialize, Serialize};
 use tokio::sync::RwLock;
 use tracing::{info, warn};
 
-use seidrum_common::events::PluginRegister;
+use seidrum_common::events::{PluginDeregister, PluginRegister};
 
 /// Thread-safe in-memory plugin registry.
 #[derive(Clone)]
@@ -60,6 +60,18 @@ impl RegistryService {
         Self {
             plugins: Arc::new(RwLock::new(HashMap::new())),
         }
+    }
+
+    /// Remove a plugin from the registry.
+    pub async fn deregister_plugin(&self, plugin_id: &str) -> bool {
+        let mut plugins = self.plugins.write().await;
+        let existed = plugins.remove(plugin_id).is_some();
+        if existed {
+            info!(plugin_id = %plugin_id, "plugin deregistered");
+        } else {
+            warn!(plugin_id = %plugin_id, "deregister: plugin not found");
+        }
+        existed
     }
 
     /// Register a plugin. Overwrites any previous registration with the same ID.
@@ -190,6 +202,12 @@ impl RegistryService {
             .context("failed to subscribe to plugin.register")?;
         info!("registry: subscribed to plugin.register");
 
+        let mut deregister_sub = nats_client
+            .subscribe("plugin.deregister".to_string())
+            .await
+            .context("failed to subscribe to plugin.deregister")?;
+        info!("registry: subscribed to plugin.deregister");
+
         let mut query_sub = nats_client
             .subscribe("registry.query".to_string())
             .await
@@ -208,6 +226,19 @@ impl RegistryService {
                                 warn!(
                                     error = %e,
                                     "failed to deserialize plugin.register payload"
+                                );
+                            }
+                        }
+                    }
+                    Some(msg) = deregister_sub.next() => {
+                        match serde_json::from_slice::<PluginDeregister>(&msg.payload) {
+                            Ok(dereg) => {
+                                self.deregister_plugin(&dereg.id).await;
+                            }
+                            Err(e) => {
+                                warn!(
+                                    error = %e,
+                                    "failed to deserialize plugin.deregister payload"
                                 );
                             }
                         }
