@@ -13,7 +13,7 @@ use serde::{Deserialize, Serialize};
 use tokio::sync::RwLock;
 use tracing::{info, warn};
 
-use seidrum_common::events::{PluginDeregister, PluginRegister};
+use seidrum_common::events::{EventEnvelope, PluginDeregister, PluginRegister};
 
 /// Thread-safe in-memory plugin registry.
 #[derive(Clone)]
@@ -218,9 +218,16 @@ impl RegistryService {
             loop {
                 tokio::select! {
                     Some(msg) = register_sub.next() => {
-                        match serde_json::from_slice::<PluginRegister>(&msg.payload) {
-                            Ok(registration) => {
-                                self.register_plugin(registration).await;
+                        // Plugins may publish as raw PluginRegister or wrapped in EventEnvelope
+                        let registration = serde_json::from_slice::<PluginRegister>(&msg.payload)
+                            .or_else(|_| {
+                                let envelope: EventEnvelope = serde_json::from_slice(&msg.payload)?;
+                                serde_json::from_value::<PluginRegister>(envelope.payload)
+                            });
+
+                        match registration {
+                            Ok(reg) => {
+                                self.register_plugin(reg).await;
                             }
                             Err(e) => {
                                 warn!(
