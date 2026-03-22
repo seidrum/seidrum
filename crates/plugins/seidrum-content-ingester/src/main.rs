@@ -3,9 +3,7 @@ use std::collections::HashMap;
 use anyhow::{Context, Result};
 use clap::Parser;
 use futures::StreamExt;
-use seidrum_common::events::{
-    ChannelInbound, ContentStoreRequest, EventEnvelope, PluginRegister,
-};
+use seidrum_common::events::{ChannelInbound, ContentStoreRequest, EventEnvelope, PluginRegister};
 use serde::{Deserialize, Serialize};
 use tracing::{error, info, warn};
 
@@ -134,13 +132,8 @@ async fn main() -> Result<()> {
         produced_event_types: vec![],
     };
 
-    let register_envelope = EventEnvelope::new(
-        "plugin.register",
-        "content-ingester",
-        None,
-        None,
-        &register,
-    )?;
+    let register_envelope =
+        EventEnvelope::new("plugin.register", "content-ingester", None, None, &register)?;
     let register_bytes = serde_json::to_vec(&register_envelope)?;
     nats.publish("plugin.register", register_bytes.into())
         .await

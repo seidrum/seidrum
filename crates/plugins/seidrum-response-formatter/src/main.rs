@@ -4,9 +4,7 @@ use futures::StreamExt as _;
 
 use tracing::{error, info, warn};
 
-use seidrum_common::events::{
-    ChannelOutbound, EventEnvelope, LlmResponse, PluginRegister,
-};
+use seidrum_common::events::{ChannelOutbound, EventEnvelope, LlmResponse, PluginRegister};
 use seidrum_common::nats_utils::NatsClient;
 
 // ---------------------------------------------------------------------------
@@ -115,9 +113,7 @@ fn format_cli(text: &str) -> String {
         return "(empty response)".to_string();
     }
     // For CLI, strip common markdown formatting for cleaner terminal output
-    text.replace("**", "")
-        .replace("__", "")
-        .replace("```", "")
+    text.replace("**", "").replace("__", "").replace("```", "")
 }
 
 // ---------------------------------------------------------------------------

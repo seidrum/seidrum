@@ -32,7 +32,11 @@ struct Cli {
     provider: String,
 
     /// Path to the Tera prompt template file
-    #[arg(long, env = "LLM_PROMPT_PATH", default_value = "./prompts/assistant.md")]
+    #[arg(
+        long,
+        env = "LLM_PROMPT_PATH",
+        default_value = "./prompts/assistant.md"
+    )]
     prompt_path: String,
 
     /// Maximum context window size in tokens
@@ -144,11 +148,8 @@ async fn main() -> Result<()> {
         "produces": ["llm.response"],
         "health_subject": "plugin.llm-router.health",
     });
-    nats.publish(
-        "plugin.register",
-        serde_json::to_vec(&register)?.into(),
-    )
-    .await?;
+    nats.publish("plugin.register", serde_json::to_vec(&register)?.into())
+        .await?;
     info!("Published plugin.register");
 
     // Subscribe to both subjects
@@ -235,9 +236,7 @@ async fn main() -> Result<()> {
 }
 
 /// Pull the next message from an async-nats subscriber.
-async fn futures_next(
-    sub: &mut async_nats::Subscriber,
-) -> Option<async_nats::Message> {
+async fn futures_next(sub: &mut async_nats::Subscriber) -> Option<async_nats::Message> {
     use futures::StreamExt as _;
     sub.next().await
 }
@@ -311,7 +310,12 @@ async fn handle_message(
                 })
                 .collect();
 
-            (Some(assembled.system_prompt), unified_msgs, agent_id, user_text)
+            (
+                Some(assembled.system_prompt),
+                unified_msgs,
+                agent_id,
+                user_text,
+            )
         } else {
             // Simple path for channel.*.inbound -- just the user message
             let inbound: ChannelInbound = serde_json::from_value(envelope.payload)?;
@@ -335,7 +339,8 @@ async fn handle_message(
 
     // Query tool registry for available tools
     let mut tool_schemas = tools::meta_tools();
-    let registry_tools = tools::query_tool_registry(nats, &user_text_for_tools, max_dynamic_tools).await;
+    let registry_tools =
+        tools::query_tool_registry(nats, &user_text_for_tools, max_dynamic_tools).await;
     // Deduplicate: only add registry tools whose names don't collide with meta tools
     let meta_names: Vec<String> = tool_schemas.iter().map(|t| t.name.clone()).collect();
     for t in registry_tools {
@@ -344,7 +349,10 @@ async fn handle_message(
         }
     }
 
-    info!(tool_count = tool_schemas.len(), "Tools collected for LLM request");
+    info!(
+        tool_count = tool_schemas.len(),
+        "Tools collected for LLM request"
+    );
 
     // Build UnifiedLlmRequest
     let unified_request = UnifiedLlmRequest {
@@ -384,38 +392,36 @@ async fn handle_message(
     let duration_ms = start.elapsed().as_millis() as u64;
 
     let llm_response: LlmResponse = match provider_response {
-        Ok(Ok(resp_msg)) => {
-            match serde_json::from_slice::<LlmResponse>(&resp_msg.payload) {
-                Ok(resp) => {
-                    info!(
-                        provider = %provider,
-                        model = %resp.model_used,
-                        duration_ms,
-                        tokens = resp.tokens.total_tokens,
-                        "LLM provider response received"
-                    );
-                    resp
-                }
-                Err(e) => {
-                    error!(error = %e, "Failed to parse LLM provider response");
-                    LlmResponse {
-                        agent_id: agent_id.clone(),
-                        content: Some(format!("Error: failed to parse provider response: {}", e)),
-                        tool_calls: None,
-                        model_used: "unknown".to_string(),
-                        provider: provider.to_string(),
-                        tokens: TokenUsage {
-                            prompt_tokens: 0,
-                            completion_tokens: 0,
-                            total_tokens: 0,
-                            estimated_cost_usd: 0.0,
-                        },
-                        duration_ms,
-                        finish_reason: "error".to_string(),
-                    }
+        Ok(Ok(resp_msg)) => match serde_json::from_slice::<LlmResponse>(&resp_msg.payload) {
+            Ok(resp) => {
+                info!(
+                    provider = %provider,
+                    model = %resp.model_used,
+                    duration_ms,
+                    tokens = resp.tokens.total_tokens,
+                    "LLM provider response received"
+                );
+                resp
+            }
+            Err(e) => {
+                error!(error = %e, "Failed to parse LLM provider response");
+                LlmResponse {
+                    agent_id: agent_id.clone(),
+                    content: Some(format!("Error: failed to parse provider response: {}", e)),
+                    tool_calls: None,
+                    model_used: "unknown".to_string(),
+                    provider: provider.to_string(),
+                    tokens: TokenUsage {
+                        prompt_tokens: 0,
+                        completion_tokens: 0,
+                        total_tokens: 0,
+                        estimated_cost_usd: 0.0,
+                    },
+                    duration_ms,
+                    finish_reason: "error".to_string(),
                 }
             }
-        }
+        },
         Ok(Err(e)) => {
             error!(error = %e, provider = %provider, "NATS request to LLM provider failed");
             LlmResponse {
@@ -471,8 +477,7 @@ async fn handle_message(
     };
 
     let envelope_bytes = serde_json::to_vec(&out_envelope)?;
-    nats.publish("llm.response", envelope_bytes.into())
-        .await?;
+    nats.publish("llm.response", envelope_bytes.into()).await?;
 
     info!(event_id = %out_envelope.id, "Published llm.response");
 

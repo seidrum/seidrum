@@ -76,8 +76,9 @@ async fn main() -> Result<()> {
         id: "tool-dispatcher".to_string(),
         name: "Tool Dispatcher".to_string(),
         version: "0.1.0".to_string(),
-        description: "Routes unified capability.call requests to the plugin that owns the capability"
-            .to_string(),
+        description:
+            "Routes unified capability.call requests to the plugin that owns the capability"
+                .to_string(),
         consumes: vec!["capability.call".to_string()],
         produces: vec![],
         health_subject: "plugin.tool-dispatcher.health".to_string(),
@@ -101,16 +102,17 @@ async fn main() -> Result<()> {
     });
 
     // Subscribe to capability.call (request/reply service)
-    let mut sub = nats.inner().subscribe("capability.call".to_string()).await?;
+    let mut sub = nats
+        .inner()
+        .subscribe("capability.call".to_string())
+        .await?;
     info!("Subscribed to capability.call (request/reply)");
 
     while let Some(msg) = sub.next().await {
         let nats_clone = nats.clone();
         let cache_clone = cache.clone();
         tokio::spawn(async move {
-            if let Err(e) =
-                handle_tool_call(msg, &nats_clone, &cache_clone, timeout).await
-            {
+            if let Err(e) = handle_tool_call(msg, &nats_clone, &cache_clone, timeout).await {
                 error!(error = %e, "Failed to handle capability.call");
             }
         });
@@ -405,10 +407,7 @@ mod tests {
             let r = cache.read().await;
             let entry = r.get("tool-1").expect("tool-1 should exist in cache");
             assert_eq!(entry.plugin_id, "plugin-code-exec");
-            assert_eq!(
-                entry.call_subject,
-                "plugin.code-exec.tool.run_python"
-            );
+            assert_eq!(entry.call_subject, "plugin.code-exec.tool.run_python");
         }
     }
 
@@ -509,10 +508,7 @@ mod tests {
 
         assert!(deserialized.is_error);
         assert_eq!(deserialized.tool_id, "tool-missing");
-        assert_eq!(
-            deserialized.result["error"],
-            "Unknown tool: tool-missing"
-        );
+        assert_eq!(deserialized.result["error"], "Unknown tool: tool-missing");
     }
 
     #[test]

@@ -91,7 +91,10 @@ impl ConnectionManager {
 
     /// Get the sender channel for a connected plugin.
     pub fn get_sender(&self, plugin_id: &str) -> Option<mpsc::UnboundedSender<ServerMessage>> {
-        self.inner.connections.get(plugin_id).map(|c| c.sender.clone())
+        self.inner
+            .connections
+            .get(plugin_id)
+            .map(|c| c.sender.clone())
     }
 
     /// Add a subscription task handle to an existing connection.
@@ -162,7 +165,8 @@ impl ConnectionManager {
 
     /// List all connected plugin IDs.
     pub fn list_plugin_ids(&self) -> Vec<String> {
-        self.inner.connections
+        self.inner
+            .connections
             .iter()
             .map(|e| e.key().clone())
             .collect()

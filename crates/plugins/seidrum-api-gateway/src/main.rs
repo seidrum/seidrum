@@ -36,11 +36,7 @@ struct Cli {
     nats_url: String,
 
     /// Listen address for the HTTP/WebSocket server
-    #[arg(
-        long,
-        env = "GATEWAY_LISTEN_ADDR",
-        default_value = "0.0.0.0:8080"
-    )]
+    #[arg(long, env = "GATEWAY_LISTEN_ADDR", default_value = "0.0.0.0:8080")]
     listen_addr: String,
 
     /// API key for authentication (required)

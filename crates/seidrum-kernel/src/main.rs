@@ -122,7 +122,8 @@ async fn run_serve() -> anyhow::Result<()> {
     // 4b. Spawn the tool registry service.
     let tool_registry_arango =
         brain::client::ArangoClient::new(&arango_url, &arango_database, &arango_password)?;
-    let tool_registry_service = tool_registry::service::ToolRegistryService::new(tool_registry_arango);
+    let tool_registry_service =
+        tool_registry::service::ToolRegistryService::new(tool_registry_arango);
     let tool_registry_handle = tool_registry_service.spawn(nats_client.clone()).await?;
     info!("capability registry service started");
 
@@ -136,8 +137,11 @@ async fn run_serve() -> anyhow::Result<()> {
     // 5. Spawn the scheduler service (decay + health monitoring).
     let scheduler_arango =
         brain::client::ArangoClient::new(&arango_url, &arango_database, &arango_password)?;
-    let scheduler_service =
-        scheduler::service::SchedulerService::new(scheduler_arango, nats_client.clone(), registry_for_scheduler);
+    let scheduler_service = scheduler::service::SchedulerService::new(
+        scheduler_arango,
+        nats_client.clone(),
+        registry_for_scheduler,
+    );
     let scheduler_handle = scheduler_service.spawn().await?;
     info!("scheduler service started");
 
@@ -218,8 +222,7 @@ async fn run_init() -> anyhow::Result<()> {
     info!("ArangoDB database: {}", arango_database);
 
     // 2. Build the ArangoDB HTTP client.
-    let client =
-        brain::client::ArangoClient::new(&arango_url, &arango_database, &arango_password)?;
+    let client = brain::client::ArangoClient::new(&arango_url, &arango_database, &arango_password)?;
 
     // 3. Run initialization.
     brain::init::initialize_brain(&client).await?;
@@ -329,10 +332,7 @@ fn run_validate(config_path: &str) -> bool {
         let agent = &agent_file.agent;
         let pipeline_warnings = orchestrator.validate_pipeline(agent);
         for w in &pipeline_warnings {
-            warnings.push(format!(
-                "Agent '{}' ({}): {}",
-                agent.id, source_path, w
-            ));
+            warnings.push(format!("Agent '{}' ({}): {}", agent.id, source_path, w));
         }
         if pipeline_warnings.is_empty() {
             ok_checks.push(format!(

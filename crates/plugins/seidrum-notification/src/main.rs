@@ -81,13 +81,8 @@ async fn main() -> Result<()> {
         produced_event_types: vec![],
     };
 
-    let register_envelope = EventEnvelope::new(
-        "plugin.register",
-        PLUGIN_ID,
-        None,
-        None,
-        &register,
-    )?;
+    let register_envelope =
+        EventEnvelope::new("plugin.register", PLUGIN_ID, None, None, &register)?;
 
     client
         .publish(
@@ -129,7 +124,10 @@ async fn main() -> Result<()> {
     });
 
     client
-        .publish("capability.register", serde_json::to_vec(&send_notification_tool)?.into())
+        .publish(
+            "capability.register",
+            serde_json::to_vec(&send_notification_tool)?.into(),
+        )
         .await
         .context("Failed to publish capability.register for send-notification")?;
 
@@ -157,7 +155,9 @@ async fn main() -> Result<()> {
         .await
         .context("Failed to subscribe to capability.call.notification")?;
 
-    info!("Subscribed to task.created, task.completed.*, system.health, capability.call.notification");
+    info!(
+        "Subscribed to task.created, task.completed.*, system.health, capability.call.notification"
+    );
 
     let min_importance = Importance::from_level_filter(&args.notification_level);
     let channel = args.notification_channel.clone();
@@ -284,8 +284,8 @@ async fn handle_task_created(
     payload: &[u8],
     channel: &str,
 ) -> Result<()> {
-    let envelope: EventEnvelope = serde_json::from_slice(payload)
-        .context("Failed to deserialize task.created envelope")?;
+    let envelope: EventEnvelope =
+        serde_json::from_slice(payload).context("Failed to deserialize task.created envelope")?;
 
     let task: TaskCreated = serde_json::from_value(envelope.payload.clone())
         .context("Failed to deserialize TaskCreated payload")?;
@@ -294,7 +294,15 @@ async fn handle_task_created(
 
     let (text, format) = format_task_created(&task, channel);
 
-    send_notification(nats, channel, &text, &format, envelope.correlation_id, envelope.scope).await
+    send_notification(
+        nats,
+        channel,
+        &text,
+        &format,
+        envelope.correlation_id,
+        envelope.scope,
+    )
+    .await
 }
 
 async fn handle_task_completed(
@@ -302,8 +310,8 @@ async fn handle_task_completed(
     payload: &[u8],
     channel: &str,
 ) -> Result<()> {
-    let envelope: EventEnvelope = serde_json::from_slice(payload)
-        .context("Failed to deserialize task.completed envelope")?;
+    let envelope: EventEnvelope =
+        serde_json::from_slice(payload).context("Failed to deserialize task.completed envelope")?;
 
     let task: TaskCompleted = serde_json::from_value(envelope.payload.clone())
         .context("Failed to deserialize TaskCompleted payload")?;
@@ -312,7 +320,15 @@ async fn handle_task_completed(
 
     let (text, format) = format_task_completed(&task, channel);
 
-    send_notification(nats, channel, &text, &format, envelope.correlation_id, envelope.scope).await
+    send_notification(
+        nats,
+        channel,
+        &text,
+        &format,
+        envelope.correlation_id,
+        envelope.scope,
+    )
+    .await
 }
 
 async fn handle_system_health(
@@ -321,8 +337,8 @@ async fn handle_system_health(
     channel: &str,
     min_importance: Importance,
 ) -> Result<()> {
-    let envelope: EventEnvelope = serde_json::from_slice(payload)
-        .context("Failed to deserialize system.health envelope")?;
+    let envelope: EventEnvelope =
+        serde_json::from_slice(payload).context("Failed to deserialize system.health envelope")?;
 
     let health: SystemHealth = serde_json::from_value(envelope.payload.clone())
         .context("Failed to deserialize SystemHealth payload")?;
@@ -352,7 +368,15 @@ async fn handle_system_health(
 
     let (text, format) = format_health_alert(&health, channel);
 
-    send_notification(nats, channel, &text, &format, envelope.correlation_id, envelope.scope).await
+    send_notification(
+        nats,
+        channel,
+        &text,
+        &format,
+        envelope.correlation_id,
+        envelope.scope,
+    )
+    .await
 }
 
 async fn send_notification(
@@ -374,20 +398,11 @@ async fn send_notification(
 
     let subject = format!("channel.{}.outbound", channel);
 
-    let envelope = EventEnvelope::new(
-        &subject,
-        PLUGIN_ID,
-        correlation_id,
-        scope,
-        &outbound,
-    )?;
+    let envelope = EventEnvelope::new(&subject, PLUGIN_ID, correlation_id, scope, &outbound)?;
 
-    nats.publish(
-        subject.clone(),
-        serde_json::to_vec(&envelope)?.into(),
-    )
-    .await
-    .context("Failed to publish notification")?;
+    nats.publish(subject.clone(), serde_json::to_vec(&envelope)?.into())
+        .await
+        .context("Failed to publish notification")?;
 
     info!(channel = %channel, subject = %subject, "Notification sent");
 
@@ -433,10 +448,7 @@ fn format_task_created(task: &TaskCreated, channel: &str) -> (String, String) {
 /// Format a task-completed notification for the given channel.
 fn format_task_completed(task: &TaskCompleted, channel: &str) -> (String, String) {
     if channel == "telegram" {
-        let mut text = format!(
-            "\u{2705} *Task Completed*\n\n*Task:* {}",
-            task.task_key
-        );
+        let mut text = format!("\u{2705} *Task Completed*\n\n*Task:* {}", task.task_key);
         if let Some(ref result) = task.result {
             text.push_str(&format!("\n*Result:* {}", result));
         }
@@ -602,7 +614,13 @@ mod tests {
     #[test]
     fn test_importance_from_level_filter() {
         assert_eq!(Importance::from_level_filter("all"), Importance::Info);
-        assert_eq!(Importance::from_level_filter("important"), Importance::Important);
-        assert_eq!(Importance::from_level_filter("critical"), Importance::Critical);
+        assert_eq!(
+            Importance::from_level_filter("important"),
+            Importance::Important
+        );
+        assert_eq!(
+            Importance::from_level_filter("critical"),
+            Importance::Critical
+        );
     }
 }

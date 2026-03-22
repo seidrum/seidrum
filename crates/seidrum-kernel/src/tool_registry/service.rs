@@ -189,7 +189,10 @@ impl ToolRegistryService {
             tools.insert(tool_id, entry);
         }
 
-        info!(count = tools.len(), "loaded capabilities from ArangoDB into cache");
+        info!(
+            count = tools.len(),
+            "loaded capabilities from ArangoDB into cache"
+        );
         Ok(())
     }
 
@@ -823,19 +826,13 @@ mod tests {
 
         {
             let mut tools = svc.tools.write().await;
-            tools.insert(
-                "t1".to_string(),
-                sample_entry("t1", "p1", "Version 1"),
-            );
+            tools.insert("t1".to_string(), sample_entry("t1", "p1", "Version 1"));
         }
 
         // Overwrite with new data
         {
             let mut tools = svc.tools.write().await;
-            tools.insert(
-                "t1".to_string(),
-                sample_entry("t1", "p1", "Version 2"),
-            );
+            tools.insert("t1".to_string(), sample_entry("t1", "p1", "Version 2"));
         }
 
         let found = svc.get_tool("t1").await.unwrap();

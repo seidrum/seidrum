@@ -10,9 +10,9 @@ use anyhow::{Context, Result};
 use chrono::Utc;
 use futures::StreamExt;
 use seidrum_common::events::{
-    BrainQueryRequest, BrainQueryResponse, ContentStoreRequest, ContentStored,
-    EntityUpsertRequest, EntityUpserted, EventEnvelope, FactUpsertRequest, FactUpserted,
-    ScopeAssignRequest, ScopeAssigned,
+    BrainQueryRequest, BrainQueryResponse, ContentStoreRequest, ContentStored, EntityUpsertRequest,
+    EntityUpserted, EventEnvelope, FactUpsertRequest, FactUpserted, ScopeAssignRequest,
+    ScopeAssigned,
 };
 use serde_json::Value;
 use tracing::{debug, error, info, warn};
@@ -183,9 +183,14 @@ async fn reply_with<T: serde::Serialize>(
     scope: Option<String>,
     payload: &T,
 ) -> Result<()> {
-    let envelope =
-        EventEnvelope::new("brain.query.response", "kernel", correlation_id, scope, payload)
-            .context("failed to build reply envelope")?;
+    let envelope = EventEnvelope::new(
+        "brain.query.response",
+        "kernel",
+        correlation_id,
+        scope,
+        payload,
+    )
+    .context("failed to build reply envelope")?;
     let bytes = serde_json::to_vec(&envelope).context("failed to serialize reply")?;
     nats.publish(reply_subject.to_string(), bytes.into())
         .await
@@ -405,17 +410,13 @@ async fn handle_fact_upsert(
     let fact_key: String;
 
     if let Some(old_fact) = existing_fact {
-        let old_key = old_fact
-            .get("_key")
-            .and_then(|v| v.as_str())
-            .unwrap_or("");
+        let old_key = old_fact.get("_key").and_then(|v| v.as_str()).unwrap_or("");
 
         // Check if the value/object is different — if same, just reinforce
         let old_object = old_fact.get("object").and_then(|v| v.as_str());
         let old_value = old_fact.get("value").and_then(|v| v.as_str());
 
-        let same_content = old_object == req.object.as_deref()
-            && old_value == req.value.as_deref();
+        let same_content = old_object == req.object.as_deref() && old_value == req.value.as_deref();
 
         if same_content {
             // Reinforce existing fact
@@ -795,10 +796,7 @@ async fn handle_query_request(
         }
         Err(e) => {
             error!(error = %e, "query execution failed");
-            (
-                serde_json::json!({ "error": e.to_string() }),
-                0,
-            )
+            (serde_json::json!({ "error": e.to_string() }), 0)
         }
     };
 
@@ -863,8 +861,7 @@ async fn handle_aql_query(
         // Use a temporary ScopeService just for the filter injection (it is
         // a pure function that does not hit the database).
         let scope_svc = ScopeService::new(arango.clone());
-        let (wrapped, merged) =
-            scope_svc.inject_scope_filter(aql, &bind_vars, &scopes.allowed);
+        let (wrapped, merged) = scope_svc.inject_scope_filter(aql, &bind_vars, &scopes.allowed);
         debug!("scope enforcement: AQL query wrapped with scope filter");
         (wrapped, merged)
     } else {
@@ -877,10 +874,7 @@ async fn handle_aql_query(
         .await
         .context("AQL execution failed")?;
 
-    Ok(resp
-        .get("result")
-        .cloned()
-        .unwrap_or(serde_json::json!([])))
+    Ok(resp.get("result").cloned().unwrap_or(serde_json::json!([])))
 }
 
 /// Placeholder for vector search — returns empty results.
@@ -933,10 +927,7 @@ async fn handle_graph_traverse(
         .await
         .context("graph traversal failed")?;
 
-    Ok(resp
-        .get("result")
-        .cloned()
-        .unwrap_or(serde_json::json!([])))
+    Ok(resp.get("result").cloned().unwrap_or(serde_json::json!([])))
 }
 
 /// Get current facts for an entity.
@@ -981,10 +972,7 @@ async fn handle_get_facts(
         .await
         .context("get_facts query failed")?;
 
-    Ok(resp
-        .get("result")
-        .cloned()
-        .unwrap_or(serde_json::json!([])))
+    Ok(resp.get("result").cloned().unwrap_or(serde_json::json!([])))
 }
 
 /// High-level convenience query: get entities, facts, and related content
@@ -998,10 +986,7 @@ async fn handle_get_context(
     let _graph_depth = req.graph_depth.unwrap_or(2);
     let min_confidence = req.min_confidence.unwrap_or(0.5);
 
-    let scope = envelope
-        .scope
-        .as_deref()
-        .unwrap_or("scope_root");
+    let scope = envelope.scope.as_deref().unwrap_or("scope_root");
 
     // Get entities in scope with their current facts
     let aql = r#"
@@ -1041,8 +1026,5 @@ async fn handle_get_context(
         .await
         .context("get_context query failed")?;
 
-    Ok(resp
-        .get("result")
-        .cloned()
-        .unwrap_or(serde_json::json!([])))
+    Ok(resp.get("result").cloned().unwrap_or(serde_json::json!([])))
 }

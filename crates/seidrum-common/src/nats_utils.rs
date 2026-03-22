@@ -48,9 +48,8 @@ impl NatsClient {
         scope: Option<String>,
         payload: &T,
     ) -> Result<EventEnvelope> {
-        let envelope =
-            EventEnvelope::new(subject, &self.source, correlation_id, scope, payload)
-                .with_context(|| "failed to build EventEnvelope")?;
+        let envelope = EventEnvelope::new(subject, &self.source, correlation_id, scope, payload)
+            .with_context(|| "failed to build EventEnvelope")?;
         self.publish(subject, &envelope).await?;
         Ok(envelope)
     }

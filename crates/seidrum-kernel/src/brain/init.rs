@@ -64,7 +64,9 @@ pub async fn initialize_brain(client: &ArangoClient) -> Result<()> {
 
     // 4. Create named graph "brain"
     info!("Creating named graph 'brain'...");
-    create_brain_graph(client).await.context("creating brain graph")?;
+    create_brain_graph(client)
+        .await
+        .context("creating brain graph")?;
     info!("  [OK] brain graph");
 
     // 5. Create indexes
@@ -81,7 +83,9 @@ pub async fn initialize_brain(client: &ArangoClient) -> Result<()> {
 
     // 7. Seed root scope
     info!("Seeding root scope...");
-    seed_root_scope(client).await.context("seeding root scope")?;
+    seed_root_scope(client)
+        .await
+        .context("seeding root scope")?;
     info!("  [OK] root scope");
 
     info!("Brain initialization complete.");
@@ -303,7 +307,9 @@ async fn create_search_view(client: &ArangoClient) -> Result<()> {
         }
     });
 
-    client.create_search_view("content_search", &view_definition).await
+    client
+        .create_search_view("content_search", &view_definition)
+        .await
 }
 
 /// Seed the root scope document if it does not already exist.
@@ -328,9 +334,7 @@ async fn seed_root_scope(client: &ArangoClient) -> Result<()> {
         RETURN { new: NEW, type: IS_NULL(OLD) ? "inserted" : "existing" }
     "#;
 
-    let result = client
-        .execute_aql(query, &serde_json::json!({}))
-        .await?;
+    let result = client.execute_aql(query, &serde_json::json!({})).await?;
 
     if let Some(results) = result.get("result").and_then(|v| v.as_array()) {
         if let Some(first) = results.first() {

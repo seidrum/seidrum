@@ -88,7 +88,11 @@ impl CommandRegistry {
         let mut cmds = self.commands.write().await;
         let before = cmds.len();
         cmds.retain(|c| {
-            if let CommandKind::Capability { capability_id: ref cid, .. } = c.kind {
+            if let CommandKind::Capability {
+                capability_id: ref cid,
+                ..
+            } = c.kind
+            {
                 cid != capability_id
             } else {
                 true
@@ -207,7 +211,10 @@ async fn query_capability_commands(nats: &NatsClient) -> Vec<CommandEntry> {
                 warn!(%err, kind_filter, "Failed to search capabilities");
             }
             Err(_) => {
-                warn!(kind_filter, "Capability search timed out (no registry running?)");
+                warn!(
+                    kind_filter,
+                    "Capability search timed out (no registry running?)"
+                );
             }
         }
     }
@@ -232,11 +239,7 @@ async fn fetch_capability_details(nats: &NatsClient, tool_id: &str) -> (String, 
         Ok(Ok(resp)) => (resp.plugin_id, resp.call_subject),
         _ => {
             // Fallback: derive from tool_id
-            let plugin_id = tool_id
-                .split('.')
-                .next()
-                .unwrap_or("unknown")
-                .to_string();
+            let plugin_id = tool_id.split('.').next().unwrap_or("unknown").to_string();
             let call_subject = format!("capability.call.{}", tool_id);
             (plugin_id, call_subject)
         }
@@ -300,8 +303,10 @@ pub async fn execute_command(
     match entry {
         Some(entry) => match &entry.kind {
             CommandKind::BuiltIn => {
-                execute_builtin(cmd_name, args, chat_id, thread_id, user_id, registry, bot, nats)
-                    .await
+                execute_builtin(
+                    cmd_name, args, chat_id, thread_id, user_id, registry, bot, nats,
+                )
+                .await
             }
             CommandKind::Capability {
                 capability_id,
@@ -383,7 +388,10 @@ async fn execute_builtin(
         "plugins" => {
             let text = match tokio::time::timeout(
                 Duration::from_secs(3),
-                nats.request::<_, RegistryQueryResponse>("registry.query", &RegistryQuery::ListPlugins),
+                nats.request::<_, RegistryQueryResponse>(
+                    "registry.query",
+                    &RegistryQuery::ListPlugins,
+                ),
             )
             .await
             {
@@ -470,9 +478,7 @@ async fn execute_builtin(
                     warn!(%err, "storage.set request failed");
                     send_reply(bot, chat_id, thread_id, "Failed to save link.").await
                 }
-                Err(_) => {
-                    send_reply(bot, chat_id, thread_id, "Storage request timed out.").await
-                }
+                Err(_) => send_reply(bot, chat_id, thread_id, "Storage request timed out.").await,
             }
         }
         "unlink" => {
@@ -507,15 +513,19 @@ async fn execute_builtin(
                     send_reply(bot, chat_id, thread_id, "Thread unlinked from project.").await
                 }
                 Ok(Ok(_)) => {
-                    send_reply(bot, chat_id, thread_id, "This thread is not linked to any project.").await
+                    send_reply(
+                        bot,
+                        chat_id,
+                        thread_id,
+                        "This thread is not linked to any project.",
+                    )
+                    .await
                 }
                 Ok(Err(err)) => {
                     warn!(%err, "storage.delete request failed");
                     send_reply(bot, chat_id, thread_id, "Failed to unlink.").await
                 }
-                Err(_) => {
-                    send_reply(bot, chat_id, thread_id, "Storage request timed out.").await
-                }
+                Err(_) => send_reply(bot, chat_id, thread_id, "Storage request timed out.").await,
             }
         }
         "restart" => {
@@ -555,9 +565,10 @@ async fn get_thread_working_dir(
     )
     .await
     {
-        Ok(Ok(resp)) if resp.found => resp
-            .value
-            .and_then(|v| v.get("working_dir").and_then(|d| d.as_str().map(|s| s.to_string()))),
+        Ok(Ok(resp)) if resp.found => resp.value.and_then(|v| {
+            v.get("working_dir")
+                .and_then(|d| d.as_str().map(|s| s.to_string()))
+        }),
         _ => None,
     }
 }
@@ -601,7 +612,9 @@ async fn execute_capability(
     {
         Ok(Ok(resp)) => {
             let text = if resp.is_error {
-                let msg = resp.result.as_str()
+                let msg = resp
+                    .result
+                    .as_str()
                     .map(|s| s.to_string())
                     .unwrap_or_else(|| resp.result.to_string());
                 format!("\u{274c} Command failed: {}", msg)
@@ -611,7 +624,10 @@ async fn execute_capability(
                     .as_str()
                     .map(|s| s.to_string())
                     .or_else(|| {
-                        resp.result.get("result").and_then(|v| v.as_str()).map(|s| s.to_string())
+                        resp.result
+                            .get("result")
+                            .and_then(|v| v.as_str())
+                            .map(|s| s.to_string())
                     })
                     .unwrap_or_else(|| resp.result.to_string())
             };
@@ -640,7 +656,12 @@ async fn execute_capability(
 }
 
 /// Send a plain text reply to the given chat, optionally in a thread.
-async fn send_reply(bot: &Bot, chat_id: i64, thread_id: Option<ThreadId>, text: &str) -> Result<()> {
+async fn send_reply(
+    bot: &Bot,
+    chat_id: i64,
+    thread_id: Option<ThreadId>,
+    text: &str,
+) -> Result<()> {
     let chat = ChatId(chat_id);
     let mut req = bot.send_message(chat, text);
     if let Some(tid) = thread_id {
@@ -652,7 +673,12 @@ async fn send_reply(bot: &Bot, chat_id: i64, thread_id: Option<ThreadId>, text: 
 
 /// Send an HTML-formatted reply to the given chat, optionally in a thread.
 /// Falls back to plain text if Telegram rejects the HTML.
-async fn send_html_reply(bot: &Bot, chat_id: i64, thread_id: Option<ThreadId>, text: &str) -> Result<()> {
+async fn send_html_reply(
+    bot: &Bot,
+    chat_id: i64,
+    thread_id: Option<ThreadId>,
+    text: &str,
+) -> Result<()> {
     let chat = ChatId(chat_id);
     let mut req = bot.send_message(chat, text);
     req = req.parse_mode(teloxide::types::ParseMode::Html);
@@ -698,11 +724,7 @@ struct CapabilityDeregistered {
 
 /// Spawn a background task that listens for `capability.registered` and
 /// `capability.deregistered` events to keep the command registry in sync.
-pub async fn spawn_capability_listener(
-    nats: NatsClient,
-    registry: CommandRegistry,
-    bot: Bot,
-) {
+pub async fn spawn_capability_listener(nats: NatsClient, registry: CommandRegistry, bot: Bot) {
     tokio::spawn(async move {
         let mut reg_sub = match nats.subscribe("capability.registered").await {
             Ok(sub) => sub,

@@ -4,7 +4,9 @@ use std::sync::Arc;
 use anyhow::Result;
 use clap::Parser;
 use futures::StreamExt;
-use seidrum_common::events::{ChannelInbound, EventEnvelope, PluginRegister, ToolCallRequest, ToolCallResponse};
+use seidrum_common::events::{
+    ChannelInbound, EventEnvelope, PluginRegister, ToolCallRequest, ToolCallResponse,
+};
 use tokio::sync::Mutex;
 use tracing::{error, info, warn};
 
@@ -43,8 +45,13 @@ fn resolve_google_api_key(cli_key: &Option<String>) -> Result<String> {
         .map(|h| h.join(".openclaw/agents/main/agent/auth-profiles.json"))
         .ok_or_else(|| anyhow::anyhow!("Could not determine home directory"))?;
 
-    let content = std::fs::read_to_string(&auth_path)
-        .map_err(|e| anyhow::anyhow!("Failed to read OpenClaw auth-profiles.json at {}: {}", auth_path.display(), e))?;
+    let content = std::fs::read_to_string(&auth_path).map_err(|e| {
+        anyhow::anyhow!(
+            "Failed to read OpenClaw auth-profiles.json at {}: {}",
+            auth_path.display(),
+            e
+        )
+    })?;
 
     let profiles: serde_json::Value = serde_json::from_str(&content)
         .map_err(|e| anyhow::anyhow!("Failed to parse OpenClaw auth-profiles.json: {}", e))?;
@@ -54,7 +61,9 @@ fn resolve_google_api_key(cli_key: &Option<String>) -> Result<String> {
         .and_then(|p| p.get("google:default"))
         .and_then(|v| v.get("key"))
         .and_then(|v| v.as_str())
-        .ok_or_else(|| anyhow::anyhow!("No google:default.key found in OpenClaw auth-profiles.json"))?;
+        .ok_or_else(|| {
+            anyhow::anyhow!("No google:default.key found in OpenClaw auth-profiles.json")
+        })?;
 
     info!("Using Google API key from OpenClaw auth-profiles.json");
     Ok(key.to_string())
@@ -169,7 +178,11 @@ async fn poll_calendar(
         let summary = event.summary.as_deref().unwrap_or("(No title)");
         let description = event.description.as_deref().unwrap_or("");
         let location = event.location.as_deref().unwrap_or("");
-        let start_str = event.start.as_ref().map(|s| s.display()).unwrap_or_default();
+        let start_str = event
+            .start
+            .as_ref()
+            .map(|s| s.display())
+            .unwrap_or_default();
         let end_str = event.end.as_ref().map(|s| s.display()).unwrap_or_default();
         let organizer = event
             .organizer
@@ -200,13 +213,8 @@ async fn poll_calendar(
             metadata,
         };
 
-        let envelope = EventEnvelope::new(
-            "channel.calendar.inbound",
-            "calendar",
-            None,
-            None,
-            &inbound,
-        )?;
+        let envelope =
+            EventEnvelope::new("channel.calendar.inbound", "calendar", None, None, &inbound)?;
 
         let bytes = serde_json::to_vec(&envelope)?;
         nats.publish("channel.calendar.inbound", bytes.into())
@@ -355,15 +363,11 @@ async fn main() -> Result<()> {
         consumed_event_types: vec![],
         produced_event_types: vec![],
     };
-    let register_envelope = EventEnvelope::new(
-        "plugin.register",
-        "calendar",
-        None,
-        None,
-        &register,
-    )?;
+    let register_envelope =
+        EventEnvelope::new("plugin.register", "calendar", None, None, &register)?;
     let register_bytes = serde_json::to_vec(&register_envelope)?;
-    nats.publish("plugin.register", register_bytes.into()).await?;
+    nats.publish("plugin.register", register_bytes.into())
+        .await?;
     info!("Published plugin.register event");
 
     // Register tools with the kernel's tool registry
@@ -391,8 +395,11 @@ async fn main() -> Result<()> {
         "kind": "tool"
     });
 
-    nats.publish("capability.register", serde_json::to_vec(&search_tool)?.into())
-        .await?;
+    nats.publish(
+        "capability.register",
+        serde_json::to_vec(&search_tool)?.into(),
+    )
+    .await?;
     info!("Tool 'search-calendar' registered with kernel");
 
     let create_tool = serde_json::json!({
@@ -431,8 +438,11 @@ async fn main() -> Result<()> {
         "kind": "tool"
     });
 
-    nats.publish("capability.register", serde_json::to_vec(&create_tool)?.into())
-        .await?;
+    nats.publish(
+        "capability.register",
+        serde_json::to_vec(&create_tool)?.into(),
+    )
+    .await?;
     info!("Tool 'create-calendar-event' registered with kernel");
 
     // Subscribe to event creation requests
@@ -514,7 +524,6 @@ async fn main() -> Result<()> {
     let tool_nats = nats.clone();
     let tool_client = http_client;
 
-
     let tool_handle = tokio::spawn(async move {
         while let Some(msg) = tool_sub.next().await {
             let reply = match msg.reply {
@@ -535,7 +544,12 @@ async fn main() -> Result<()> {
                         is_error: true,
                     };
                     if let Err(e) = tool_nats
-                        .publish(reply, serde_json::to_vec(&error_response).unwrap_or_default().into())
+                        .publish(
+                            reply,
+                            serde_json::to_vec(&error_response)
+                                .unwrap_or_default()
+                                .into(),
+                        )
                         .await
                     {
                         error!(%e, "Failed to publish error reply");
@@ -546,17 +560,29 @@ async fn main() -> Result<()> {
 
             let tool_response = match tool_request.tool_id.as_str() {
                 "search-calendar" => {
-                    let query = tool_request.arguments.get("query")
+                    let query = tool_request
+                        .arguments
+                        .get("query")
                         .and_then(|v| v.as_str())
                         .unwrap_or("")
                         .to_string();
-                    let days_ahead = tool_request.arguments.get("days_ahead")
+                    let days_ahead = tool_request
+                        .arguments
+                        .get("days_ahead")
                         .and_then(|v| v.as_i64())
                         .unwrap_or(7);
 
                     info!(query = %query, days_ahead = days_ahead, "Searching calendar");
 
-                    match search_calendar_events(&tool_client, &tool_api_key, &tool_calendar_id, &query, days_ahead).await {
+                    match search_calendar_events(
+                        &tool_client,
+                        &tool_api_key,
+                        &tool_calendar_id,
+                        &query,
+                        days_ahead,
+                    )
+                    .await
+                    {
                         Ok(events) => ToolCallResponse {
                             tool_id: tool_request.tool_id,
                             result: serde_json::json!({"events": events}),
@@ -570,22 +596,32 @@ async fn main() -> Result<()> {
                     }
                 }
                 "create-calendar-event" => {
-                    let summary = tool_request.arguments.get("summary")
+                    let summary = tool_request
+                        .arguments
+                        .get("summary")
                         .and_then(|v| v.as_str())
                         .unwrap_or("")
                         .to_string();
-                    let start = tool_request.arguments.get("start")
+                    let start = tool_request
+                        .arguments
+                        .get("start")
                         .and_then(|v| v.as_str())
                         .unwrap_or("")
                         .to_string();
-                    let end = tool_request.arguments.get("end")
+                    let end = tool_request
+                        .arguments
+                        .get("end")
                         .and_then(|v| v.as_str())
                         .unwrap_or("")
                         .to_string();
-                    let description = tool_request.arguments.get("description")
+                    let description = tool_request
+                        .arguments
+                        .get("description")
                         .and_then(|v| v.as_str())
                         .map(|s| s.to_string());
-                    let location = tool_request.arguments.get("location")
+                    let location = tool_request
+                        .arguments
+                        .get("location")
                         .and_then(|v| v.as_str())
                         .map(|s| s.to_string());
 
@@ -599,7 +635,14 @@ async fn main() -> Result<()> {
 
                     info!(summary = %summary, "Creating calendar event via tool");
 
-                    match create_calendar_event(&tool_client, &tool_api_key, &tool_calendar_id, &create_req).await {
+                    match create_calendar_event(
+                        &tool_client,
+                        &tool_api_key,
+                        &tool_calendar_id,
+                        &create_req,
+                    )
+                    .await
+                    {
                         Ok(()) => ToolCallResponse {
                             tool_id: tool_request.tool_id,
                             result: serde_json::json!({"status": "created", "summary": create_req.summary}),
@@ -612,17 +655,20 @@ async fn main() -> Result<()> {
                         },
                     }
                 }
-                other => {
-                    ToolCallResponse {
-                        tool_id: other.to_string(),
-                        result: serde_json::json!({"error": format!("Unknown tool_id: {}", other)}),
-                        is_error: true,
-                    }
-                }
+                other => ToolCallResponse {
+                    tool_id: other.to_string(),
+                    result: serde_json::json!({"error": format!("Unknown tool_id: {}", other)}),
+                    is_error: true,
+                },
             };
 
             if let Err(err) = tool_nats
-                .publish(reply, serde_json::to_vec(&tool_response).unwrap_or_default().into())
+                .publish(
+                    reply,
+                    serde_json::to_vec(&tool_response)
+                        .unwrap_or_default()
+                        .into(),
+                )
                 .await
             {
                 error!(%err, "Failed to publish tool call reply");
@@ -695,20 +741,14 @@ mod tests {
             metadata,
         };
 
-        let envelope = EventEnvelope::new(
-            "channel.calendar.inbound",
-            "calendar",
-            None,
-            None,
-            &inbound,
-        )
-        .unwrap();
+        let envelope =
+            EventEnvelope::new("channel.calendar.inbound", "calendar", None, None, &inbound)
+                .unwrap();
 
         assert_eq!(envelope.event_type, "channel.calendar.inbound");
         assert_eq!(envelope.source, "calendar");
 
-        let recovered: ChannelInbound =
-            serde_json::from_value(envelope.payload).unwrap();
+        let recovered: ChannelInbound = serde_json::from_value(envelope.payload).unwrap();
         assert_eq!(recovered.platform, "calendar");
         assert_eq!(recovered.chat_id, "evt-123");
     }

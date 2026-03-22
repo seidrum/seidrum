@@ -75,13 +75,8 @@ async fn main() -> Result<()> {
         produced_event_types: vec![],
     };
 
-    let register_envelope = EventEnvelope::new(
-        "plugin.register",
-        PLUGIN_ID,
-        None,
-        None,
-        &register,
-    )?;
+    let register_envelope =
+        EventEnvelope::new("plugin.register", PLUGIN_ID, None, None, &register)?;
 
     client
         .publish(
@@ -172,15 +167,21 @@ async fn main() -> Result<()> {
 
         // Extract code execution params from arguments
         let request = CodeExecuteRequest {
-            language: tool_request.arguments.get("language")
+            language: tool_request
+                .arguments
+                .get("language")
                 .and_then(|v| v.as_str())
                 .unwrap_or("bash")
                 .to_string(),
-            code: tool_request.arguments.get("code")
+            code: tool_request
+                .arguments
+                .get("code")
                 .and_then(|v| v.as_str())
                 .unwrap_or("")
                 .to_string(),
-            timeout_seconds: tool_request.arguments.get("timeout_seconds")
+            timeout_seconds: tool_request
+                .arguments
+                .get("timeout_seconds")
                 .and_then(|v| v.as_u64())
                 .unwrap_or(DEFAULT_TIMEOUT_SECONDS),
         };
@@ -223,13 +224,20 @@ async fn execute_code(request: &CodeExecuteRequest) -> CodeExecuteResponse {
 
     // Determine command and args based on language
     let (program, args, use_stdin) = match request.language.as_str() {
-        "python" => ("python3", vec!["-c".to_string(), request.code.clone()], false),
+        "python" => (
+            "python3",
+            vec!["-c".to_string(), request.code.clone()],
+            false,
+        ),
         "bash" => ("bash", vec!["-c".to_string(), request.code.clone()], false),
         "javascript" => ("node", vec!["-e".to_string(), request.code.clone()], false),
         other => {
             return CodeExecuteResponse {
                 stdout: String::new(),
-                stderr: format!("Unsupported language: {}. Supported: python, bash, javascript", other),
+                stderr: format!(
+                    "Unsupported language: {}. Supported: python, bash, javascript",
+                    other
+                ),
                 exit_code: -1,
                 timed_out: false,
             };

@@ -81,9 +81,7 @@ pub async fn handle_ws(socket: WebSocket, nats: NatsClient, connections: Connect
                         let _ = tx.send(ServerMessage::Registered { plugin_id: pid });
                     }
                     Err(err) => {
-                        let _ = tx.send(ServerMessage::Error {
-                            message: err,
-                        });
+                        let _ = tx.send(ServerMessage::Error { message: err });
                     }
                 }
             }
@@ -237,11 +235,7 @@ async fn handle_register_capability(
     Ok(())
 }
 
-async fn handle_deregister(
-    plugin_id: &str,
-    nats: &NatsClient,
-    connections: &ConnectionManager,
-) {
+async fn handle_deregister(plugin_id: &str, nats: &NatsClient, connections: &ConnectionManager) {
     connections.deregister(plugin_id).await;
 
     let dereg = PluginDeregister {
@@ -454,10 +448,7 @@ async fn handle_publish(
     payload: &serde_json::Value,
     nats: &NatsClient,
 ) {
-    if let Err(e) = nats
-        .publish_envelope(subject, None, None, payload)
-        .await
-    {
+    if let Err(e) = nats.publish_envelope(subject, None, None, payload).await {
         warn!(error = %e, %plugin_id, %subject, "Failed to publish event");
     }
 }

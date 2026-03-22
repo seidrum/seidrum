@@ -74,19 +74,27 @@ fn format_facts(facts: &[Value]) -> String {
     facts
         .iter()
         .map(|f| {
-            let subject = f.get("subject_name")
+            let subject = f
+                .get("subject_name")
                 .or_else(|| f.get("subject"))
                 .and_then(|v| v.as_str())
                 .unwrap_or("?");
             let predicate = f.get("predicate").and_then(|v| v.as_str()).unwrap_or("?");
-            let object = f.get("object_name")
+            let object = f
+                .get("object_name")
                 .or_else(|| f.get("object"))
                 .and_then(|v| v.as_str());
             let value = f.get("value").and_then(|v| v.as_str());
             let confidence = f.get("confidence").and_then(|v| v.as_f64()).unwrap_or(1.0);
 
             let target = object.or(value).unwrap_or("?");
-            format!("- {} {} {} (confidence: {:.0}%)", subject, predicate, target, confidence * 100.0)
+            format!(
+                "- {} {} {} (confidence: {:.0}%)",
+                subject,
+                predicate,
+                target,
+                confidence * 100.0
+            )
         })
         .collect::<Vec<_>>()
         .join("\n")
@@ -101,11 +109,23 @@ fn format_tasks(tasks: &[Value]) -> String {
     tasks
         .iter()
         .map(|t| {
-            let title = t.get("title").and_then(|v| v.as_str()).unwrap_or("Untitled");
+            let title = t
+                .get("title")
+                .and_then(|v| v.as_str())
+                .unwrap_or("Untitled");
             let status = t.get("status").and_then(|v| v.as_str()).unwrap_or("open");
-            let priority = t.get("priority").and_then(|v| v.as_str()).unwrap_or("normal");
-            let due = t.get("due_date").and_then(|v| v.as_str()).unwrap_or("no due date");
-            format!("- [{}] {} (priority: {}, due: {})", status, title, priority, due)
+            let priority = t
+                .get("priority")
+                .and_then(|v| v.as_str())
+                .unwrap_or("normal");
+            let due = t
+                .get("due_date")
+                .and_then(|v| v.as_str())
+                .unwrap_or("no due date");
+            format!(
+                "- [{}] {} (priority: {}, due: {})",
+                status, title, priority, due
+            )
         })
         .collect::<Vec<_>>()
         .join("\n")
@@ -120,10 +140,14 @@ fn format_history(history: &[Value]) -> String {
     history
         .iter()
         .filter_map(|msg| {
-            let role = msg.get("role").and_then(|v| v.as_str())
+            let role = msg
+                .get("role")
+                .and_then(|v| v.as_str())
                 .or_else(|| msg.get("source").and_then(|v| v.as_str()))
                 .unwrap_or("unknown");
-            let content = msg.get("content").and_then(|v| v.as_str())
+            let content = msg
+                .get("content")
+                .and_then(|v| v.as_str())
                 .or_else(|| msg.get("text").and_then(|v| v.as_str()))
                 .or_else(|| msg.get("raw_text").and_then(|v| v.as_str()))
                 .unwrap_or("");
@@ -145,7 +169,9 @@ fn format_similar_content(content: &[Value]) -> String {
     content
         .iter()
         .filter_map(|c| {
-            let text = c.get("raw_text").and_then(|v| v.as_str())
+            let text = c
+                .get("raw_text")
+                .and_then(|v| v.as_str())
                 .or_else(|| c.get("text").and_then(|v| v.as_str()))
                 .unwrap_or("");
             let score = c.get("score").and_then(|v| v.as_f64());
@@ -181,11 +207,7 @@ fn render_prompt(template_content: &str, context: &AgentContextLoaded) -> Result
     tera_ctx.insert("current_time", &Utc::now().to_rfc3339());
 
     // scope_name
-    let scope_name = context
-        .original_event
-        .scope
-        .as_deref()
-        .unwrap_or("default");
+    let scope_name = context.original_event.scope.as_deref().unwrap_or("default");
     tera_ctx.insert("scope_name", scope_name);
 
     // current_facts
@@ -210,7 +232,9 @@ fn render_prompt(template_content: &str, context: &AgentContextLoaded) -> Result
 /// Try to extract user name from the original event's metadata or user_id.
 fn extract_user_name(context: &AgentContextLoaded) -> String {
     // Try metadata.user_name from the original ChannelInbound payload
-    if let Ok(inbound) = serde_json::from_value::<ChannelInbound>(context.original_event.payload.clone()) {
+    if let Ok(inbound) =
+        serde_json::from_value::<ChannelInbound>(context.original_event.payload.clone())
+    {
         if let Some(name) = inbound.metadata.get("user_name") {
             return name.clone();
         }
@@ -303,11 +327,7 @@ pub fn assemble_context(
 
     debug!(
         facts_budget,
-        tasks_budget,
-        rag_budget,
-        _tools_budget,
-        history_budget,
-        "Token budget allocation"
+        tasks_budget, rag_budget, _tools_budget, history_budget, "Token budget allocation"
     );
 
     // 5. Format and truncate each section
@@ -343,10 +363,7 @@ pub fn assemble_context(
     // Add conversation history as alternating user/assistant messages
     if !context.conversation_history.is_empty() {
         for msg in &context.conversation_history {
-            let role = msg
-                .get("role")
-                .and_then(|v| v.as_str())
-                .unwrap_or("user");
+            let role = msg.get("role").and_then(|v| v.as_str()).unwrap_or("user");
             let content = msg
                 .get("content")
                 .and_then(|v| v.as_str())
@@ -372,10 +389,7 @@ pub fn assemble_context(
     }
 
     // Check history token usage and truncate from the front if needed
-    let history_tokens: usize = messages
-        .iter()
-        .map(|m| count_tokens(&m.content) + 4)
-        .sum();
+    let history_tokens: usize = messages.iter().map(|m| count_tokens(&m.content) + 4).sum();
     if history_tokens > history_budget + rag_budget {
         warn!(
             history_tokens,
@@ -383,10 +397,7 @@ pub fn assemble_context(
             "History exceeds budget, truncating from oldest"
         );
         while messages.len() > 2 {
-            let total: usize = messages
-                .iter()
-                .map(|m| count_tokens(&m.content) + 4)
-                .sum();
+            let total: usize = messages.iter().map(|m| count_tokens(&m.content) + 4).sum();
             if total <= history_budget + rag_budget {
                 break;
             }
@@ -446,11 +457,7 @@ fn render_budgeted_system_prompt(
     tera_ctx.insert("user_name", &user_name);
     tera_ctx.insert("current_time", &Utc::now().to_rfc3339());
 
-    let scope_name = context
-        .original_event
-        .scope
-        .as_deref()
-        .unwrap_or("default");
+    let scope_name = context.original_event.scope.as_deref().unwrap_or("default");
     tera_ctx.insert("scope_name", scope_name);
     tera_ctx.insert("current_facts", facts_text);
     tera_ctx.insert("active_tasks", tasks_text);

@@ -1,7 +1,7 @@
 // Conversion between unified LLM format and Gemini-specific format.
 
 use seidrum_common::events::{
-    LlmResponse, ToolCallRequest, ToolSchema, TokenUsage, UnifiedMessage, UnifiedToolCall,
+    LlmResponse, TokenUsage, ToolCallRequest, ToolSchema, UnifiedMessage, UnifiedToolCall,
 };
 
 use crate::gemini_types::{
@@ -50,7 +50,10 @@ pub fn unified_to_gemini_contents(messages: &[UnifiedMessage]) -> Vec<GeminiCont
         // Add tool calls as function_call parts
         if let Some(tool_calls) = &msg.tool_calls {
             for tc in tool_calls {
-                parts.push(GeminiPart::function_call_part(&sanitize_tool_name(&tc.name), tc.arguments.clone()));
+                parts.push(GeminiPart::function_call_part(
+                    &sanitize_tool_name(&tc.name),
+                    tc.arguments.clone(),
+                ));
             }
         }
 

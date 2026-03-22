@@ -170,7 +170,10 @@ mod tests {
 
     #[test]
     fn test_strip_inline_code() {
-        assert_eq!(strip_markdown("Use `cargo build` here"), "Use cargo build here");
+        assert_eq!(
+            strip_markdown("Use `cargo build` here"),
+            "Use cargo build here"
+        );
     }
 
     #[test]

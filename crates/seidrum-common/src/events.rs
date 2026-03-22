@@ -812,16 +812,14 @@ mod tests {
         };
 
         let envelope =
-            EventEnvelope::new("channel.cli.inbound", "cli-plugin", None, None, &inbound)
-                .unwrap();
+            EventEnvelope::new("channel.cli.inbound", "cli-plugin", None, None, &inbound).unwrap();
 
         assert_eq!(envelope.event_type, "channel.cli.inbound");
         assert_eq!(envelope.source, "cli-plugin");
         assert!(!envelope.id.is_empty());
 
         // Payload should deserialize back to ChannelInbound
-        let recovered: ChannelInbound =
-            serde_json::from_value(envelope.payload).unwrap();
+        let recovered: ChannelInbound = serde_json::from_value(envelope.payload).unwrap();
         assert_eq!(recovered.platform, "cli");
     }
 

@@ -63,7 +63,11 @@ impl PluginStorageService {
             "updated_at": chrono::Utc::now().to_rfc3339(),
         });
 
-        match self.arango.upsert_document("plugin_storage", &doc_key, &doc).await {
+        match self
+            .arango
+            .upsert_document("plugin_storage", &doc_key, &doc)
+            .await
+        {
             Ok(_) => StorageSetResponse {
                 success: true,
                 error: None,

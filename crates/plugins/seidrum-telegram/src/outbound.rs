@@ -56,8 +56,8 @@ async fn handle_outbound_message(bot: &Bot, payload: &[u8]) -> Result<()> {
             None
         };
 
-        let sent = send_with_fallback(bot, chat_id, chunk, &outbound.format, reply_to, thread_id)
-            .await;
+        let sent =
+            send_with_fallback(bot, chat_id, chunk, &outbound.format, reply_to, thread_id).await;
 
         if let Err(err) = sent {
             error!(

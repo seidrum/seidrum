@@ -313,9 +313,7 @@ impl WorkflowEngine {
             let sub = nats_client
                 .subscribe(subject.clone())
                 .await
-                .with_context(|| {
-                    format!("failed to subscribe to trigger subject: {}", subject)
-                })?;
+                .with_context(|| format!("failed to subscribe to trigger subject: {}", subject))?;
             info!(subject = %subject, workflows = contexts.len(), "subscribed to trigger");
             trigger_subs.push((sub, contexts.clone()));
         }
@@ -341,18 +339,18 @@ impl WorkflowEngine {
                 let h = tokio::spawn(async move {
                     while let Some(msg) = sub.next().await {
                         // Parse the incoming event envelope.
-                        let mut envelope: EventEnvelope =
-                            match serde_json::from_slice(&msg.payload) {
-                                Ok(env) => env,
-                                Err(e) => {
-                                    warn!(
-                                        error = %e,
-                                        subject = %msg.subject,
-                                        "failed to parse trigger event as EventEnvelope"
-                                    );
-                                    continue;
-                                }
-                            };
+                        let mut envelope: EventEnvelope = match serde_json::from_slice(&msg.payload)
+                        {
+                            Ok(env) => env,
+                            Err(e) => {
+                                warn!(
+                                    error = %e,
+                                    subject = %msg.subject,
+                                    "failed to parse trigger event as EventEnvelope"
+                                );
+                                continue;
+                            }
+                        };
 
                         // Inject origin from ChannelInbound payload if not already set.
                         if envelope.origin.is_none() {
@@ -434,17 +432,16 @@ impl WorkflowEngine {
                 let h = tokio::spawn(async move {
                     let mut sub = llm_response_sub;
                     while let Some(msg) = sub.next().await {
-                        let envelope: EventEnvelope =
-                            match serde_json::from_slice(&msg.payload) {
-                                Ok(env) => env,
-                                Err(e) => {
-                                    warn!(
-                                        error = %e,
-                                        "failed to parse llm.response as EventEnvelope"
-                                    );
-                                    continue;
-                                }
-                            };
+                        let envelope: EventEnvelope = match serde_json::from_slice(&msg.payload) {
+                            Ok(env) => env,
+                            Err(e) => {
+                                warn!(
+                                    error = %e,
+                                    "failed to parse llm.response as EventEnvelope"
+                                );
+                                continue;
+                            }
+                        };
 
                         // Check if the envelope already has origin — the
                         // response-formatter handles those cases. We only
@@ -473,14 +470,12 @@ impl WorkflowEngine {
                             let mut enriched = envelope.clone();
                             enriched.origin = Some(origin.clone());
 
-                            let outbound_subject =
-                                format!("channel.{}.outbound", origin.platform);
+                            let outbound_subject = format!("channel.{}.outbound", origin.platform);
 
                             match serde_json::to_vec(&enriched) {
                                 Ok(bytes) => {
-                                    if let Err(e) = nats
-                                        .publish(outbound_subject.clone(), bytes.into())
-                                        .await
+                                    if let Err(e) =
+                                        nats.publish(outbound_subject.clone(), bytes.into()).await
                                     {
                                         error!(
                                             error = %e,
@@ -712,7 +707,11 @@ mod tests {
             vec!["channel.cli.inbound"],
         );
         let warnings = engine.validate_pipeline(&agent);
-        assert!(warnings.is_empty(), "expected no warnings, got: {:?}", warnings);
+        assert!(
+            warnings.is_empty(),
+            "expected no warnings, got: {:?}",
+            warnings
+        );
     }
 
     #[test]
@@ -734,7 +733,11 @@ mod tests {
     fn trigger_consumes_is_always_valid() {
         let engine = WorkflowEngine::new();
         let agent = make_agent(
-            vec![make_step("graph-context-loader", "trigger", "agent.context.loaded")],
+            vec![make_step(
+                "graph-context-loader",
+                "trigger",
+                "agent.context.loaded",
+            )],
             vec!["channel.cli.inbound"],
         );
         let warnings = engine.validate_pipeline(&agent);
@@ -801,7 +804,11 @@ mod tests {
             vec!["channel.cli.inbound"],
         );
         let warnings = engine.validate_pipeline(&agent);
-        assert!(warnings.is_empty(), "expected no warnings, got: {:?}", warnings);
+        assert!(
+            warnings.is_empty(),
+            "expected no warnings, got: {:?}",
+            warnings
+        );
     }
 
     #[tokio::test]
@@ -893,6 +900,10 @@ mod tests {
             ],
         );
         let warnings = engine.validate_pipeline(&agent);
-        assert!(warnings.is_empty(), "expected no warnings, got: {:?}", warnings);
+        assert!(
+            warnings.is_empty(),
+            "expected no warnings, got: {:?}",
+            warnings
+        );
     }
 }

@@ -110,13 +110,8 @@ async fn main() -> Result<()> {
         produced_event_types: vec![],
     };
 
-    let register_envelope = EventEnvelope::new(
-        "plugin.register",
-        PLUGIN_ID,
-        None,
-        None,
-        &register,
-    )?;
+    let register_envelope =
+        EventEnvelope::new("plugin.register", PLUGIN_ID, None, None, &register)?;
 
     client
         .publish(
@@ -242,11 +237,8 @@ fn extract_actions(content: &str) -> StructuredActions {
         while let Some(start) = content[search_from..].find("```json") {
             let abs_start = search_from + start;
             let after_fence = &content[abs_start + 7..]; // skip "```json"
-            // Skip the marker suffix (e.g., ":tasks") if present — already handled above
-            let json_start = after_fence
-                .find('\n')
-                .map(|i| i + 1)
-                .unwrap_or(0);
+                                                         // Skip the marker suffix (e.g., ":tasks") if present — already handled above
+            let json_start = after_fence.find('\n').map(|i| i + 1).unwrap_or(0);
             if let Some(end) = after_fence[json_start..].find("```") {
                 let json_str = after_fence[json_start..json_start + end].trim();
                 // Try to parse as unified actions object

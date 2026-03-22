@@ -205,19 +205,16 @@ async fn main() -> Result<()> {
             .arguments
             .get("prompt")
             .and_then(|v| v.as_str())
-            .or_else(|| {
-                tool_request
-                    .arguments
-                    .get("args")
-                    .and_then(|v| v.as_str())
-            })
+            .or_else(|| tool_request.arguments.get("args").and_then(|v| v.as_str()))
             .unwrap_or("")
             .to_string();
 
         if prompt.is_empty() {
             let error_response = ToolCallResponse {
                 tool_id: tool_request.tool_id,
-                result: serde_json::json!("Please provide a prompt. Usage: /claude <task or question>"),
+                result: serde_json::json!(
+                    "Please provide a prompt. Usage: /claude <task or question>"
+                ),
                 is_error: true,
             };
             if let Err(e) = client
@@ -256,7 +253,14 @@ async fn main() -> Result<()> {
             "Executing Claude Code"
         );
 
-        let response = run_claude_code(&args, &prompt, &working_dir, session_id.as_deref(), append_system_prompt.as_deref()).await;
+        let response = run_claude_code(
+            &args,
+            &prompt,
+            &working_dir,
+            session_id.as_deref(),
+            append_system_prompt.as_deref(),
+        )
+        .await;
 
         info!(
             exit_code = response.exit_code,
@@ -301,8 +305,7 @@ async fn run_claude_code(
     cmd.arg("--allowedTools").arg(&config.allowed_tools);
 
     // Max turns
-    cmd.arg("--max-turns")
-        .arg(config.max_turns.to_string());
+    cmd.arg("--max-turns").arg(config.max_turns.to_string());
 
     // Budget limit
     if config.max_budget_usd > 0.0 {
@@ -386,11 +389,7 @@ async fn run_claude_code(
                 }
             } else {
                 ClaudeCodeResponse {
-                    result: if stderr.is_empty() {
-                        stdout
-                    } else {
-                        stderr
-                    },
+                    result: if stderr.is_empty() { stdout } else { stderr },
                     session_id: None,
                     model: None,
                     usage: None,
@@ -408,10 +407,7 @@ async fn run_claude_code(
             timed_out: false,
         },
         Err(_) => ClaudeCodeResponse {
-            result: format!(
-                "Claude Code timed out after {}s",
-                config.timeout_seconds
-            ),
+            result: format!("Claude Code timed out after {}s", config.timeout_seconds),
             session_id: None,
             model: None,
             usage: None,

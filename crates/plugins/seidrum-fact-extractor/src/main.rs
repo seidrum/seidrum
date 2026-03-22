@@ -106,7 +106,8 @@ fn resolve_google_api_key(cli_key: &Option<String>) -> Result<String> {
         .map_err(|e| anyhow::anyhow!("Failed to read OpenClaw auth-profiles.json: {}", e))?;
     let profiles: serde_json::Value = serde_json::from_str(&content)?;
     let key = profiles
-        .get("profiles").and_then(|p| p.get("google:default"))
+        .get("profiles")
+        .and_then(|p| p.get("google:default"))
         .and_then(|v| v.get("key"))
         .and_then(|v| v.as_str())
         .ok_or_else(|| anyhow::anyhow!("No google:default.key in OpenClaw auth-profiles.json"))?;
@@ -147,13 +148,8 @@ async fn main() -> Result<()> {
         produced_event_types: vec![],
     };
 
-    let register_envelope = EventEnvelope::new(
-        "plugin.register",
-        PLUGIN_ID,
-        None,
-        None,
-        &register,
-    )?;
+    let register_envelope =
+        EventEnvelope::new("plugin.register", PLUGIN_ID, None, None, &register)?;
 
     client
         .publish(
@@ -184,14 +180,14 @@ async fn main() -> Result<()> {
             }
         };
 
-        let entity_upserted: EntityUpserted =
-            match serde_json::from_value(envelope.payload.clone()) {
-                Ok(eu) => eu,
-                Err(err) => {
-                    warn!(%err, "Failed to deserialize EntityUpserted payload, skipping");
-                    continue;
-                }
-            };
+        let entity_upserted: EntityUpserted = match serde_json::from_value(envelope.payload.clone())
+        {
+            Ok(eu) => eu,
+            Err(err) => {
+                warn!(%err, "Failed to deserialize EntityUpserted payload, skipping");
+                continue;
+            }
+        };
 
         info!(
             entity_key = %entity_upserted.entity_key,
@@ -248,9 +244,7 @@ async fn process_entity(
     // Step 1: Fetch the content text from the kernel via brain.query.request
     let query_req = BrainQueryRequest {
         query_type: "aql".to_string(),
-        aql: Some(
-            "FOR doc IN content FILTER doc._key == @key RETURN doc.raw_text".to_string(),
-        ),
+        aql: Some("FOR doc IN content FILTER doc._key == @key RETURN doc.raw_text".to_string()),
         bind_vars: Some(HashMap::from([(
             "key".to_string(),
             serde_json::Value::String(source_content_key.to_string()),
@@ -442,10 +436,7 @@ Text to analyze:
         .strip_prefix("```json")
         .or_else(|| text_content.trim().strip_prefix("```"))
         .unwrap_or(text_content.trim());
-    let json_str = json_str
-        .strip_suffix("```")
-        .unwrap_or(json_str)
-        .trim();
+    let json_str = json_str.strip_suffix("```").unwrap_or(json_str).trim();
 
     let facts: Vec<ExtractedFact> =
         serde_json::from_str(json_str).context("Failed to parse LLM fact extraction output")?;

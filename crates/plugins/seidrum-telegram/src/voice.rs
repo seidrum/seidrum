@@ -33,8 +33,7 @@ pub async fn transcribe_voice(
     info!(size = ogg_bytes.len(), "Downloaded voice message");
 
     // Step 3: Save to a temp file with .ogg extension
-    let ogg_temp = NamedTempFile::new()
-        .context("Failed to create temp file for OGG")?;
+    let ogg_temp = NamedTempFile::new().context("Failed to create temp file for OGG")?;
     let ogg_path = ogg_temp.path().to_owned();
     let ogg_path_str = format!("{}.ogg", ogg_path.display());
     tokio::fs::write(&ogg_path_str, &ogg_bytes)
@@ -42,17 +41,19 @@ pub async fn transcribe_voice(
         .context("Failed to write OGG temp file")?;
 
     // Step 4: Create WAV temp file path
-    let wav_temp = NamedTempFile::new()
-        .context("Failed to create temp file for WAV")?;
+    let wav_temp = NamedTempFile::new().context("Failed to create temp file for WAV")?;
     let wav_path = wav_temp.path().to_owned();
     let wav_path_str = format!("{}.wav", wav_path.display());
 
     // Step 5: Convert OGG to WAV using ffmpeg
     let ffmpeg_output = tokio::process::Command::new("ffmpeg")
         .args([
-            "-i", &ogg_path_str,
-            "-ar", "16000",
-            "-ac", "1",
+            "-i",
+            &ogg_path_str,
+            "-ar",
+            "16000",
+            "-ac",
+            "1",
             "-y",
             &wav_path_str,
         ])
@@ -69,8 +70,10 @@ pub async fn transcribe_voice(
     // Step 6: Transcribe using whisper.cpp
     let whisper_output = tokio::process::Command::new(whisper_cli)
         .args([
-            "-m", whisper_model,
-            "-f", &wav_path_str,
+            "-m",
+            whisper_model,
+            "-f",
+            &wav_path_str,
             "--no-timestamps",
             "-nt",
         ])
@@ -136,10 +139,7 @@ async fn get_telegram_file_path(token: &str, file_id: &str) -> anyhow::Result<St
 
 /// Download a file from Telegram's file storage.
 async fn download_telegram_file(token: &str, file_path: &str) -> anyhow::Result<Vec<u8>> {
-    let url = format!(
-        "https://api.telegram.org/file/bot{}/{}",
-        token, file_path
-    );
+    let url = format!("https://api.telegram.org/file/bot{}/{}", token, file_path);
 
     let client = reqwest::Client::new();
     let resp = client
@@ -149,13 +149,13 @@ async fn download_telegram_file(token: &str, file_path: &str) -> anyhow::Result<
         .context("Failed to download file from Telegram")?;
 
     if !resp.status().is_success() {
-        bail!("Telegram file download failed with status: {}", resp.status());
+        bail!(
+            "Telegram file download failed with status: {}",
+            resp.status()
+        );
     }
 
-    let bytes = resp
-        .bytes()
-        .await
-        .context("Failed to read file bytes")?;
+    let bytes = resp.bytes().await.context("Failed to read file bytes")?;
 
     Ok(bytes.to_vec())
 }

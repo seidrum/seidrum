@@ -122,27 +122,25 @@ pub async fn query_tool_registry(
     )
     .await
     {
-        Ok(Ok(response)) => {
-            match serde_json::from_slice::<ToolSearchResponse>(&response.payload) {
-                Ok(resp) => {
-                    let tools: Vec<ToolSchema> = resp
-                        .tools
-                        .into_iter()
-                        .map(|t| ToolSchema {
-                            name: t.tool_id,
-                            description: t.summary_md,
-                            parameters: t.parameters,
-                        })
-                        .collect();
-                    debug!(count = tools.len(), "Tools loaded from registry");
-                    tools
-                }
-                Err(e) => {
-                    warn!(error = %e, "Failed to parse ToolSearchResponse");
-                    Vec::new()
-                }
+        Ok(Ok(response)) => match serde_json::from_slice::<ToolSearchResponse>(&response.payload) {
+            Ok(resp) => {
+                let tools: Vec<ToolSchema> = resp
+                    .tools
+                    .into_iter()
+                    .map(|t| ToolSchema {
+                        name: t.tool_id,
+                        description: t.summary_md,
+                        parameters: t.parameters,
+                    })
+                    .collect();
+                debug!(count = tools.len(), "Tools loaded from registry");
+                tools
             }
-        }
+            Err(e) => {
+                warn!(error = %e, "Failed to parse ToolSearchResponse");
+                Vec::new()
+            }
+        },
         Ok(Err(e)) => {
             warn!(error = %e, "Tool registry NATS request failed");
             Vec::new()
@@ -190,7 +188,11 @@ mod tests {
 
             // Must have required array
             let required = schema["required"].as_array();
-            assert!(required.is_some(), "Tool {} missing required array", tool.name);
+            assert!(
+                required.is_some(),
+                "Tool {} missing required array",
+                tool.name
+            );
         }
     }
 

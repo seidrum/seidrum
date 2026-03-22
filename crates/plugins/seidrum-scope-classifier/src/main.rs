@@ -98,7 +98,8 @@ fn resolve_google_api_key(cli_key: &Option<String>) -> Result<String> {
         .map_err(|e| anyhow::anyhow!("Failed to read OpenClaw auth-profiles.json: {}", e))?;
     let profiles: serde_json::Value = serde_json::from_str(&content)?;
     let key = profiles
-        .get("profiles").and_then(|p| p.get("google:default"))
+        .get("profiles")
+        .and_then(|p| p.get("google:default"))
         .and_then(|v| v.get("key"))
         .and_then(|v| v.as_str())
         .ok_or_else(|| anyhow::anyhow!("No google:default.key in OpenClaw auth-profiles.json"))?;
@@ -139,13 +140,8 @@ async fn main() -> Result<()> {
         produced_event_types: vec![],
     };
 
-    let register_envelope = EventEnvelope::new(
-        "plugin.register",
-        PLUGIN_ID,
-        None,
-        None,
-        &register,
-    )?;
+    let register_envelope =
+        EventEnvelope::new("plugin.register", PLUGIN_ID, None, None, &register)?;
 
     client
         .publish(
@@ -176,8 +172,7 @@ async fn main() -> Result<()> {
             }
         };
 
-        let content_stored: ContentStored = match serde_json::from_value(envelope.payload.clone())
-        {
+        let content_stored: ContentStored = match serde_json::from_value(envelope.payload.clone()) {
             Ok(cs) => cs,
             Err(err) => {
                 warn!(%err, "Failed to deserialize ContentStored payload, skipping");
@@ -225,9 +220,7 @@ async fn process_content(
     // Step 1: Fetch the content text from the kernel via brain.query.request
     let query_req = BrainQueryRequest {
         query_type: "aql".to_string(),
-        aql: Some(
-            "FOR doc IN content FILTER doc._key == @key RETURN doc.raw_text".to_string(),
-        ),
+        aql: Some("FOR doc IN content FILTER doc._key == @key RETURN doc.raw_text".to_string()),
         bind_vars: Some(HashMap::from([(
             "key".to_string(),
             serde_json::Value::String(content_stored.content_key.clone()),
@@ -320,9 +313,8 @@ async fn process_content(
         .await
         .context("brain.query.request for scopes timed out or failed")?;
 
-    let scopes_response_envelope: EventEnvelope =
-        serde_json::from_slice(&scopes_response.payload)
-            .context("Failed to deserialize scopes query response envelope")?;
+    let scopes_response_envelope: EventEnvelope = serde_json::from_slice(&scopes_response.payload)
+        .context("Failed to deserialize scopes query response envelope")?;
 
     let scopes_query_response: seidrum_common::events::BrainQueryResponse =
         serde_json::from_value(scopes_response_envelope.payload)
@@ -340,8 +332,7 @@ async fn process_content(
     }
 
     // Step 3: Call LLM to classify content into scopes
-    let classifications =
-        classify_via_llm(http, api_key, model, &raw_text, &scopes_json).await?;
+    let classifications = classify_via_llm(http, api_key, model, &raw_text, &scopes_json).await?;
 
     info!(
         content_key = %content_stored.content_key,
@@ -461,10 +452,7 @@ Content to classify:
         .strip_prefix("```json")
         .or_else(|| text_content.trim().strip_prefix("```"))
         .unwrap_or(text_content.trim());
-    let json_str = json_str
-        .strip_suffix("```")
-        .unwrap_or(json_str)
-        .trim();
+    let json_str = json_str.strip_suffix("```").unwrap_or(json_str).trim();
 
     let classifications: Vec<ScopeClassification> = serde_json::from_str(json_str)
         .context("Failed to parse LLM scope classification output")?;

@@ -249,7 +249,10 @@ impl ArangoClient {
         let mut body = properties.clone();
         if let Some(obj) = body.as_object_mut() {
             obj.insert("name".to_string(), Value::String(name.to_string()));
-            obj.insert("type".to_string(), Value::String("arangosearch".to_string()));
+            obj.insert(
+                "type".to_string(),
+                Value::String("arangosearch".to_string()),
+            );
         }
         let resp = self.post(&url, &body).await?;
 

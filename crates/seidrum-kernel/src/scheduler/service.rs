@@ -46,11 +46,7 @@ pub struct SchedulerService {
 
 impl SchedulerService {
     /// Create a new scheduler service.
-    pub fn new(
-        arango: ArangoClient,
-        nats: async_nats::Client,
-        registry: RegistryService,
-    ) -> Self {
+    pub fn new(arango: ArangoClient, nats: async_nats::Client, registry: RegistryService) -> Self {
         Self {
             arango,
             nats,
@@ -123,8 +119,7 @@ impl SchedulerService {
         let health_nats = self.nats.clone();
         let health_registry = self.registry.clone();
         let health_start_time = self.start_time;
-        let failure_counts: Arc<Mutex<HashMap<String, u32>>> =
-            Arc::new(Mutex::new(HashMap::new()));
+        let failure_counts: Arc<Mutex<HashMap<String, u32>>> = Arc::new(Mutex::new(HashMap::new()));
 
         let health_job = Job::new_async("0/30 * * * * *", move |_uuid, _lock| {
             let nats = health_nats.clone();
@@ -132,9 +127,7 @@ impl SchedulerService {
             let start_time = health_start_time;
             let failures = failure_counts.clone();
             Box::pin(async move {
-                if let Err(e) =
-                    run_health_check(&nats, &registry, start_time, &failures).await
-                {
+                if let Err(e) = run_health_check(&nats, &registry, start_time, &failures).await {
                     error!(error = %e, "scheduler: health check failed");
                 }
             })
@@ -207,8 +200,7 @@ async fn run_health_check(
         let health_subject = &plugin.health_subject;
 
         // Send a health ping with a 5-second timeout.
-        let request_payload =
-            serde_json::to_vec(&PluginHealthRequest {}).unwrap_or_default();
+        let request_payload = serde_json::to_vec(&PluginHealthRequest {}).unwrap_or_default();
 
         let is_responsive = match tokio::time::timeout(
             Duration::from_secs(5),

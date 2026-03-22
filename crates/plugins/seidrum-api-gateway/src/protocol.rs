@@ -14,13 +14,9 @@ use serde::{Deserialize, Serialize};
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum ClientMessage {
     /// Register this connection as a plugin.
-    Register {
-        plugin: PluginInfo,
-    },
+    Register { plugin: PluginInfo },
     /// Register a capability (tool/command).
-    RegisterCapability {
-        capability: serde_json::Value,
-    },
+    RegisterCapability { capability: serde_json::Value },
     /// Deregister and disconnect cleanly.
     Deregister {},
     /// Respond to a capability call from the kernel.
@@ -34,13 +30,9 @@ pub enum ClientMessage {
         response: PluginHealthResponse,
     },
     /// Subscribe to NATS event subjects.
-    Subscribe {
-        subjects: Vec<String>,
-    },
+    Subscribe { subjects: Vec<String> },
     /// Unsubscribe from NATS event subjects.
-    Unsubscribe {
-        subjects: Vec<String>,
-    },
+    Unsubscribe { subjects: Vec<String> },
     /// Publish an event to a NATS subject.
     Publish {
         subject: String,
@@ -94,18 +86,14 @@ pub struct PluginInfo {
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum ServerMessage {
     /// Registration confirmed.
-    Registered {
-        plugin_id: String,
-    },
+    Registered { plugin_id: String },
     /// Incoming capability call — the client must respond with `capability_response`.
     CapabilityCall {
         request_id: String,
         request: ToolCallRequest,
     },
     /// Health check from the kernel — the client must respond with `health_response`.
-    HealthCheck {
-        request_id: String,
-    },
+    HealthCheck { request_id: String },
     /// Event received on a subscribed subject.
     Event {
         subject: String,
@@ -117,9 +105,7 @@ pub enum ServerMessage {
         result: serde_json::Value,
     },
     /// Error message.
-    Error {
-        message: String,
-    },
+    Error { message: String },
 }
 
 #[cfg(test)]

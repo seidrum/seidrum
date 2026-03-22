@@ -122,10 +122,7 @@ async fn brain_query(
     let payload = serde_json::to_vec(&envelope)?;
 
     let reply = nats
-        .request(
-            "brain.query.request",
-            payload.into(),
-        )
+        .request("brain.query.request", payload.into())
         .await
         .context("brain.query.request NATS request failed")?;
 
@@ -288,29 +285,17 @@ fn assemble_context(
     };
 
     let similar_content = match vector_resp {
-        Some(resp) => resp
-            .results
-            .as_array()
-            .cloned()
-            .unwrap_or_default(),
+        Some(resp) => resp.results.as_array().cloned().unwrap_or_default(),
         None => Vec::new(),
     };
 
     let active_tasks = match tasks_resp {
-        Some(resp) => resp
-            .results
-            .as_array()
-            .cloned()
-            .unwrap_or_default(),
+        Some(resp) => resp.results.as_array().cloned().unwrap_or_default(),
         None => Vec::new(),
     };
 
     let conversation_history = match history_resp {
-        Some(resp) => resp
-            .results
-            .as_array()
-            .cloned()
-            .unwrap_or_default(),
+        Some(resp) => resp.results.as_array().cloned().unwrap_or_default(),
         None => Vec::new(),
     };
 
@@ -472,26 +457,33 @@ async fn main() -> Result<()> {
         };
 
         // Step 3: Query brain for get_context (entities, facts via graph traversal)
-        let context_resp =
-            match query_get_context(&nats, &inbound.text, cli.graph_depth, cli.max_facts, cli.min_confidence).await {
-                Ok(resp) => {
-                    info!(
-                        event_id = %envelope.id,
-                        count = resp.count,
-                        duration_ms = resp.duration_ms,
-                        "Get context returned results"
-                    );
-                    Some(resp)
-                }
-                Err(err) => {
-                    warn!(
-                        %err,
-                        event_id = %envelope.id,
-                        "Get context query failed"
-                    );
-                    None
-                }
-            };
+        let context_resp = match query_get_context(
+            &nats,
+            &inbound.text,
+            cli.graph_depth,
+            cli.max_facts,
+            cli.min_confidence,
+        )
+        .await
+        {
+            Ok(resp) => {
+                info!(
+                    event_id = %envelope.id,
+                    count = resp.count,
+                    duration_ms = resp.duration_ms,
+                    "Get context returned results"
+                );
+                Some(resp)
+            }
+            Err(err) => {
+                warn!(
+                    %err,
+                    event_id = %envelope.id,
+                    "Get context query failed"
+                );
+                None
+            }
+        };
 
         // Step 4: Query brain for active tasks
         let tasks_resp = match query_active_tasks(&nats).await {

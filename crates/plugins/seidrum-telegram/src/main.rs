@@ -124,50 +124,62 @@ async fn main() -> Result<()> {
     // Inbound handler: Telegram -> NATS
     // Handles both new messages and edited messages
     let handler = dptree::entry()
-        .branch(
-            Update::filter_message().endpoint({
+        .branch(Update::filter_message().endpoint({
+            let config = config.clone();
+            let nats_arc = nats_arc.clone();
+            let allowed = allowed.clone();
+            let registry_arc = registry_arc.clone();
+            move |bot: Bot, msg: Message| {
                 let config = config.clone();
                 let nats_arc = nats_arc.clone();
                 let allowed = allowed.clone();
                 let registry_arc = registry_arc.clone();
-                move |bot: Bot, msg: Message| {
-                    let config = config.clone();
-                    let nats_arc = nats_arc.clone();
-                    let allowed = allowed.clone();
-                    let registry_arc = registry_arc.clone();
-                    async move {
-                        if let Err(err) =
-                            handle_inbound(&msg, &nats_arc, &config, &allowed, false, &bot, &registry_arc).await
-                        {
-                            error!(%err, "Failed to handle inbound message");
-                        }
-                        respond(())
+                async move {
+                    if let Err(err) = handle_inbound(
+                        &msg,
+                        &nats_arc,
+                        &config,
+                        &allowed,
+                        false,
+                        &bot,
+                        &registry_arc,
+                    )
+                    .await
+                    {
+                        error!(%err, "Failed to handle inbound message");
                     }
+                    respond(())
                 }
-            }),
-        )
-        .branch(
-            Update::filter_edited_message().endpoint({
+            }
+        }))
+        .branch(Update::filter_edited_message().endpoint({
+            let config = config.clone();
+            let nats_arc = nats_arc.clone();
+            let allowed = allowed.clone();
+            let registry_arc = registry_arc.clone();
+            move |bot: Bot, msg: Message| {
                 let config = config.clone();
                 let nats_arc = nats_arc.clone();
                 let allowed = allowed.clone();
                 let registry_arc = registry_arc.clone();
-                move |bot: Bot, msg: Message| {
-                    let config = config.clone();
-                    let nats_arc = nats_arc.clone();
-                    let allowed = allowed.clone();
-                    let registry_arc = registry_arc.clone();
-                    async move {
-                        if let Err(err) =
-                            handle_inbound(&msg, &nats_arc, &config, &allowed, true, &bot, &registry_arc).await
-                        {
-                            error!(%err, "Failed to handle edited inbound message");
-                        }
-                        respond(())
+                async move {
+                    if let Err(err) = handle_inbound(
+                        &msg,
+                        &nats_arc,
+                        &config,
+                        &allowed,
+                        true,
+                        &bot,
+                        &registry_arc,
+                    )
+                    .await
+                    {
+                        error!(%err, "Failed to handle edited inbound message");
                     }
+                    respond(())
                 }
-            }),
-        );
+            }
+        }));
 
     info!("Starting Telegram bot polling...");
     let mut dispatcher = Dispatcher::builder(bot, handler)

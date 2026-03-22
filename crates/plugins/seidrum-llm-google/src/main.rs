@@ -9,8 +9,7 @@ use futures::StreamExt as _;
 use tracing::{error, info, warn};
 
 use seidrum_common::events::{
-    EventEnvelope, LlmResponse, PluginRegister, ToolCallResponse,
-    TokenUsage, UnifiedLlmRequest,
+    EventEnvelope, LlmResponse, PluginRegister, TokenUsage, ToolCallResponse, UnifiedLlmRequest,
 };
 
 use gemini_types::{
@@ -18,8 +17,8 @@ use gemini_types::{
     GeminiSystemInstruction,
 };
 use translator::{
-    gemini_function_calls_to_tool_calls, tool_call_to_dispatch_request,
-    unified_to_gemini_contents, unified_to_gemini_tools,
+    gemini_function_calls_to_tool_calls, tool_call_to_dispatch_request, unified_to_gemini_contents,
+    unified_to_gemini_tools,
 };
 
 // ---------------------------------------------------------------------------
@@ -132,13 +131,8 @@ async fn main() -> Result<()> {
         consumed_event_types: vec![],
         produced_event_types: vec![],
     };
-    let register_envelope = EventEnvelope::new(
-        "plugin.register",
-        "llm-google",
-        None,
-        None,
-        &register,
-    )?;
+    let register_envelope =
+        EventEnvelope::new("plugin.register", "llm-google", None, None, &register)?;
     nats.publish(
         "plugin.register",
         serde_json::to_vec(&register_envelope)?.into(),
@@ -216,9 +210,7 @@ async fn main() -> Result<()> {
                         finish_reason: "error".to_string(),
                     };
                     if let Ok(bytes) = serde_json::to_vec(&err_response) {
-                        let _ = nats_clone
-                            .publish(reply.to_string(), bytes.into())
-                            .await;
+                        let _ = nats_clone.publish(reply.to_string(), bytes.into()).await;
                     }
                 }
             }
@@ -266,11 +258,12 @@ async fn handle_provider_request(
     };
 
     // Build system instruction from the request
-    let system_instruction = request.system_prompt.as_ref().map(|s| {
-        GeminiSystemInstruction {
+    let system_instruction = request
+        .system_prompt
+        .as_ref()
+        .map(|s| GeminiSystemInstruction {
             parts: vec![GeminiPart::text_part(s)],
-        }
-    });
+        });
 
     // Temperature from config
     let temperature = request.config.temperature.map(|t| t as f32);

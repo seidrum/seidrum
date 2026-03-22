@@ -1,14 +1,15 @@
 use std::collections::HashMap;
 
+use anyhow::Context;
 use anyhow::Result;
 use clap::Parser;
 use futures::StreamExt;
 use seidrum_common::events::{
-    ChannelInbound, ChannelOutbound, EventEnvelope, PluginRegister, ToolCallRequest, ToolCallResponse,
+    ChannelInbound, ChannelOutbound, EventEnvelope, PluginRegister, ToolCallRequest,
+    ToolCallResponse,
 };
 use tokio_util::compat::TokioAsyncReadCompatExt;
 use tracing::{error, info, warn};
-use anyhow::Context;
 
 #[derive(Parser)]
 #[command(name = "seidrum-email", about = "Seidrum Email channel plugin")]
@@ -65,9 +66,7 @@ async fn poll_imap(cli: &Cli, nats: &async_nats::Client) -> Result<()> {
     // Wrap tokio TcpStream with compat layer for futures AsyncRead/AsyncWrite
     let compat_stream = tcp_stream.compat();
     let tls_connector = async_native_tls::TlsConnector::new();
-    let stream = tls_connector
-        .connect(&cli.imap_host, compat_stream)
-        .await?;
+    let stream = tls_connector.connect(&cli.imap_host, compat_stream).await?;
 
     let client = async_imap::Client::new(stream);
     let mut session = client
@@ -78,11 +77,7 @@ async fn poll_imap(cli: &Cli, nats: &async_nats::Client) -> Result<()> {
     session.select("INBOX").await?;
 
     // Search for unseen messages
-    let search_result: Vec<u32> = session
-        .search("UNSEEN")
-        .await?
-        .into_iter()
-        .collect();
+    let search_result: Vec<u32> = session.search("UNSEEN").await?.into_iter().collect();
 
     if search_result.is_empty() {
         session.logout().await?;
@@ -98,14 +93,10 @@ async fn poll_imap(cli: &Cli, nats: &async_nats::Client) -> Result<()> {
         .collect::<Vec<_>>()
         .join(",");
 
-    let messages_stream = session
-        .fetch(&seq_set, "(RFC822 FLAGS)")
-        .await?;
+    let messages_stream = session.fetch(&seq_set, "(RFC822 FLAGS)").await?;
 
     // Collect messages so we can drop the stream before using session again
-    let fetched: Vec<_> = messages_stream
-        .collect::<Vec<_>>()
-        .await;
+    let fetched: Vec<_> = messages_stream.collect::<Vec<_>>().await;
 
     for fetch_result in fetched {
         let fetch = match fetch_result {
@@ -146,20 +137,14 @@ async fn poll_imap(cli: &Cli, nats: &async_nats::Client) -> Result<()> {
             .unwrap_or("")
             .to_string();
 
-        let subject = parsed
-            .subject()
-            .unwrap_or("")
-            .to_string();
+        let subject = parsed.subject().unwrap_or("").to_string();
 
         let text_body = parsed
             .body_text(0)
             .map(|s| s.to_string())
             .unwrap_or_default();
 
-        let message_id = parsed
-            .message_id()
-            .unwrap_or("")
-            .to_string();
+        let message_id = parsed.message_id().unwrap_or("").to_string();
 
         let in_reply_to = parsed
             .in_reply_to()
@@ -199,13 +184,7 @@ async fn poll_imap(cli: &Cli, nats: &async_nats::Client) -> Result<()> {
             metadata,
         };
 
-        let envelope = EventEnvelope::new(
-            "channel.email.inbound",
-            "email",
-            None,
-            None,
-            &inbound,
-        )?;
+        let envelope = EventEnvelope::new("channel.email.inbound", "email", None, None, &inbound)?;
 
         let bytes = serde_json::to_vec(&envelope)?;
         nats.publish("channel.email.inbound", bytes.into()).await?;
@@ -241,10 +220,7 @@ fn send_email(cli: &Cli, outbound: &ChannelOutbound) -> Result<()> {
         .header(ContentType::TEXT_PLAIN)
         .body(outbound.text.clone())?;
 
-    let creds = Credentials::new(
-        cli.smtp_user.clone(),
-        cli.smtp_password.clone(),
-    );
+    let creds = Credentials::new(cli.smtp_user.clone(), cli.smtp_password.clone());
 
     let mailer = SmtpTransport::starttls_relay(&cli.smtp_host)?
         .port(cli.smtp_port)
@@ -328,15 +304,10 @@ async fn main() -> Result<()> {
         consumed_event_types: vec![],
         produced_event_types: vec![],
     };
-    let register_envelope = EventEnvelope::new(
-        "plugin.register",
-        "email",
-        None,
-        None,
-        &register,
-    )?;
+    let register_envelope = EventEnvelope::new("plugin.register", "email", None, None, &register)?;
     let register_bytes = serde_json::to_vec(&register_envelope)?;
-    nats.publish("plugin.register", register_bytes.into()).await?;
+    nats.publish("plugin.register", register_bytes.into())
+        .await?;
     info!("Published plugin.register event");
 
     // Register tool with the kernel's tool registry
@@ -372,8 +343,11 @@ async fn main() -> Result<()> {
         "kind": "tool"
     });
 
-    nats.publish("capability.register", serde_json::to_vec(&send_email_tool)?.into())
-        .await?;
+    nats.publish(
+        "capability.register",
+        serde_json::to_vec(&send_email_tool)?.into(),
+    )
+    .await?;
     info!("Tool 'send-email' registered with kernel");
 
     // Subscribe to outbound emails
@@ -488,7 +462,12 @@ async fn main() -> Result<()> {
                         is_error: true,
                     };
                     if let Err(e) = tool_nats
-                        .publish(reply, serde_json::to_vec(&error_response).unwrap_or_default().into())
+                        .publish(
+                            reply,
+                            serde_json::to_vec(&error_response)
+                                .unwrap_or_default()
+                                .into(),
+                        )
                         .await
                     {
                         error!(%e, "Failed to publish error reply");
@@ -499,19 +478,27 @@ async fn main() -> Result<()> {
 
             let tool_response = match tool_request.tool_id.as_str() {
                 "send-email" => {
-                    let to = tool_request.arguments.get("to")
+                    let to = tool_request
+                        .arguments
+                        .get("to")
                         .and_then(|v| v.as_str())
                         .unwrap_or("")
                         .to_string();
-                    let subject = tool_request.arguments.get("subject")
+                    let subject = tool_request
+                        .arguments
+                        .get("subject")
                         .and_then(|v| v.as_str())
                         .unwrap_or("")
                         .to_string();
-                    let body = tool_request.arguments.get("body")
+                    let body = tool_request
+                        .arguments
+                        .get("body")
                         .and_then(|v| v.as_str())
                         .unwrap_or("")
                         .to_string();
-                    let in_reply_to = tool_request.arguments.get("in_reply_to")
+                    let in_reply_to = tool_request
+                        .arguments
+                        .get("in_reply_to")
                         .and_then(|v| v.as_str())
                         .map(|s| s.to_string());
 
@@ -540,17 +527,20 @@ async fn main() -> Result<()> {
                         },
                     }
                 }
-                other => {
-                    ToolCallResponse {
-                        tool_id: other.to_string(),
-                        result: serde_json::json!({"error": format!("Unknown tool_id: {}", other)}),
-                        is_error: true,
-                    }
-                }
+                other => ToolCallResponse {
+                    tool_id: other.to_string(),
+                    result: serde_json::json!({"error": format!("Unknown tool_id: {}", other)}),
+                    is_error: true,
+                },
             };
 
             if let Err(err) = tool_nats
-                .publish(reply, serde_json::to_vec(&tool_response).unwrap_or_default().into())
+                .publish(
+                    reply,
+                    serde_json::to_vec(&tool_response)
+                        .unwrap_or_default()
+                        .into(),
+                )
                 .await
             {
                 error!(%err, "Failed to publish tool call reply");
@@ -641,8 +631,7 @@ mod tests {
         let deserialized: EventEnvelope = serde_json::from_str(&json).unwrap();
         assert_eq!(deserialized.event_type, "channel.email.outbound");
 
-        let recovered: ChannelOutbound =
-            serde_json::from_value(deserialized.payload).unwrap();
+        let recovered: ChannelOutbound = serde_json::from_value(deserialized.payload).unwrap();
         assert_eq!(recovered.chat_id, "bob@example.com");
     }
 }

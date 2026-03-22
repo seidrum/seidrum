@@ -97,9 +97,7 @@ pub async fn handle_message(
                     transcript
                 )
             }
-            Ok(None) => {
-                "[Voice message received but transcript was empty]".to_string()
-            }
+            Ok(None) => "[Voice message received but transcript was empty]".to_string(),
             Err(err) => {
                 warn!(%err, "Voice transcription failed");
                 "[Voice message received but transcription failed]".to_string()
@@ -107,7 +105,10 @@ pub async fn handle_message(
         };
 
         let display_text = if is_edited {
-            format!("[The user edited their previous message to:]\n{}", transcript)
+            format!(
+                "[The user edited their previous message to:]\n{}",
+                transcript
+            )
         } else {
             transcript
         };
@@ -157,10 +158,7 @@ pub async fn handle_message(
             .map(|m| m.to_string())
             .unwrap_or_else(|| "application/octet-stream".to_string());
 
-        let file_name = doc
-            .file_name
-            .as_deref()
-            .unwrap_or("unknown");
+        let file_name = doc.file_name.as_deref().unwrap_or("unknown");
 
         let attachment = crate::media::download_document(
             &config.token,
@@ -227,7 +225,11 @@ fn build_inbound(
 async fn publish_inbound(nats: &NatsClient, inbound: &ChannelInbound) -> Result<()> {
     // Build correlation_id in the format "telegram:{chat_id}:{message_id}"
     // The response formatter uses this to route outbound messages back to the right channel
-    let msg_id = inbound.metadata.get("message_id").cloned().unwrap_or_default();
+    let msg_id = inbound
+        .metadata
+        .get("message_id")
+        .cloned()
+        .unwrap_or_default();
     let correlation_id = format!("telegram:{}:{}", inbound.chat_id, msg_id);
 
     nats.publish_envelope(

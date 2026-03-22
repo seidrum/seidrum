@@ -179,10 +179,20 @@ pub struct RateLimit {
 
 /// Load and parse the platform configuration from a YAML file.
 pub fn load_platform_config(path: &Path) -> anyhow::Result<PlatformConfig> {
-    let contents = std::fs::read_to_string(path)
-        .map_err(|e| anyhow::anyhow!("Failed to read platform config at {}: {}", path.display(), e))?;
-    let config: PlatformConfig = serde_yaml::from_str(&contents)
-        .map_err(|e| anyhow::anyhow!("Failed to parse platform config at {}: {}", path.display(), e))?;
+    let contents = std::fs::read_to_string(path).map_err(|e| {
+        anyhow::anyhow!(
+            "Failed to read platform config at {}: {}",
+            path.display(),
+            e
+        )
+    })?;
+    let config: PlatformConfig = serde_yaml::from_str(&contents).map_err(|e| {
+        anyhow::anyhow!(
+            "Failed to parse platform config at {}: {}",
+            path.display(),
+            e
+        )
+    })?;
     Ok(config)
 }
 
@@ -190,8 +200,9 @@ pub fn load_platform_config(path: &Path) -> anyhow::Result<PlatformConfig> {
 pub fn load_agent_config(path: &Path) -> anyhow::Result<AgentConfigFile> {
     let contents = std::fs::read_to_string(path)
         .map_err(|e| anyhow::anyhow!("Failed to read agent config at {}: {}", path.display(), e))?;
-    let config: AgentConfigFile = serde_yaml::from_str(&contents)
-        .map_err(|e| anyhow::anyhow!("Failed to parse agent config at {}: {}", path.display(), e))?;
+    let config: AgentConfigFile = serde_yaml::from_str(&contents).map_err(|e| {
+        anyhow::anyhow!("Failed to parse agent config at {}: {}", path.display(), e)
+    })?;
     Ok(config)
 }
 
@@ -269,7 +280,11 @@ pub enum WorkflowStep {
 #[serde(untagged)]
 pub enum WorkflowOutput {
     Simple(String),
-    Detailed { channel: String, chat_id: Option<String>, template: Option<String> },
+    Detailed {
+        channel: String,
+        chat_id: Option<String>,
+        template: Option<String>,
+    },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -367,7 +382,10 @@ agent:
         assert_eq!(agent.pipeline.steps.len(), 2);
 
         // Check StringOrVec::Single
-        assert_eq!(agent.pipeline.steps[0].produces.as_vec(), vec!["llm.response"]);
+        assert_eq!(
+            agent.pipeline.steps[0].produces.as_vec(),
+            vec!["llm.response"]
+        );
 
         // Check StringOrVec::Multiple
         assert_eq!(
@@ -413,7 +431,10 @@ agent:
         assert_eq!(file.agent.tools, vec!["brain-query", "execute-code"]);
         assert_eq!(file.agent.scope, "scope_root");
         assert_eq!(file.agent.additional_scopes, vec!["scope_job_search"]);
-        assert_eq!(file.agent.description.as_deref(), Some("General-purpose personal assistant"));
+        assert_eq!(
+            file.agent.description.as_deref(),
+            Some("General-purpose personal assistant")
+        );
 
         let json = serde_json::to_string(&file).unwrap();
         let deserialized: AgentDefinitionFile = serde_json::from_str(&json).unwrap();
@@ -442,7 +463,10 @@ workflow:
         assert_eq!(wf.on, "channel.*.inbound");
         assert_eq!(wf.steps.len(), 3);
         assert!(wf.agents.contains_key("assistant"));
-        assert_eq!(wf.agents["assistant"].ref_id.as_deref(), Some("personal-assistant"));
+        assert_eq!(
+            wf.agents["assistant"].ref_id.as_deref(),
+            Some("personal-assistant")
+        );
 
         let json = serde_json::to_string(&file).unwrap();
         let deserialized: WorkflowFile = serde_json::from_str(&json).unwrap();

@@ -1,8 +1,8 @@
 //! Media download utilities for Telegram photos and documents.
 
 use anyhow::{bail, Context};
-use base64::Engine as _;
 use base64::engine::general_purpose::STANDARD as BASE64;
+use base64::Engine as _;
 use seidrum_common::events::Attachment;
 use tracing::debug;
 
@@ -107,10 +107,7 @@ async fn get_telegram_file_path(token: &str, file_id: &str) -> anyhow::Result<St
 
 /// Download a file from Telegram's file storage by its file_path.
 async fn download_telegram_file(token: &str, file_path: &str) -> anyhow::Result<Vec<u8>> {
-    let url = format!(
-        "https://api.telegram.org/file/bot{}/{}",
-        token, file_path
-    );
+    let url = format!("https://api.telegram.org/file/bot{}/{}", token, file_path);
 
     let client = reqwest::Client::new();
     let resp = client
@@ -126,10 +123,7 @@ async fn download_telegram_file(token: &str, file_path: &str) -> anyhow::Result<
         );
     }
 
-    let bytes = resp
-        .bytes()
-        .await
-        .context("Failed to read file bytes")?;
+    let bytes = resp.bytes().await.context("Failed to read file bytes")?;
 
     Ok(bytes.to_vec())
 }
