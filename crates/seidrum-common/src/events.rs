@@ -396,6 +396,19 @@ pub struct PluginRegister {
     /// Event types this plugin produces (e.g., "LlmResponse").
     #[serde(default)]
     pub produced_event_types: Vec<String>,
+    /// JSON Schema describing this plugin's configurable parameters.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub config_schema: Option<serde_json::Value>,
+}
+
+/// Notification that a plugin's configuration was updated.
+/// Subject: `plugin.{id}.config.update` (publish)
+#[derive(Serialize, Deserialize, Debug, Clone)]
+pub struct ConfigUpdated {
+    pub plugin_id: String,
+    pub config: serde_json::Value,
+    pub updated_by: String,
+    pub timestamp: chrono::DateTime<chrono::Utc>,
 }
 
 /// Plugin announces it is shutting down.

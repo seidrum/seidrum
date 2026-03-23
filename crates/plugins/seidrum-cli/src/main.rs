@@ -38,6 +38,7 @@ async fn main() -> Result<()> {
         health_subject: "plugin.cli.health".into(),
         consumed_event_types: vec![],
         produced_event_types: vec![],
+        config_schema: None,
     };
     nats.publish_envelope("plugin.register", None, None, &registration)
         .await?;

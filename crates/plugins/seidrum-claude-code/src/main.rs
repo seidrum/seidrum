@@ -102,6 +102,41 @@ async fn main() -> Result<()> {
         health_subject: format!("plugin.{}.health", PLUGIN_ID),
         consumed_event_types: vec![],
         produced_event_types: vec![],
+        config_schema: Some(serde_json::json!({
+            "type": "object",
+            "properties": {
+                "working_dir": {
+                    "type": "string",
+                    "description": "Default working directory for Claude Code",
+                    "default": "."
+                },
+                "allowed_tools": {
+                    "type": "string",
+                    "description": "Comma-separated list of allowed tools",
+                    "default": "Read,Edit,Bash,Glob,Grep,Write"
+                },
+                "max_turns": {
+                    "type": "integer",
+                    "description": "Maximum agentic turns",
+                    "default": 25
+                },
+                "max_budget_usd": {
+                    "type": "number",
+                    "description": "Maximum budget in USD (0 = unlimited)",
+                    "default": 1.0
+                },
+                "timeout_seconds": {
+                    "type": "integer",
+                    "description": "Subprocess timeout in seconds",
+                    "default": 300
+                },
+                "model": {
+                    "type": "string",
+                    "description": "Model to use (empty = default)",
+                    "default": ""
+                }
+            }
+        })),
     };
 
     let register_envelope =

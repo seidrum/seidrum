@@ -130,6 +130,7 @@ async fn main() -> Result<()> {
         health_subject: "plugin.llm-google.health".to_string(),
         consumed_event_types: vec![],
         produced_event_types: vec![],
+        config_schema: None,
     };
     let register_envelope =
         EventEnvelope::new("plugin.register", "llm-google", None, None, &register)?;

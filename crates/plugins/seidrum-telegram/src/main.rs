@@ -34,19 +34,11 @@ struct Cli {
     allowed_users: String,
 
     /// Path to whisper-cli binary for voice transcription
-    #[arg(
-        long,
-        env = "WHISPER_CLI_PATH",
-        default_value = "whisper-cli"
-    )]
+    #[arg(long, env = "WHISPER_CLI_PATH", default_value = "whisper-cli")]
     whisper_cli_path: String,
 
     /// Path to whisper model file
-    #[arg(
-        long,
-        env = "WHISPER_MODEL_PATH",
-        default_value = "ggml-small.en.bin"
-    )]
+    #[arg(long, env = "WHISPER_MODEL_PATH", default_value = "ggml-small.en.bin")]
     whisper_model_path: String,
 }
 
@@ -90,6 +82,26 @@ async fn main() -> Result<()> {
         health_subject: "plugin.telegram.health".to_string(),
         consumed_event_types: vec![],
         produced_event_types: vec![],
+        config_schema: Some(serde_json::json!({
+            "type": "object",
+            "properties": {
+                "allowed_users": {
+                    "type": "string",
+                    "description": "Comma-separated list of allowed Telegram user IDs (empty = allow all)",
+                    "default": ""
+                },
+                "whisper_cli_path": {
+                    "type": "string",
+                    "description": "Path to whisper-cli binary for voice transcription",
+                    "default": "whisper-cli"
+                },
+                "whisper_model_path": {
+                    "type": "string",
+                    "description": "Path to whisper model file",
+                    "default": "ggml-small.en.bin"
+                }
+            }
+        })),
     };
     nats.publish_envelope("plugin.register", None, None, &register)
         .await?;

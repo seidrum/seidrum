@@ -38,6 +38,9 @@ pub enum RegistryQuery {
     /// Get plugin IDs that produce a given event type.
     #[serde(rename = "get_producers")]
     GetProducers { event_type: String },
+    /// Get the config schema for a plugin.
+    #[serde(rename = "get_config_schema")]
+    GetConfigSchema { plugin_id: String },
 }
 
 /// Response to a registry query.
@@ -50,6 +53,8 @@ pub struct RegistryQueryResponse {
     pub plugins: Option<Vec<PluginRegister>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub plugin_ids: Option<Vec<String>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub config_schema: Option<serde_json::Value>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub error: Option<String>,
 }
@@ -149,6 +154,7 @@ impl RegistryService {
                     plugin,
                     plugins: None,
                     plugin_ids: None,
+                    config_schema: None,
                     error: None,
                 }
             }
@@ -159,6 +165,7 @@ impl RegistryService {
                     plugin: None,
                     plugins: Some(plugins),
                     plugin_ids: None,
+                    config_schema: None,
                     error: None,
                 }
             }
@@ -169,6 +176,7 @@ impl RegistryService {
                     plugin: None,
                     plugins: None,
                     plugin_ids: Some(ids),
+                    config_schema: None,
                     error: None,
                 }
             }
@@ -179,7 +187,24 @@ impl RegistryService {
                     plugin: None,
                     plugins: None,
                     plugin_ids: Some(ids),
+                    config_schema: None,
                     error: None,
+                }
+            }
+            RegistryQuery::GetConfigSchema { plugin_id } => {
+                let plugin = self.get_plugin(&plugin_id).await;
+                let schema = plugin.as_ref().and_then(|p| p.config_schema.clone());
+                RegistryQueryResponse {
+                    success: plugin.is_some(),
+                    plugin: None,
+                    plugins: None,
+                    plugin_ids: None,
+                    config_schema: schema,
+                    error: if plugin.is_none() {
+                        Some(format!("Plugin '{}' not found", plugin_id))
+                    } else {
+                        None
+                    },
                 }
             }
         }
@@ -288,6 +313,7 @@ impl RegistryService {
                                         plugin: None,
                                         plugins: None,
                                         plugin_ids: None,
+                                        config_schema: None,
                                         error: Some(format!("invalid query: {e}")),
                                     };
                                     if let Ok(bytes) = serde_json::to_vec(&err_resp) {
@@ -325,6 +351,7 @@ mod tests {
             health_subject: "plugin.telegram.health".into(),
             consumed_event_types: vec![],
             produced_event_types: vec![],
+            config_schema: None,
         };
 
         svc.register_plugin(reg.clone()).await;
@@ -354,6 +381,7 @@ mod tests {
             health_subject: "plugin.a.health".into(),
             consumed_event_types: vec![],
             produced_event_types: vec![],
+            config_schema: None,
         })
         .await;
 
@@ -367,6 +395,7 @@ mod tests {
             health_subject: "plugin.b.health".into(),
             consumed_event_types: vec![],
             produced_event_types: vec![],
+            config_schema: None,
         })
         .await;
 
@@ -388,6 +417,7 @@ mod tests {
             health_subject: "plugin.ingester.health".into(),
             consumed_event_types: vec![],
             produced_event_types: vec![],
+            config_schema: None,
         })
         .await;
 
@@ -401,6 +431,7 @@ mod tests {
             health_subject: "plugin.context-loader.health".into(),
             consumed_event_types: vec![],
             produced_event_types: vec![],
+            config_schema: None,
         })
         .await;
 
@@ -433,6 +464,7 @@ mod tests {
             health_subject: "plugin.test.health".into(),
             consumed_event_types: vec![],
             produced_event_types: vec![],
+            config_schema: None,
         })
         .await;
 
@@ -446,6 +478,7 @@ mod tests {
             health_subject: "plugin.test.health".into(),
             consumed_event_types: vec![],
             produced_event_types: vec![],
+            config_schema: None,
         })
         .await;
 
@@ -472,6 +505,7 @@ mod tests {
             health_subject: "plugin.telegram.health".into(),
             consumed_event_types: vec![],
             produced_event_types: vec![],
+            config_schema: None,
         })
         .await;
 

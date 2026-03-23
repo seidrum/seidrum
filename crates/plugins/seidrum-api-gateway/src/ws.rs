@@ -212,6 +212,7 @@ async fn handle_register(
         health_subject: format!("plugin.{}.health", plugin.id),
         consumed_event_types: vec![],
         produced_event_types: vec![],
+        config_schema: None,
     };
 
     nats.publish_envelope("plugin.register", None, None, &register)
