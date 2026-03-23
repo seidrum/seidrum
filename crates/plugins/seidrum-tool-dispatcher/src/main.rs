@@ -84,6 +84,7 @@ async fn main() -> Result<()> {
         health_subject: "plugin.tool-dispatcher.health".to_string(),
         consumed_event_types: vec![],
         produced_event_types: vec![],
+        config_schema: None,
     };
     nats.publish_envelope("plugin.register", None, None, &register)
         .await?;

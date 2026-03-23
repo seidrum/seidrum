@@ -138,6 +138,7 @@ async fn main() -> Result<()> {
         health_subject: format!("plugin.{}.health", PLUGIN_ID),
         consumed_event_types: vec![],
         produced_event_types: vec![],
+        config_schema: None,
     };
 
     let register_envelope =

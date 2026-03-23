@@ -362,6 +362,7 @@ async fn main() -> Result<()> {
         health_subject: "plugin.calendar.health".to_string(),
         consumed_event_types: vec![],
         produced_event_types: vec![],
+        config_schema: None,
     };
     let register_envelope =
         EventEnvelope::new("plugin.register", "calendar", None, None, &register)?;

@@ -1,0 +1,34 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>Seidrum Dashboard</title>
+    <link rel="stylesheet" href="/dashboard/style.css">
+</head>
+<body>
+    <div id="app">
+        <nav id="sidebar">
+            <h1>Seidrum</h1>
+            <ul>
+                <li><a href="#" onclick="showPage('overview')">Overview</a></li>
+                <li><a href="#" onclick="showPage('plugins')">Plugins</a></li>
+                <li><a href="#" onclick="showPage('capabilities')">Capabilities</a></li>
+                <li><a href="#" onclick="showPage('storage')">Storage</a></li>
+                <li><a href="#" onclick="showPage('events')">Events</a></li>
+            </ul>
+        </nav>
+        <main id="content">
+            <div id="login-prompt" style="display:none">
+                <h2>API Key Required</h2>
+                <form onsubmit="handleLogin(event)">
+                    <input type="password" id="api-key-input" placeholder="Enter API key" autofocus>
+                    <button type="submit">Connect</button>
+                </form>
+            </div>
+            <div id="page-content"></div>
+        </main>
+    </div>
+    <script src="/dashboard/app.js"></script>
+</body>
+</html>

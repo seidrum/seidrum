@@ -1,5 +1,6 @@
 mod auth;
 mod connections;
+mod dashboard;
 mod protocol;
 mod rest;
 mod ws;
@@ -9,12 +10,13 @@ use std::time::Instant;
 use anyhow::{Context, Result};
 use axum::extract::ws::WebSocketUpgrade;
 use axum::extract::{Query, Request, State};
-use axum::http::StatusCode;
+use axum::http::{header, StatusCode, Uri};
 use axum::middleware::{self, Next};
 use axum::response::IntoResponse;
-use axum::routing::{delete, get, post};
+use axum::routing::{delete, get, post, put};
 use axum::Router;
 use clap::Parser;
+use rust_embed::Embed;
 use seidrum_common::events::PluginRegister;
 use seidrum_common::nats_utils::NatsClient;
 use tower_http::cors::CorsLayer;
@@ -82,6 +84,7 @@ async fn main() -> Result<()> {
         health_subject: format!("plugin.{}.health", PLUGIN_ID),
         consumed_event_types: vec![],
         produced_event_types: vec![],
+        config_schema: None,
     };
 
     nats.publish_envelope("plugin.register", None, None, &register)
@@ -107,7 +110,7 @@ async fn main() -> Result<()> {
     });
 
     // Build axum router
-    // Authenticated REST routes
+    // Authenticated REST + dashboard API routes
     let api_routes = Router::new()
         .route("/plugins", get(rest::list_plugins))
         .route("/plugins/{id}", delete(rest::deregister_plugin))
@@ -117,6 +120,20 @@ async fn main() -> Result<()> {
         .route("/storage/set", post(rest::storage_set))
         .route("/storage/delete", post(rest::storage_delete))
         .route("/storage/list", post(rest::storage_list))
+        // Dashboard endpoints
+        .route("/dashboard/overview", get(dashboard::overview))
+        .route(
+            "/dashboard/plugins/{id}/health",
+            get(dashboard::plugin_health),
+        )
+        .route(
+            "/dashboard/plugins/{id}/config",
+            get(dashboard::get_plugin_config).put(dashboard::update_plugin_config),
+        )
+        .route(
+            "/dashboard/plugins/{id}/config/schema",
+            get(dashboard::get_config_schema),
+        )
         .layer(middleware::from_fn_with_state(
             state.clone(),
             bearer_auth_middleware,
@@ -126,6 +143,16 @@ async fn main() -> Result<()> {
         .route("/ws", get(ws_handler))
         .route("/api/v1/health", get(rest::health))
         .nest("/api/v1", api_routes)
+        // Dashboard static files (no auth — HTML/CSS/JS)
+        .route("/dashboard/{*path}", get(serve_static))
+        .route(
+            "/dashboard",
+            get(|| async { axum::response::Redirect::permanent("/dashboard/") }),
+        )
+        .route(
+            "/",
+            get(|| async { axum::response::Redirect::temporary("/dashboard/") }),
+        )
         .layer(CorsLayer::permissive())
         .layer(TraceLayer::new_for_http())
         .with_state(state);
@@ -179,4 +206,40 @@ async fn bearer_auth_middleware(
     }
 
     next.run(req).await.into_response()
+}
+
+// ---------------------------------------------------------------------------
+// Static file serving (dashboard frontend)
+// ---------------------------------------------------------------------------
+
+#[derive(Embed)]
+#[folder = "static/"]
+struct StaticAssets;
+
+/// Serve embedded static files for the dashboard.
+async fn serve_static(uri: Uri) -> impl IntoResponse {
+    let path = uri.path().trim_start_matches("/dashboard/");
+    let path = if path.is_empty() { "index.html" } else { path };
+
+    match StaticAssets::get(path) {
+        Some(content) => {
+            let mime = mime_guess::from_path(path).first_or_octet_stream();
+            (
+                [(header::CONTENT_TYPE, mime.as_ref())],
+                content.data.into_owned(),
+            )
+                .into_response()
+        }
+        None => {
+            // SPA fallback: serve index.html for unknown paths
+            match StaticAssets::get("index.html") {
+                Some(content) => (
+                    [(header::CONTENT_TYPE, "text/html")],
+                    content.data.into_owned(),
+                )
+                    .into_response(),
+                None => StatusCode::NOT_FOUND.into_response(),
+            }
+        }
+    }
 }
