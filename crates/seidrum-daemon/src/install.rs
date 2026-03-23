@@ -145,8 +145,9 @@ fn uninstall_systemd() -> Result<()> {
 
     if unit_path.exists() {
         std::fs::remove_file(&unit_path)?;
+        let user_args: &[&str] = if is_user { &["--user"] } else { &[] };
+        let _ = run_systemctl(user_args, "daemon-reload");
         println!("Removed {}", unit_path.display());
-        println!("Run: systemctl{} daemon-reload", user_flag);
     } else {
         println!("Service file not found at {}", unit_path.display());
     }

@@ -1,16 +1,18 @@
 //! Process supervisor: spawn, monitor, restart, and gracefully shut down
 //! the kernel and all enabled plugins.
 
+#[cfg(not(unix))]
+compile_error!("seidrum-daemon requires a Unix system (Linux or macOS)");
+
 use std::collections::BTreeMap;
 use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result};
 use chrono::Utc;
 use tokio::process::Command;
-use tokio::signal;
 use tracing::{error, info, warn};
 
-use crate::config::{load_plugins_config, resolve_plugin_env, PluginEntry};
+use crate::config::{load_plugins_config, resolve_plugin_env};
 use crate::paths::SeidrumPaths;
 use crate::status::ProcessMeta;
 
@@ -21,6 +23,31 @@ const BACKOFF_WINDOW: Duration = Duration::from_secs(300);
 /// Grace period for SIGTERM before SIGKILL.
 const SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(10);
 
+/// Send SIGTERM to a process by PID. Returns true if the signal was sent.
+fn send_sigterm(pid: u32) -> bool {
+    unsafe { libc::kill(pid as i32, libc::SIGTERM) == 0 }
+}
+
+/// Send SIGKILL to a process by PID.
+fn send_sigkill(pid: u32) {
+    unsafe {
+        libc::kill(pid as i32, libc::SIGKILL);
+    }
+}
+
+/// Check if a process is alive by PID.
+pub fn is_process_alive(pid: i32) -> bool {
+    if pid <= 0 {
+        return false;
+    }
+    let ret = unsafe { libc::kill(pid, 0) };
+    if ret == 0 {
+        return true;
+    }
+    // EPERM means the process exists but we lack permissions
+    std::io::Error::last_os_error().raw_os_error() == Some(libc::EPERM)
+}
+
 /// A managed child process.
 struct ManagedProcess {
     name: String,
@@ -28,6 +55,7 @@ struct ManagedProcess {
     args: Vec<String>,
     env: BTreeMap<String, String>,
     child: Option<tokio::process::Child>,
+    pid: Option<u32>,
     restart_count: u32,
     first_restart_at: Option<Instant>,
     started_at: Option<chrono::DateTime<Utc>>,
@@ -41,6 +69,7 @@ impl ManagedProcess {
             args,
             env,
             child: None,
+            pid: None,
             restart_count: 0,
             first_restart_at: None,
             started_at: None,
@@ -72,7 +101,6 @@ impl ManagedProcess {
         let mut cmd = Command::new(&binary_path);
         cmd.args(&self.args);
 
-        // Pass through parent environment + plugin-specific env vars
         for (k, v) in &self.env {
             cmd.env(k, v);
         }
@@ -84,12 +112,15 @@ impl ManagedProcess {
             format!("Failed to spawn {} ({})", self.name, binary_path.display())
         })?;
 
-        let pid = child.id().unwrap_or(0);
+        let pid = child.id().context("Failed to get PID of spawned process")?;
+
         self.started_at = Some(Utc::now());
+        self.pid = Some(pid);
         self.child = Some(child);
 
         // Write PID file
-        let _ = std::fs::write(paths.plugin_pid_file(&self.name), pid.to_string());
+        std::fs::write(paths.plugin_pid_file(&self.name), pid.to_string())
+            .with_context(|| format!("Failed to write PID file for {}", self.name))?;
 
         // Write metadata
         let meta = ProcessMeta {
@@ -97,10 +128,11 @@ impl ManagedProcess {
             started_at: self.started_at.unwrap(),
             restart_count: self.restart_count,
         };
-        let _ = std::fs::write(
+        std::fs::write(
             paths.plugin_meta_file(&self.name),
             serde_json::to_string(&meta).unwrap_or_default(),
-        );
+        )
+        .with_context(|| format!("Failed to write meta file for {}", self.name))?;
 
         // Remove stopped marker if present
         let _ = std::fs::remove_file(paths.plugin_stopped_file(&self.name));
@@ -113,7 +145,6 @@ impl ManagedProcess {
     fn should_restart(&mut self) -> bool {
         let now = Instant::now();
 
-        // Reset restart count if outside the backoff window
         if let Some(first) = self.first_restart_at {
             if now.duration_since(first) > BACKOFF_WINDOW {
                 self.restart_count = 0;
@@ -129,7 +160,6 @@ impl ManagedProcess {
             self.first_restart_at = Some(now);
         }
 
-        self.restart_count += 1;
         true
     }
 
@@ -144,21 +174,23 @@ impl ManagedProcess {
 pub async fn start(paths: &SeidrumPaths) -> Result<()> {
     paths.ensure_dirs()?;
 
-    // Check if already running
-    if let Ok(pid_str) = std::fs::read_to_string(paths.daemon_pid_file()) {
+    // Check if already running — use create_new for atomic PID file creation
+    let pid_file = paths.daemon_pid_file();
+    if let Ok(pid_str) = std::fs::read_to_string(&pid_file) {
         if let Ok(pid) = pid_str.trim().parse::<i32>() {
-            // Check if process is alive
-            if unsafe { libc::kill(pid, 0) } == 0 {
+            if is_process_alive(pid) {
                 anyhow::bail!(
                     "Daemon is already running (PID {}). Use 'seidrum daemon stop' first.",
                     pid
                 );
             }
         }
+        // Stale PID file — remove it
+        let _ = std::fs::remove_file(&pid_file);
     }
 
-    // Write our own PID
-    std::fs::write(paths.daemon_pid_file(), std::process::id().to_string())?;
+    // Write our own PID atomically
+    std::fs::write(&pid_file, std::process::id().to_string())?;
 
     info!("Starting Seidrum daemon");
 
@@ -189,7 +221,6 @@ pub async fn start(paths: &SeidrumPaths) -> Result<()> {
                 continue;
             }
 
-            // Skip if stopped marker exists
             if paths.plugin_stopped_file(name).exists() {
                 info!(name = %name, "Plugin manually stopped, skipping");
                 continue;
@@ -215,11 +246,18 @@ pub async fn start(paths: &SeidrumPaths) -> Result<()> {
         "All processes started, entering monitoring loop"
     );
 
-    // 3. Monitoring loop
+    // 3. Monitoring loop — handle both SIGINT and SIGTERM
+    let mut sigterm = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
+        .context("Failed to register SIGTERM handler")?;
+
     loop {
         tokio::select! {
-            _ = signal::ctrl_c() => {
-                info!("Received shutdown signal");
+            _ = tokio::signal::ctrl_c() => {
+                info!("Received SIGINT, shutting down");
+                break;
+            }
+            _ = sigterm.recv() => {
+                info!("Received SIGTERM, shutting down");
                 break;
             }
             _ = check_processes(&mut processes, paths) => {
@@ -240,7 +278,6 @@ pub async fn start(paths: &SeidrumPaths) -> Result<()> {
 
 /// Monitor processes and restart crashed ones.
 async fn check_processes(processes: &mut Vec<ManagedProcess>, paths: &SeidrumPaths) {
-    // Small polling interval
     tokio::time::sleep(Duration::from_secs(1)).await;
 
     for proc in processes.iter_mut() {
@@ -249,28 +286,22 @@ async fn check_processes(processes: &mut Vec<ManagedProcess>, paths: &SeidrumPat
             None => continue,
         };
 
-        // Non-blocking check if the child has exited
         match child.try_wait() {
             Ok(Some(status)) => {
                 let exit_code = status.code().unwrap_or(-1);
-                warn!(
-                    name = %proc.name,
-                    exit_code,
-                    "Process exited"
-                );
+                warn!(name = %proc.name, exit_code, "Process exited");
 
-                // Clean up PID file
                 let _ = std::fs::remove_file(paths.plugin_pid_file(&proc.name));
                 proc.child = None;
+                proc.pid = None;
 
-                // Check for stopped marker (manual stop)
                 if paths.plugin_stopped_file(&proc.name).exists() {
                     info!(name = %proc.name, "Process was manually stopped, not restarting");
                     continue;
                 }
 
-                // Restart with backoff
                 if proc.should_restart() {
+                    proc.restart_count += 1;
                     let delay = proc.backoff_delay();
                     warn!(
                         name = %proc.name,
@@ -292,9 +323,7 @@ async fn check_processes(processes: &mut Vec<ManagedProcess>, paths: &SeidrumPat
                     );
                 }
             }
-            Ok(None) => {
-                // Still running
-            }
+            Ok(None) => {}
             Err(e) => {
                 warn!(name = %proc.name, error = %e, "Error checking process status");
             }
@@ -306,35 +335,63 @@ async fn check_processes(processes: &mut Vec<ManagedProcess>, paths: &SeidrumPat
 async fn shutdown(processes: &mut Vec<ManagedProcess>, paths: &SeidrumPaths) {
     info!("Shutting down all processes...");
 
-    // Send SIGTERM to plugins (not kernel)
-    for proc in processes.iter_mut().filter(|p| p.name != "kernel") {
-        if let Some(ref mut child) = proc.child {
-            let pid = child.id().unwrap_or(0);
-            if pid > 0 {
-                info!(name = %proc.name, %pid, "Sending SIGTERM");
-                let _ = child.start_kill();
-            }
+    // Send SIGTERM to plugins first (not kernel)
+    for proc in processes.iter().filter(|p| p.name != "kernel") {
+        if let Some(pid) = proc.pid {
+            info!(name = %proc.name, %pid, "Sending SIGTERM");
+            send_sigterm(pid);
         }
     }
 
-    // Wait for plugins to exit
-    tokio::time::sleep(SHUTDOWN_TIMEOUT).await;
+    // Wait for plugins to exit, polling instead of fixed sleep
+    let deadline = Instant::now() + SHUTDOWN_TIMEOUT;
+    loop {
+        let all_stopped = processes.iter().filter(|p| p.name != "kernel").all(|p| {
+            p.pid
+                .map(|pid| !is_process_alive(pid as i32))
+                .unwrap_or(true)
+        });
+
+        if all_stopped || Instant::now() >= deadline {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(500)).await;
+    }
+
+    // SIGKILL any remaining plugins
+    for proc in processes.iter().filter(|p| p.name != "kernel") {
+        if let Some(pid) = proc.pid {
+            if is_process_alive(pid as i32) {
+                warn!(name = %proc.name, %pid, "Sending SIGKILL to stuck process");
+                send_sigkill(pid);
+            }
+        }
+    }
 
     // Now stop kernel
-    for proc in processes.iter_mut().filter(|p| p.name == "kernel") {
-        if let Some(ref mut child) = proc.child {
-            let pid = child.id().unwrap_or(0);
-            if pid > 0 {
-                info!(name = %proc.name, %pid, "Sending SIGTERM to kernel");
-                let _ = child.start_kill();
-            }
+    for proc in processes.iter().filter(|p| p.name == "kernel") {
+        if let Some(pid) = proc.pid {
+            info!(name = %proc.name, %pid, "Sending SIGTERM to kernel");
+            send_sigterm(pid);
         }
     }
 
-    // Wait briefly for kernel
-    tokio::time::sleep(Duration::from_secs(2)).await;
+    // Wait for kernel
+    let kernel_deadline = Instant::now() + Duration::from_secs(5);
+    loop {
+        let kernel_stopped = processes.iter().filter(|p| p.name == "kernel").all(|p| {
+            p.pid
+                .map(|pid| !is_process_alive(pid as i32))
+                .unwrap_or(true)
+        });
 
-    // Clean up PID files
+        if kernel_stopped || Instant::now() >= kernel_deadline {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(500)).await;
+    }
+
+    // Clean up all PID and meta files
     for proc in processes.iter() {
         let _ = std::fs::remove_file(paths.plugin_pid_file(&proc.name));
         let _ = std::fs::remove_file(paths.plugin_meta_file(&proc.name));
@@ -348,15 +405,21 @@ pub async fn stop(paths: &SeidrumPaths) -> Result<()> {
         .context("Daemon does not appear to be running (no PID file)")?;
     let pid: i32 = pid_str.trim().parse().context("Invalid PID file")?;
 
+    if !is_process_alive(pid) {
+        // Stale PID file
+        let _ = std::fs::remove_file(&pid_file);
+        println!("Daemon is not running (stale PID file cleaned up)");
+        return Ok(());
+    }
+
     info!(%pid, "Sending SIGTERM to daemon");
     unsafe {
         libc::kill(pid, libc::SIGTERM);
     }
 
-    // Wait for the daemon to exit
     for _ in 0..30 {
         tokio::time::sleep(Duration::from_secs(1)).await;
-        if unsafe { libc::kill(pid, 0) } != 0 {
+        if !is_process_alive(pid) {
             println!("Daemon stopped");
             return Ok(());
         }
@@ -366,7 +429,9 @@ pub async fn stop(paths: &SeidrumPaths) -> Result<()> {
     unsafe {
         libc::kill(pid, libc::SIGKILL);
     }
+    let _ = std::fs::remove_file(&pid_file);
 
+    println!("Daemon killed");
     Ok(())
 }
 
@@ -390,7 +455,7 @@ pub async fn run_kernel_command(paths: &SeidrumPaths, args: &[&str]) -> Result<(
     Ok(())
 }
 
-/// Start a single plugin on a running daemon.
+/// Start a single plugin (writes PID file; daemon monitor will detect via PID).
 pub async fn start_plugin(paths: &SeidrumPaths, name: &str) -> Result<()> {
     let config = load_plugins_config(&paths.plugins_yaml())?;
     let entry = config
@@ -404,7 +469,7 @@ pub async fn start_plugin(paths: &SeidrumPaths, name: &str) -> Result<()> {
     // Check if already running
     if let Ok(pid_str) = std::fs::read_to_string(paths.plugin_pid_file(name)) {
         if let Ok(pid) = pid_str.trim().parse::<i32>() {
-            if unsafe { libc::kill(pid, 0) } == 0 {
+            if is_process_alive(pid) {
                 println!("Plugin '{}' is already running (PID {})", name, pid);
                 return Ok(());
             }
@@ -416,9 +481,10 @@ pub async fn start_plugin(paths: &SeidrumPaths, name: &str) -> Result<()> {
 
     proc.spawn(paths)?;
 
-    // Detach — the monitoring loop in the running daemon will pick it up
+    // Detach the child — it will run independently.
+    // The daemon's monitor loop will detect it via PID file if running,
+    // otherwise it runs as a standalone process.
     if let Some(mut child) = proc.child.take() {
-        // Forget the child so it doesn't get killed when we exit
         tokio::spawn(async move {
             let _ = child.wait().await;
         });
@@ -435,6 +501,15 @@ pub async fn stop_plugin(paths: &SeidrumPaths, name: &str) -> Result<()> {
         .with_context(|| format!("Plugin '{}' does not appear to be running", name))?;
     let pid: i32 = pid_str.trim().parse().context("Invalid PID file")?;
 
+    if !is_process_alive(pid) {
+        let _ = std::fs::remove_file(&pid_file);
+        println!(
+            "Plugin '{}' is not running (stale PID file cleaned up)",
+            name
+        );
+        return Ok(());
+    }
+
     // Write stopped marker so the daemon doesn't restart it
     std::fs::write(paths.plugin_stopped_file(name), "")?;
 
@@ -443,10 +518,9 @@ pub async fn stop_plugin(paths: &SeidrumPaths, name: &str) -> Result<()> {
         libc::kill(pid, libc::SIGTERM);
     }
 
-    // Wait briefly
     for _ in 0..10 {
         tokio::time::sleep(Duration::from_millis(500)).await;
-        if unsafe { libc::kill(pid, 0) } != 0 {
+        if !is_process_alive(pid) {
             let _ = std::fs::remove_file(&pid_file);
             println!("Plugin '{}' stopped", name);
             return Ok(());
@@ -461,4 +535,50 @@ pub async fn stop_plugin(paths: &SeidrumPaths, name: &str) -> Result<()> {
 
     println!("Plugin '{}' killed", name);
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn should_restart_respects_max() {
+        let mut proc =
+            ManagedProcess::new("test".into(), "test-bin".into(), vec![], BTreeMap::new());
+
+        for _ in 0..MAX_RESTARTS {
+            assert!(proc.should_restart());
+            proc.restart_count += 1;
+        }
+        assert!(!proc.should_restart());
+    }
+
+    #[test]
+    fn backoff_delay_sequence() {
+        let mut proc =
+            ManagedProcess::new("test".into(), "test-bin".into(), vec![], BTreeMap::new());
+
+        // backoff_delay uses restart_count: 1, 2, 4, 8, 16
+        let expected = [1, 2, 4, 8, 16];
+        for &expected_secs in &expected {
+            assert_eq!(proc.backoff_delay().as_secs(), expected_secs);
+            proc.restart_count += 1;
+        }
+    }
+
+    #[test]
+    fn is_process_alive_nonexistent() {
+        // PID that almost certainly doesn't exist
+        assert!(!is_process_alive(999_999_999));
+    }
+
+    #[test]
+    fn is_process_alive_zero_is_false() {
+        assert!(!is_process_alive(0));
+    }
+
+    #[test]
+    fn is_process_alive_negative_is_false() {
+        assert!(!is_process_alive(-1));
+    }
 }

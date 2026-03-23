@@ -6,6 +6,7 @@ use serde::{Deserialize, Serialize};
 use tabled::{Table, Tabled};
 
 use crate::config::load_plugins_config;
+use crate::daemon::is_process_alive;
 use crate::paths::SeidrumPaths;
 
 /// Metadata stored alongside PID files.
@@ -18,23 +19,19 @@ pub struct ProcessMeta {
 
 /// Show the status of the daemon and all plugins.
 pub async fn show(paths: &SeidrumPaths) -> Result<()> {
-    // Check daemon
-    let daemon_status = check_pid_file(&paths.daemon_pid_file());
-    match &daemon_status {
+    let daemon_pid = check_pid_file(&paths.daemon_pid_file());
+    match daemon_pid {
         Some(pid) => println!("Seidrum daemon: running (PID {})\n", pid),
-        None => {
-            println!("Seidrum daemon: not running\n");
-        }
+        None => println!("Seidrum daemon: not running\n"),
     }
 
-    // Check kernel
-    let kernel_status = get_process_status(paths, "kernel");
+    let kernel_status = get_process_status(paths, "kernel", "seidrum-kernel");
 
-    // Check plugins
     let plugins_yaml = paths.plugins_yaml();
-    let plugin_statuses: Vec<ProcessStatus> = if plugins_yaml.exists() {
+    let mut statuses = vec![kernel_status];
+
+    if plugins_yaml.exists() {
         let config = load_plugins_config(&plugins_yaml)?;
-        let mut statuses = vec![kernel_status];
 
         for (name, entry) in &config.plugins {
             let status = if !entry.enabled {
@@ -56,16 +53,13 @@ pub async fn show(paths: &SeidrumPaths) -> Result<()> {
                     restarts: "-".to_string(),
                 }
             } else {
-                get_process_status(paths, name)
+                get_process_status(paths, name, &entry.binary)
             };
             statuses.push(status);
         }
-        statuses
-    } else {
-        vec![kernel_status]
-    };
+    }
 
-    println!("{}", Table::new(&plugin_statuses));
+    println!("{}", Table::new(&statuses));
 
     Ok(())
 }
@@ -86,29 +80,20 @@ struct ProcessStatus {
     restarts: String,
 }
 
-fn get_process_status(paths: &SeidrumPaths, name: &str) -> ProcessStatus {
-    let binary = if name == "kernel" {
-        "seidrum-kernel".to_string()
-    } else {
-        format!("seidrum-{}", name)
-    };
-
+fn get_process_status(paths: &SeidrumPaths, name: &str, binary: &str) -> ProcessStatus {
     let pid = check_pid_file(&paths.plugin_pid_file(name));
     let meta = load_meta(&paths.plugin_meta_file(name));
 
     match pid {
         Some(pid) => {
             let (uptime, restarts) = match meta {
-                Some(m) => {
-                    let uptime = format_uptime(m.started_at);
-                    (uptime, m.restart_count.to_string())
-                }
+                Some(m) => (format_uptime(m.started_at), m.restart_count.to_string()),
                 None => ("-".to_string(), "0".to_string()),
             };
 
             ProcessStatus {
                 name: name.to_string(),
-                binary,
+                binary: binary.to_string(),
                 state: "running".to_string(),
                 pid: pid.to_string(),
                 uptime,
@@ -117,7 +102,7 @@ fn get_process_status(paths: &SeidrumPaths, name: &str) -> ProcessStatus {
         }
         None => ProcessStatus {
             name: name.to_string(),
-            binary,
+            binary: binary.to_string(),
             state: "down".to_string(),
             pid: "-".to_string(),
             uptime: "-".to_string(),
@@ -129,10 +114,11 @@ fn get_process_status(paths: &SeidrumPaths, name: &str) -> ProcessStatus {
 }
 
 /// Check if a PID file exists and the process is alive.
+/// Handles both ESRCH (no process) and EPERM (process exists, different user).
 fn check_pid_file(path: &std::path::Path) -> Option<i32> {
     let pid_str = std::fs::read_to_string(path).ok()?;
     let pid: i32 = pid_str.trim().parse().ok()?;
-    if unsafe { libc::kill(pid, 0) } == 0 {
+    if is_process_alive(pid) {
         Some(pid)
     } else {
         None

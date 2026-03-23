@@ -45,10 +45,17 @@ pub fn save_plugins_config(path: &Path, config: &PluginsConfig) -> Result<()> {
 }
 
 /// Resolve `${VAR}` and `${VAR:-default}` patterns in a string.
+/// Scans left-to-right without re-processing already-resolved text.
 pub fn resolve_env(value: &str) -> String {
     let mut result = value.to_string();
-    // Match ${VAR:-default} first, then ${VAR}
-    while let Some(start) = result.find("${") {
+    let mut search_from = 0;
+
+    while search_from < result.len() {
+        let start = match result[search_from..].find("${") {
+            Some(s) => search_from + s,
+            None => break,
+        };
+
         let end = match result[start..].find('}') {
             Some(e) => start + e,
             None => break,
@@ -63,7 +70,10 @@ pub fn resolve_env(value: &str) -> String {
             std::env::var(expr).unwrap_or_default()
         };
 
+        let resolved_len = resolved.len();
         result = format!("{}{}{}", &result[..start], resolved, &result[end + 1..]);
+        // Skip past the resolved value to avoid re-processing
+        search_from = start + resolved_len;
     }
     result
 }
