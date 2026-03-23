@@ -1,0 +1,118 @@
+# Seidrum Plugin Configuration
+#
+# Each plugin lists its binary name, enabled state, and env vars.
+# Env values support ${VAR} and ${VAR:-default} interpolation.
+#
+# The daemon reads this file to know which plugins to start.
+# Use `seidrum plugin enable/disable <name>` to toggle plugins.
+
+plugins:
+  telegram:
+    binary: seidrum-telegram
+    enabled: true
+    env:
+      TELEGRAM_TOKEN: "${TELEGRAM_TOKEN}"
+      TELEGRAM_ALLOWED_USERS: "${TELEGRAM_ALLOWED_USERS}"
+
+  llm-router:
+    binary: seidrum-llm-router
+    enabled: true
+
+  llm-google:
+    binary: seidrum-llm-google
+    enabled: true
+    env:
+      GOOGLE_API_KEY: "${GOOGLE_API_KEY}"
+
+  tool-dispatcher:
+    binary: seidrum-tool-dispatcher
+    enabled: true
+
+  content-ingester:
+    binary: seidrum-content-ingester
+    enabled: true
+    env:
+      EMBEDDING_PROVIDER: "${EMBEDDING_PROVIDER:-openai}"
+      OPENAI_API_KEY: "${OPENAI_API_KEY}"
+
+  entity-extractor:
+    binary: seidrum-entity-extractor
+    enabled: true
+    env:
+      GOOGLE_API_KEY: "${GOOGLE_API_KEY}"
+
+  fact-extractor:
+    binary: seidrum-fact-extractor
+    enabled: true
+    env:
+      GOOGLE_API_KEY: "${GOOGLE_API_KEY}"
+
+  graph-context-loader:
+    binary: seidrum-graph-context-loader
+    enabled: true
+
+  scope-classifier:
+    binary: seidrum-scope-classifier
+    enabled: true
+    env:
+      GOOGLE_API_KEY: "${GOOGLE_API_KEY}"
+
+  response-formatter:
+    binary: seidrum-response-formatter
+    enabled: true
+
+  event-emitter:
+    binary: seidrum-event-emitter
+    enabled: true
+
+  task-detector:
+    binary: seidrum-task-detector
+    enabled: true
+    env:
+      GOOGLE_API_KEY: "${GOOGLE_API_KEY}"
+
+  code-executor:
+    binary: seidrum-code-executor
+    enabled: true
+
+  notification:
+    binary: seidrum-notification
+    enabled: true
+
+  cli:
+    binary: seidrum-cli
+    enabled: false
+
+  email:
+    binary: seidrum-email
+    enabled: false
+    env:
+      IMAP_HOST: "${IMAP_HOST}"
+      IMAP_PORT: "${IMAP_PORT:-993}"
+      IMAP_USER: "${IMAP_USER}"
+      IMAP_PASSWORD: "${IMAP_PASSWORD}"
+      SMTP_HOST: "${SMTP_HOST}"
+      SMTP_PORT: "${SMTP_PORT:-587}"
+      SMTP_USER: "${SMTP_USER}"
+      SMTP_PASSWORD: "${SMTP_PASSWORD}"
+      SMTP_FROM: "${SMTP_FROM}"
+
+  calendar:
+    binary: seidrum-calendar
+    enabled: false
+    env:
+      GOOGLE_API_KEY: "${GOOGLE_API_KEY}"
+      GOOGLE_CALENDAR_ID: "${GOOGLE_CALENDAR_ID:-primary}"
+
+  claude-code:
+    binary: seidrum-claude-code
+    enabled: false
+    env:
+      CLAUDE_WORKING_DIR: "${CLAUDE_WORKING_DIR:-.}"
+
+  api-gateway:
+    binary: seidrum-api-gateway
+    enabled: false
+    env:
+      GATEWAY_API_KEY: "${GATEWAY_API_KEY}"
+      GATEWAY_LISTEN_ADDR: "${GATEWAY_LISTEN_ADDR:-0.0.0.0:8080}"

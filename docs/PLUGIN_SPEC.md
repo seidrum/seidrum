@@ -554,3 +554,71 @@ async def main():
 
 This works because the only contract is: connect to NATS, consume events,
 produce events. Language doesn't matter. Runtime doesn't matter.
+
+## Daemon Process Manager
+
+The `seidrum` binary manages the kernel and all plugins as a unified process supervisor.
+
+### Plugin Configuration (`config/plugins.yaml`)
+
+Each local plugin is listed in `config/plugins.yaml` with its binary name, enabled state, and environment variables:
+
+```yaml
+plugins:
+  telegram:
+    binary: seidrum-telegram
+    enabled: true
+    env:
+      TELEGRAM_TOKEN: "${TELEGRAM_TOKEN}"
+  claude-code:
+    binary: seidrum-claude-code
+    enabled: false
+    env:
+      CLAUDE_WORKING_DIR: "${CLAUDE_WORKING_DIR:-.}"
+```
+
+Environment values support `${VAR}` and `${VAR:-default}` interpolation.
+
+### CLI Commands
+
+```
+seidrum daemon start/stop/restart/status   — manage the full stack
+seidrum daemon install/uninstall           — systemd (Linux) / launchd (macOS)
+seidrum plugin list/enable/disable         — toggle plugins
+seidrum plugin start/stop/restart          — control individual plugins
+seidrum init / seidrum validate            — database and config management
+```
+
+### Process Supervision
+
+- The daemon starts the kernel first, waits 2 seconds, then spawns enabled plugins
+- Crashed plugins are restarted with exponential backoff (1/2/4/8/16s, max 5 in 5min)
+- Graceful shutdown: SIGTERM to plugins first, then kernel
+- PID files and metadata stored in `~/.seidrum/pids/`
+- Process logs in `~/.seidrum/logs/`
+
+## Plugin Config Schemas
+
+Plugins can declare a `config_schema` field in their `PluginRegister` struct — a JSON Schema describing configurable parameters:
+
+```rust
+PluginRegister {
+    // ... other fields ...
+    config_schema: Some(serde_json::json!({
+        "type": "object",
+        "properties": {
+            "max_turns": {
+                "type": "integer",
+                "description": "Maximum agentic turns",
+                "default": 25
+            }
+        }
+    })),
+}
+```
+
+When a plugin declares a config schema:
+- The admin dashboard renders a configuration form automatically
+- Config changes are validated against the schema before saving
+- Updated config is persisted to plugin storage (`namespace: "config"`)
+- The plugin is notified via `plugin.{id}.config.update` NATS subject

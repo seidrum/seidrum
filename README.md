@@ -106,17 +106,36 @@ cp .env.example .env
 cargo build --workspace
 
 # Initialize the brain database
-source .env && target/debug/seidrum-kernel init
+seidrum init
 
-# Start the kernel
-source .env && target/debug/seidrum-kernel serve &
+# Start everything (kernel + all enabled plugins)
+seidrum daemon start
+```
 
-# Start plugins (example: telegram + llm)
-source .env && target/debug/seidrum-telegram &
-source .env && target/debug/seidrum-llm-router &
-source .env && target/debug/seidrum-llm-google &
-source .env && target/debug/seidrum-tool-dispatcher &
-source .env && target/debug/seidrum-response-formatter &
+### Using the `seidrum` CLI
+
+```bash
+# Daemon management
+seidrum daemon start          # Start kernel + enabled plugins (foreground)
+seidrum daemon stop           # Graceful shutdown
+seidrum daemon restart        # Stop then start
+seidrum daemon status         # Show all processes with PID, uptime, restarts
+
+# Install as system service (systemd on Linux, launchd on macOS)
+seidrum daemon install        # Install, enable, and start the service
+seidrum daemon uninstall      # Stop and remove the service
+
+# Plugin management
+seidrum plugin list           # Show all plugins with enabled/disabled state
+seidrum plugin enable telegram
+seidrum plugin disable email
+seidrum plugin start claude-code
+seidrum plugin stop claude-code
+seidrum plugin restart telegram
+
+# Database and config
+seidrum init                  # Initialize ArangoDB collections
+seidrum validate              # Validate platform and agent configuration
 ```
 
 ### Docker Compose (full stack)
@@ -135,6 +154,7 @@ docker compose up -d
 | `config/platform.yaml` | Kernel config — NATS URL, ArangoDB connection |
 | `agents/*.yaml` | Agent definitions — prompt, tools, scope |
 | `workflows/*.yaml` | Workflow wiring — triggers, steps, routing |
+| `config/plugins.yaml` | Plugin manifest — binaries, enabled state, env vars |
 | `prompts/*.md` | Tera-templated system prompts |
 
 ## Project structure
@@ -144,6 +164,7 @@ seidrum/
 ├── crates/
 │   ├── seidrum-common/        # Shared types, events, NATS utilities
 │   ├── seidrum-kernel/        # Core services (brain, registry, scheduler)
+│   ├── seidrum-daemon/        # Unified CLI + process supervisor (`seidrum` binary)
 │   └── plugins/
 │       ├── seidrum-telegram/
 │       ├── seidrum-cli/
