@@ -522,6 +522,25 @@ struct PluginDeregister {
 
 ---
 
+## Plugin Config Events
+
+### `plugin.{id}.config.update`
+
+Notification that a plugin's configuration was updated (e.g., from the admin dashboard).
+
+```rust
+pub struct ConfigUpdated {
+    pub plugin_id: String,
+    pub config: serde_json::Value,
+    pub updated_by: String,
+    pub timestamp: DateTime<Utc>,
+}
+```
+
+Published by the API gateway dashboard after validating the config against the plugin's JSON Schema and persisting to plugin storage.
+
+---
+
 ## Capability Events
 
 ### `capability.registered`
