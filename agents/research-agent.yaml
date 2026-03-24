@@ -3,7 +3,6 @@ agent:
   description: Deep research and analysis agent
   prompt: ./prompts/research.md
   tools:
-    - brain-query
     - execute-code
   scope: scope_projects
   additional_scopes:

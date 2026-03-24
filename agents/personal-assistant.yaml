@@ -3,7 +3,6 @@ agent:
   description: General-purpose personal assistant
   prompt: ./prompts/assistant.md
   tools:
-    - brain-query
     - execute-code
     - search-calendar
     - send-email
@@ -11,3 +10,6 @@ agent:
   additional_scopes:
     - scope_job_search
     - scope_projects
+  subscribe:
+    - channel.*.inbound
+    - task.completed.*

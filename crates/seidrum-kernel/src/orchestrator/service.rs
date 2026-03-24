@@ -214,6 +214,8 @@ impl WorkflowEngine {
                                     .unwrap_or_else(|| "scope_root".to_string()),
                                 additional_scopes: vec![],
                                 description: None,
+                                subscribe: vec![],
+                                guardrails: None,
                             };
                             resolved_agents.insert(name.clone(), inline_def);
                         }

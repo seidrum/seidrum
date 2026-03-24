@@ -419,6 +419,7 @@ async fn handle_message(
                     },
                     duration_ms,
                     finish_reason: "error".to_string(),
+                    tool_rounds: 0,
                 }
             }
         },
@@ -438,6 +439,7 @@ async fn handle_message(
                 },
                 duration_ms,
                 finish_reason: "error".to_string(),
+                tool_rounds: 0,
             }
         }
         Err(_) => {
@@ -460,6 +462,7 @@ async fn handle_message(
                 },
                 duration_ms,
                 finish_reason: "timeout".to_string(),
+                tool_rounds: 0,
             }
         }
     };

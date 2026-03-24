@@ -10,7 +10,10 @@ use anyhow::{Context, Result};
 use chrono::Utc;
 use futures::StreamExt;
 use seidrum_common::events::{
-    BrainQueryRequest, BrainQueryResponse, ContentStoreRequest, ContentStored, EntityUpsertRequest,
+    BrainQueryRequest, BrainQueryResponse, ContentStoreRequest, ContentStored, Conversation,
+    ConversationAppendRequest, ConversationAppendResponse, ConversationCreateRequest,
+    ConversationCreateResponse, ConversationFindRequest, ConversationGetRequest,
+    ConversationListRequest, ConversationListResponse, ConversationSummary, EntityUpsertRequest,
     EntityUpserted, EventEnvelope, FactUpsertRequest, FactUpserted, ScopeAssignRequest,
     ScopeAssigned,
 };
@@ -71,6 +74,31 @@ impl BrainService {
             .subscribe("brain.query.request")
             .await
             .context("subscribe brain.query.request")?;
+        let mut conv_create = self
+            .nats
+            .subscribe("brain.conversation.create")
+            .await
+            .context("subscribe brain.conversation.create")?;
+        let mut conv_append = self
+            .nats
+            .subscribe("brain.conversation.append")
+            .await
+            .context("subscribe brain.conversation.append")?;
+        let mut conv_get = self
+            .nats
+            .subscribe("brain.conversation.get")
+            .await
+            .context("subscribe brain.conversation.get")?;
+        let mut conv_find = self
+            .nats
+            .subscribe("brain.conversation.find")
+            .await
+            .context("subscribe brain.conversation.find")?;
+        let mut conv_list = self
+            .nats
+            .subscribe("brain.conversation.list")
+            .await
+            .context("subscribe brain.conversation.list")?;
 
         info!("Brain service started — listening on brain.* subjects");
 
@@ -128,6 +156,51 @@ impl BrainService {
                     tokio::spawn(async move {
                         if let Err(e) = handle_query_request(&arango, &nats, &scope_svc, msg).await {
                             error!(error = %e, "brain.query.request handler failed");
+                        }
+                    });
+                }
+                Some(msg) = conv_create.next() => {
+                    let arango = self.arango.clone();
+                    let nats = self.nats.clone();
+                    tokio::spawn(async move {
+                        if let Err(e) = handle_conversation_create(&arango, &nats, msg).await {
+                            error!(error = %e, "brain.conversation.create handler failed");
+                        }
+                    });
+                }
+                Some(msg) = conv_append.next() => {
+                    let arango = self.arango.clone();
+                    let nats = self.nats.clone();
+                    tokio::spawn(async move {
+                        if let Err(e) = handle_conversation_append(&arango, &nats, msg).await {
+                            error!(error = %e, "brain.conversation.append handler failed");
+                        }
+                    });
+                }
+                Some(msg) = conv_get.next() => {
+                    let arango = self.arango.clone();
+                    let nats = self.nats.clone();
+                    tokio::spawn(async move {
+                        if let Err(e) = handle_conversation_get(&arango, &nats, msg).await {
+                            error!(error = %e, "brain.conversation.get handler failed");
+                        }
+                    });
+                }
+                Some(msg) = conv_find.next() => {
+                    let arango = self.arango.clone();
+                    let nats = self.nats.clone();
+                    tokio::spawn(async move {
+                        if let Err(e) = handle_conversation_find(&arango, &nats, msg).await {
+                            error!(error = %e, "brain.conversation.find handler failed");
+                        }
+                    });
+                }
+                Some(msg) = conv_list.next() => {
+                    let arango = self.arango.clone();
+                    let nats = self.nats.clone();
+                    tokio::spawn(async move {
+                        if let Err(e) = handle_conversation_list(&arango, &nats, msg).await {
+                            error!(error = %e, "brain.conversation.list handler failed");
                         }
                     });
                 }
@@ -1027,4 +1100,259 @@ async fn handle_get_context(
         .context("get_context query failed")?;
 
     Ok(resp.get("result").cloned().unwrap_or(serde_json::json!([])))
+}
+
+// ---------------------------------------------------------------------------
+// Conversation handlers
+// ---------------------------------------------------------------------------
+
+/// Create a new conversation document.
+async fn handle_conversation_create(
+    arango: &ArangoClient,
+    nats: &async_nats::Client,
+    msg: async_nats::Message,
+) -> Result<()> {
+    let req: ConversationCreateRequest =
+        serde_json::from_slice(&msg.payload).context("parse conversation.create")?;
+
+    let conv_id = ulid::Ulid::new().to_string();
+    let now = Utc::now();
+
+    let doc = serde_json::json!({
+        "_key": &conv_id,
+        "platform": &req.platform,
+        "participants": &req.participants,
+        "agent_id": &req.agent_id,
+        "scope": &req.scope,
+        "messages": [],
+        "metadata": &req.metadata,
+        "state": "active",
+        "created_at": now.to_rfc3339(),
+        "updated_at": now.to_rfc3339(),
+    });
+
+    arango
+        .insert_document("conversations", &doc)
+        .await
+        .context("insert conversation")?;
+
+    debug!(conversation_id = %conv_id, "Conversation created");
+
+    if let Some(reply) = msg.reply {
+        let resp = ConversationCreateResponse {
+            conversation_id: conv_id,
+        };
+        let _ = nats.publish(reply, serde_json::to_vec(&resp)?.into()).await;
+    }
+
+    Ok(())
+}
+
+/// Append a message to an existing conversation.
+async fn handle_conversation_append(
+    arango: &ArangoClient,
+    nats: &async_nats::Client,
+    msg: async_nats::Message,
+) -> Result<()> {
+    let req: ConversationAppendRequest =
+        serde_json::from_slice(&msg.payload).context("parse conversation.append")?;
+
+    let now = Utc::now();
+
+    let query = r#"
+        LET conv = DOCUMENT(CONCAT("conversations/", @conv_id))
+        FILTER conv != null
+        UPDATE conv WITH {
+            messages: APPEND(conv.messages, [@message]),
+            updated_at: @now
+        } IN conversations
+        RETURN { message_count: LENGTH(NEW.messages) }
+    "#;
+
+    let message_json = serde_json::to_value(&req.message)?;
+    let bind_vars = serde_json::json!({
+        "conv_id": &req.conversation_id,
+        "message": message_json,
+        "now": now.to_rfc3339(),
+    });
+
+    let resp = arango.execute_aql(query, &bind_vars).await?;
+    let count = resp
+        .get("result")
+        .and_then(|v| v.as_array())
+        .and_then(|a| a.first())
+        .and_then(|v| v.get("message_count"))
+        .and_then(|v| v.as_u64())
+        .unwrap_or(0) as u32;
+
+    if let Some(reply) = msg.reply {
+        let resp = ConversationAppendResponse {
+            success: count > 0,
+            message_count: count,
+        };
+        let _ = nats.publish(reply, serde_json::to_vec(&resp)?.into()).await;
+    }
+
+    Ok(())
+}
+
+/// Get a conversation by ID.
+async fn handle_conversation_get(
+    arango: &ArangoClient,
+    nats: &async_nats::Client,
+    msg: async_nats::Message,
+) -> Result<()> {
+    let req: ConversationGetRequest =
+        serde_json::from_slice(&msg.payload).context("parse conversation.get")?;
+
+    let doc = arango
+        .get_document("conversations", &req.conversation_id)
+        .await?;
+
+    if let Some(reply) = msg.reply {
+        let resp = match doc {
+            Some(mut d) => {
+                // Trim messages if max_messages is set
+                if req.max_messages > 0 {
+                    if let Some(messages) = d.get("messages").and_then(|v| v.as_array()) {
+                        let len = messages.len();
+                        let skip = len.saturating_sub(req.max_messages as usize);
+                        let trimmed: Vec<_> = messages.iter().skip(skip).cloned().collect();
+                        d["messages"] = serde_json::Value::Array(trimmed);
+                    }
+                }
+                // Map _key to id
+                if let Some(key) = d.get("_key").and_then(|v| v.as_str()) {
+                    d["id"] = serde_json::Value::String(key.to_string());
+                }
+                d
+            }
+            None => serde_json::json!(null),
+        };
+        let _ = nats.publish(reply, serde_json::to_vec(&resp)?.into()).await;
+    }
+
+    Ok(())
+}
+
+/// Find a conversation by platform metadata.
+async fn handle_conversation_find(
+    arango: &ArangoClient,
+    nats: &async_nats::Client,
+    msg: async_nats::Message,
+) -> Result<()> {
+    let req: ConversationFindRequest =
+        serde_json::from_slice(&msg.payload).context("parse conversation.find")?;
+
+    let query = r#"
+        FOR conv IN conversations
+            FILTER conv.agent_id == @agent_id
+            FILTER conv.platform == @platform
+            FILTER conv.metadata[@meta_key] == @meta_value
+            FILTER conv.state == "active"
+            SORT conv.updated_at DESC
+            LIMIT 1
+            RETURN MERGE(conv, { id: conv._key })
+    "#;
+
+    let bind_vars = serde_json::json!({
+        "agent_id": &req.agent_id,
+        "platform": &req.platform,
+        "meta_key": &req.metadata_key,
+        "meta_value": &req.metadata_value,
+    });
+
+    let resp = arango.execute_aql(query, &bind_vars).await?;
+    let result = resp
+        .get("result")
+        .and_then(|v| v.as_array())
+        .and_then(|a| a.first())
+        .cloned()
+        .unwrap_or(serde_json::json!(null));
+
+    if let Some(reply) = msg.reply {
+        let _ = nats
+            .publish(reply, serde_json::to_vec(&result)?.into())
+            .await;
+    }
+
+    Ok(())
+}
+
+/// List conversations for an agent.
+async fn handle_conversation_list(
+    arango: &ArangoClient,
+    nats: &async_nats::Client,
+    msg: async_nats::Message,
+) -> Result<()> {
+    let req: ConversationListRequest =
+        serde_json::from_slice(&msg.payload).context("parse conversation.list")?;
+
+    let limit = if req.limit == 0 { 20 } else { req.limit };
+
+    let (query, bind_vars) = if let Some(ref platform) = req.platform {
+        (
+            r#"
+                FOR conv IN conversations
+                    FILTER conv.agent_id == @agent_id
+                    FILTER conv.platform == @platform
+                    SORT conv.updated_at DESC
+                    LIMIT @limit
+                    RETURN {
+                        id: conv._key,
+                        platform: conv.platform,
+                        participants: conv.participants,
+                        message_count: LENGTH(conv.messages),
+                        state: conv.state,
+                        updated_at: conv.updated_at
+                    }
+            "#,
+            serde_json::json!({
+                "agent_id": &req.agent_id,
+                "platform": platform,
+                "limit": limit,
+            }),
+        )
+    } else {
+        (
+            r#"
+                FOR conv IN conversations
+                    FILTER conv.agent_id == @agent_id
+                    SORT conv.updated_at DESC
+                    LIMIT @limit
+                    RETURN {
+                        id: conv._key,
+                        platform: conv.platform,
+                        participants: conv.participants,
+                        message_count: LENGTH(conv.messages),
+                        state: conv.state,
+                        updated_at: conv.updated_at
+                    }
+            "#,
+            serde_json::json!({
+                "agent_id": &req.agent_id,
+                "limit": limit,
+            }),
+        )
+    };
+
+    let resp = arango.execute_aql(query, &bind_vars).await?;
+    let conversations: Vec<ConversationSummary> = resp
+        .get("result")
+        .and_then(|v| v.as_array())
+        .map(|arr| {
+            arr.iter()
+                .filter_map(|v| serde_json::from_value(v.clone()).ok())
+                .collect()
+        })
+        .unwrap_or_default();
+
+    if let Some(reply) = msg.reply {
+        let list_resp = ConversationListResponse { conversations };
+        let _ = nats
+            .publish(reply, serde_json::to_vec(&list_resp)?.into())
+            .await;
+    }
+
+    Ok(())
 }
