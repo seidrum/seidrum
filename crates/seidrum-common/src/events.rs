@@ -320,6 +320,9 @@ pub struct LlmResponse {
     pub tokens: TokenUsage,
     pub duration_ms: u64,
     pub finish_reason: String,
+    /// Number of tool call rounds executed by the provider.
+    #[serde(default)]
+    pub tool_rounds: u32,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
@@ -686,6 +689,216 @@ pub struct StorageListRequest {
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct StorageListResponse {
     pub keys: Vec<String>,
+}
+
+// ---------------------------------------------------------------------------
+// Conversation Events
+// ---------------------------------------------------------------------------
+
+/// A media attachment within a conversation message.
+#[derive(Serialize, Deserialize, Debug, Clone)]
+pub struct MediaAttachment {
+    /// "image" | "voice" | "file" | "video"
+    pub media_type: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub url: Option<String>,
+    pub mime_type: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub transcript: Option<String>,
+}
+
+/// A single message within a conversation.
+#[derive(Serialize, Deserialize, Debug, Clone)]
+pub struct ConversationMessage {
+    pub role: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub content: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub tool_calls: Vec<UnifiedToolCall>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub tool_results: Vec<UnifiedToolResult>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub media: Vec<MediaAttachment>,
+    pub timestamp: DateTime<Utc>,
+}
+
+/// Request to create a new conversation.
+/// Subject: `brain.conversation.create` (request/reply)
+#[derive(Serialize, Deserialize, Debug, Clone)]
+pub struct ConversationCreateRequest {
+    pub platform: String,
+    pub participants: Vec<String>,
+    pub agent_id: String,
+    pub scope: String,
+    #[serde(default)]
+    pub metadata: HashMap<String, String>,
+}
+
+/// Response to conversation create.
+#[derive(Serialize, Deserialize, Debug, Clone)]
+pub struct ConversationCreateResponse {
+    pub conversation_id: String,
+}
+
+/// Request to append a message to a conversation.
+/// Subject: `brain.conversation.append` (request/reply)
+#[derive(Serialize, Deserialize, Debug, Clone)]
+pub struct ConversationAppendRequest {
+    pub conversation_id: String,
+    pub message: ConversationMessage,
+}
+
+/// Response to conversation append.
+#[derive(Serialize, Deserialize, Debug, Clone)]
+pub struct ConversationAppendResponse {
+    pub success: bool,
+    pub message_count: u32,
+}
+
+/// Request to get a conversation by ID.
+/// Subject: `brain.conversation.get` (request/reply)
+#[derive(Serialize, Deserialize, Debug, Clone)]
+pub struct ConversationGetRequest {
+    pub conversation_id: String,
+    /// Maximum number of recent messages to return (0 = all).
+    #[serde(default)]
+    pub max_messages: u32,
+}
+
+/// Full conversation document.
+#[derive(Serialize, Deserialize, Debug, Clone)]
+pub struct Conversation {
+    pub id: String,
+    pub platform: String,
+    pub participants: Vec<String>,
+    pub agent_id: String,
+    pub scope: String,
+    pub messages: Vec<ConversationMessage>,
+    pub metadata: HashMap<String, String>,
+    pub state: String,
+    pub created_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
+}
+
+/// Request to find a conversation by platform metadata.
+/// Subject: `brain.conversation.find` (request/reply)
+#[derive(Serialize, Deserialize, Debug, Clone)]
+pub struct ConversationFindRequest {
+    pub agent_id: String,
+    pub platform: String,
+    pub metadata_key: String,
+    pub metadata_value: String,
+}
+
+/// Request to list conversations.
+/// Subject: `brain.conversation.list` (request/reply)
+#[derive(Serialize, Deserialize, Debug, Clone)]
+pub struct ConversationListRequest {
+    pub agent_id: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub platform: Option<String>,
+    #[serde(default)]
+    pub limit: u32,
+}
+
+/// Response to conversation list.
+#[derive(Serialize, Deserialize, Debug, Clone)]
+pub struct ConversationListResponse {
+    pub conversations: Vec<ConversationSummary>,
+}
+
+/// Summary of a conversation for listing.
+#[derive(Serialize, Deserialize, Debug, Clone)]
+pub struct ConversationSummary {
+    pub id: String,
+    pub platform: String,
+    pub participants: Vec<String>,
+    pub message_count: u32,
+    pub state: String,
+    pub updated_at: DateTime<Utc>,
+}
+
+// ---------------------------------------------------------------------------
+// Consciousness Events
+// ---------------------------------------------------------------------------
+
+/// An event delivered to an agent's consciousness stream.
+/// Subject: `agent.{id}.consciousness`
+#[derive(Serialize, Deserialize, Debug, Clone)]
+pub struct ConsciousnessEvent {
+    pub agent_id: String,
+    /// "user_message" | "subscribed_event" | "self_wake" | "agent_message" | "delegation_result"
+    pub event_type: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub source_subject: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub conversation_id: Option<String>,
+    pub payload: serde_json::Value,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub origin: Option<EventOrigin>,
+}
+
+/// Request to subscribe an agent to NATS event patterns at runtime.
+#[derive(Serialize, Deserialize, Debug, Clone)]
+pub struct SubscribeEventsRequest {
+    pub subjects: Vec<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub duration_seconds: Option<u64>,
+}
+
+/// Request to unsubscribe an agent from NATS event patterns.
+#[derive(Serialize, Deserialize, Debug, Clone)]
+pub struct UnsubscribeEventsRequest {
+    pub subjects: Vec<String>,
+}
+
+/// Request to delegate a task to another agent.
+#[derive(Serialize, Deserialize, Debug, Clone)]
+pub struct DelegateTaskRequest {
+    pub to_agent_id: String,
+    pub message: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub context: Option<serde_json::Value>,
+}
+
+/// Request to schedule a self-wake timer.
+#[derive(Serialize, Deserialize, Debug, Clone)]
+pub struct ScheduleWakeRequest {
+    pub delay_seconds: u64,
+    pub reason: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub context: Option<serde_json::Value>,
+}
+
+/// Request to send a proactive notification to a user channel.
+#[derive(Serialize, Deserialize, Debug, Clone)]
+pub struct SendNotificationRequest {
+    pub channel: String,
+    pub chat_id: String,
+    pub text: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub conversation_id: Option<String>,
+}
+
+/// Guardrail configuration for tool loop limits.
+#[derive(Serialize, Deserialize, Debug, Clone)]
+pub struct GuardrailConfig {
+    pub turn_limit: u32,
+    pub time_limit_seconds: u64,
+    pub loop_detection_threshold: u32,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub hitl_after_turns: Option<u32>,
+}
+
+impl Default for GuardrailConfig {
+    fn default() -> Self {
+        Self {
+            turn_limit: 50,
+            time_limit_seconds: 600,
+            loop_detection_threshold: 3,
+            hitl_after_turns: Some(20),
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------

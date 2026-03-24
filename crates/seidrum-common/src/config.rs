@@ -227,6 +227,20 @@ pub struct AgentDefinition {
     pub additional_scopes: Vec<String>,
     #[serde(default)]
     pub description: Option<String>,
+    /// NATS subjects this agent subscribes to for consciousness events.
+    #[serde(default)]
+    pub subscribe: Vec<String>,
+    /// Per-agent guardrail overrides.
+    #[serde(default)]
+    pub guardrails: Option<GuardrailOverrides>,
+}
+
+/// Per-agent guardrail overrides. Fields not set use defaults.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct GuardrailOverrides {
+    pub turn_limit: Option<u32>,
+    pub time_limit_seconds: Option<u64>,
+    pub hitl_after_turns: Option<u32>,
 }
 
 pub fn load_agent_definition(path: &Path) -> anyhow::Result<AgentDefinitionFile> {

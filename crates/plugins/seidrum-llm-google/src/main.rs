@@ -209,6 +209,7 @@ async fn main() -> Result<()> {
                         },
                         duration_ms: 0,
                         finish_reason: "error".to_string(),
+                        tool_rounds: 0,
                     };
                     if let Ok(bytes) = serde_json::to_vec(&err_response) {
                         let _ = nats_clone.publish(reply.to_string(), bytes.into()).await;
@@ -488,6 +489,7 @@ async fn handle_provider_request(
         },
         duration_ms,
         finish_reason: "stop".to_string(),
+        tool_rounds: 0,
     };
 
     info!(

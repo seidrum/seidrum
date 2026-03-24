@@ -146,6 +146,7 @@ pub fn gemini_to_unified_response(
         },
         duration_ms,
         finish_reason,
+        tool_rounds: 0,
     }
 }
 

@@ -9,6 +9,7 @@ use orchestrator::service::OrchestratorService;
 use registry::service::RegistryService;
 
 mod brain;
+mod consciousness;
 mod orchestrator;
 mod plugin_storage;
 mod registry;
@@ -164,7 +165,13 @@ async fn run_serve() -> anyhow::Result<()> {
         .await?;
     info!("workflow engine started");
 
-    // 7. Wait for all services.
+    // 7. Spawn the consciousness service.
+    let consciousness_service =
+        consciousness::service::ConsciousnessService::new(nats_client.clone(), &agents_dir)?;
+    let consciousness_handle = consciousness_service.spawn().await?;
+    info!("consciousness service started");
+
+    // 8. Wait for all services.
     tokio::select! {
         _ = registry_handle => {
             warn!("registry service exited unexpectedly");
@@ -183,6 +190,9 @@ async fn run_serve() -> anyhow::Result<()> {
         }
         _ = orchestrator_handle => {
             warn!("orchestrator service exited unexpectedly");
+        }
+        _ = consciousness_handle => {
+            warn!("consciousness service exited unexpectedly");
         }
         _ = tokio::signal::ctrl_c() => {
             info!("received Ctrl-C, shutting down...");
