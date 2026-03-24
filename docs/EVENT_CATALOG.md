@@ -570,3 +570,80 @@ struct CapabilityDeregistered {
     plugin_id: String,
 }
 ```
+
+---
+
+## Conversation Events
+
+### `brain.conversation.create` (request/reply)
+
+Create a new conversation thread.
+
+```rust
+pub struct ConversationCreateRequest {
+    pub platform: String,           // "telegram" | "cli" | "internal" | "agent"
+    pub participants: Vec<String>,  // ["user:alice", "agent:personal-assistant"]
+    pub agent_id: String,
+    pub scope: String,
+    pub metadata: HashMap<String, String>,
+}
+
+pub struct ConversationCreateResponse {
+    pub conversation_id: String,
+}
+```
+
+### `brain.conversation.append` (request/reply)
+
+Append a message to an existing conversation.
+
+```rust
+pub struct ConversationAppendRequest {
+    pub conversation_id: String,
+    pub message: ConversationMessage,
+}
+
+pub struct ConversationMessage {
+    pub role: String,                       // "user" | "assistant" | "tool" | "system"
+    pub content: Option<String>,
+    pub tool_calls: Vec<UnifiedToolCall>,
+    pub tool_results: Vec<UnifiedToolResult>,
+    pub media: Vec<MediaAttachment>,
+    pub timestamp: DateTime<Utc>,
+}
+```
+
+### `brain.conversation.get` (request/reply)
+
+Retrieve a conversation by ID with optional message limit.
+
+### `brain.conversation.find` (request/reply)
+
+Find a conversation by platform metadata (e.g., telegram_chat_id + thread_id).
+
+### `brain.conversation.list` (request/reply)
+
+List conversations filtered by agent_id and platform.
+
+---
+
+## Consciousness Events
+
+### `agent.{id}.consciousness`
+
+Events delivered to an agent's consciousness stream for autonomous processing.
+
+```rust
+pub struct ConsciousnessEvent {
+    pub agent_id: String,
+    pub event_type: String,             // "user_message" | "subscribed_event" | "self_wake" | "agent_message"
+    pub source_subject: Option<String>,
+    pub conversation_id: Option<String>,
+    pub payload: serde_json::Value,
+    pub origin: Option<EventOrigin>,
+}
+```
+
+### `capability.call.consciousness` (request/reply)
+
+Built-in capability calls handled by the consciousness service: `brain-query`, `subscribe-events`, `unsubscribe-events`, `delegate-task`, `schedule-wake`, `send-notification`, `get-conversation`, `list-conversations`.
