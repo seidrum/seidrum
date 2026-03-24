@@ -62,9 +62,11 @@ impl GuardrailState {
             });
         }
 
-        // Human-in-the-loop
+        // Human-in-the-loop (triggers once when threshold is crossed)
         if let Some(hitl_after) = self.config.hitl_after_turns {
-            if self.turn_count == hitl_after {
+            if self.turn_count >= hitl_after
+                && (self.turn_count == hitl_after || self.turn_count.saturating_sub(1) < hitl_after)
+            {
                 return Some(GuardrailViolation::HitlRequired(self.turn_count));
             }
         }

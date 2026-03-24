@@ -55,7 +55,21 @@ pub async fn handle_subscribe_events(
                 }
             };
 
-            while let Some(msg) = sub.next().await {
+            loop {
+                // Check expiry before each message
+                if let Some(exp) = expiry {
+                    if Utc::now() > exp {
+                        info!(%subject_clone, "Runtime subscription expired");
+                        break;
+                    }
+                }
+
+                let msg = match tokio::time::timeout(Duration::from_secs(30), sub.next()).await {
+                    Ok(Some(msg)) => msg,
+                    Ok(None) => break,  // subscription closed
+                    Err(_) => continue, // timeout — loop back to check expiry
+                };
+
                 let payload: serde_json::Value =
                     serde_json::from_slice(&msg.payload).unwrap_or(serde_json::json!(null));
 
@@ -70,9 +84,12 @@ pub async fn handle_subscribe_events(
 
                 let consciousness_subject = format!("agent.{}.consciousness", agent_id_clone);
                 if let Ok(bytes) = serde_json::to_vec(&event) {
-                    let _ = nats_clone
+                    if let Err(e) = nats_clone
                         .publish(consciousness_subject, bytes.into())
-                        .await;
+                        .await
+                    {
+                        warn!(%e, "Failed to publish consciousness event");
+                    }
                 }
             }
         });
@@ -318,18 +335,32 @@ pub async fn handle_send_notification(
         }
     };
 
-    if let Ok(bytes) = serde_json::to_vec(&envelope) {
-        let _ = nats.publish(subject, bytes.into()).await;
-    }
+    let bytes = match serde_json::to_vec(&envelope) {
+        Ok(b) => b,
+        Err(e) => {
+            return ToolCallResponse {
+                tool_id: "send-notification".to_string(),
+                result: serde_json::json!({"error": format!("Serialization failed: {}", e)}),
+                is_error: true,
+            };
+        }
+    };
 
-    ToolCallResponse {
-        tool_id: "send-notification".to_string(),
-        result: serde_json::json!({
-            "sent": true,
-            "channel": args.channel,
-            "chat_id": args.chat_id,
-        }),
-        is_error: false,
+    match nats.publish(subject, bytes.into()).await {
+        Ok(_) => ToolCallResponse {
+            tool_id: "send-notification".to_string(),
+            result: serde_json::json!({
+                "sent": true,
+                "channel": args.channel,
+                "chat_id": args.chat_id,
+            }),
+            is_error: false,
+        },
+        Err(e) => ToolCallResponse {
+            tool_id: "send-notification".to_string(),
+            result: serde_json::json!({"error": format!("Failed to publish: {}", e)}),
+            is_error: true,
+        },
     }
 }
 

@@ -12,7 +12,9 @@ use std::sync::Arc;
 use anyhow::{Context, Result};
 use futures::StreamExt;
 use seidrum_common::config::{load_agent_definition, AgentDefinition};
-use seidrum_common::events::{ConsciousnessEvent, ToolCallRequest, ToolCallResponse, ToolRegister};
+use seidrum_common::events::{
+    ConsciousnessEvent, EventEnvelope, ToolCallRequest, ToolCallResponse, ToolRegister,
+};
 use tokio::sync::RwLock;
 use tracing::{error, info, warn};
 
@@ -189,29 +191,50 @@ impl ConsciousnessService {
     }
 }
 
+/// Helper to parse tool call arguments, returning an error response on failure.
+fn parse_args<T: serde::de::DeserializeOwned>(
+    tool_id: &str,
+    arguments: &serde_json::Value,
+) -> Result<T, ToolCallResponse> {
+    serde_json::from_value(arguments.clone()).map_err(|e| ToolCallResponse {
+        tool_id: tool_id.to_string(),
+        result: serde_json::json!({"error": format!("Invalid arguments: {}", e)}),
+        is_error: true,
+    })
+}
+
 /// Handle a built-in capability call by routing to the appropriate handler.
 async fn handle_builtin_call(
     nats: &async_nats::Client,
     request: &ToolCallRequest,
     runtime_subs: &Arc<RwLock<HashMap<String, Vec<RuntimeSubscription>>>>,
 ) -> ToolCallResponse {
-    // Extract agent_id from correlation_id or use a default
-    let agent_id = request
-        .correlation_id
-        .as_deref()
-        .and_then(|c| c.split(':').nth(1))
-        .unwrap_or("unknown");
+    // Extract agent_id from plugin_id field (set by the tool dispatcher)
+    let agent_id = &request.plugin_id;
 
     match request.tool_id.as_str() {
         "brain-query" => {
-            // Forward to brain.query.request via NATS request/reply
+            // Wrap arguments in an EventEnvelope as the brain service expects
+            let envelope = match EventEnvelope::new(
+                "brain.query.request",
+                "consciousness",
+                request.correlation_id.clone(),
+                None,
+                &request.arguments,
+            ) {
+                Ok(e) => e,
+                Err(e) => {
+                    return ToolCallResponse {
+                        tool_id: "brain-query".to_string(),
+                        result: serde_json::json!({"error": format!("Failed to create envelope: {}", e)}),
+                        is_error: true,
+                    };
+                }
+            };
+
             match tokio::time::timeout(
                 std::time::Duration::from_secs(10),
-                nats_request::<_, serde_json::Value>(
-                    nats,
-                    "brain.query.request",
-                    &request.arguments,
-                ),
+                nats_request::<_, serde_json::Value>(nats, "brain.query.request", &envelope),
             )
             .await
             {
@@ -234,8 +257,11 @@ async fn handle_builtin_call(
         }
 
         "subscribe-events" => {
-            let args: SubscribeEventsArgs =
-                serde_json::from_value(request.arguments.clone()).unwrap_or_default();
+            let args: SubscribeEventsArgs = match parse_args("subscribe-events", &request.arguments)
+            {
+                Ok(a) => a,
+                Err(resp) => return resp,
+            };
             let req = seidrum_common::events::SubscribeEventsRequest {
                 subjects: args.subjects,
                 duration_seconds: args.duration_seconds,
@@ -245,7 +271,10 @@ async fn handle_builtin_call(
 
         "unsubscribe-events" => {
             let args: UnsubscribeEventsArgs =
-                serde_json::from_value(request.arguments.clone()).unwrap_or_default();
+                match parse_args("unsubscribe-events", &request.arguments) {
+                    Ok(a) => a,
+                    Err(resp) => return resp,
+                };
             let req = seidrum_common::events::UnsubscribeEventsRequest {
                 subjects: args.subjects,
             };
@@ -253,8 +282,10 @@ async fn handle_builtin_call(
         }
 
         "delegate-task" => {
-            let args: DelegateTaskArgs =
-                serde_json::from_value(request.arguments.clone()).unwrap_or_default();
+            let args: DelegateTaskArgs = match parse_args("delegate-task", &request.arguments) {
+                Ok(a) => a,
+                Err(resp) => return resp,
+            };
             let req = seidrum_common::events::DelegateTaskRequest {
                 to_agent_id: args.to_agent_id,
                 message: args.message,
@@ -264,8 +295,18 @@ async fn handle_builtin_call(
         }
 
         "schedule-wake" => {
-            let args: ScheduleWakeArgs =
-                serde_json::from_value(request.arguments.clone()).unwrap_or_default();
+            let args: ScheduleWakeArgs = match parse_args("schedule-wake", &request.arguments) {
+                Ok(a) => a,
+                Err(resp) => return resp,
+            };
+            // Validate bounds: min 1s, max 7 days
+            if args.delay_seconds == 0 || args.delay_seconds > 604800 {
+                return ToolCallResponse {
+                    tool_id: "schedule-wake".to_string(),
+                    result: serde_json::json!({"error": "delay_seconds must be between 1 and 604800 (7 days)"}),
+                    is_error: true,
+                };
+            }
             let req = seidrum_common::events::ScheduleWakeRequest {
                 delay_seconds: args.delay_seconds,
                 reason: args.reason,
@@ -276,7 +317,10 @@ async fn handle_builtin_call(
 
         "send-notification" => {
             let args: SendNotificationArgs =
-                serde_json::from_value(request.arguments.clone()).unwrap_or_default();
+                match parse_args("send-notification", &request.arguments) {
+                    Ok(a) => a,
+                    Err(resp) => return resp,
+                };
             let req = seidrum_common::events::SendNotificationRequest {
                 channel: args.channel,
                 chat_id: args.chat_id,
@@ -287,8 +331,11 @@ async fn handle_builtin_call(
         }
 
         "get-conversation" => {
-            let args: GetConversationArgs =
-                serde_json::from_value(request.arguments.clone()).unwrap_or_default();
+            let args: GetConversationArgs = match parse_args("get-conversation", &request.arguments)
+            {
+                Ok(a) => a,
+                Err(resp) => return resp,
+            };
             let req = seidrum_common::events::ConversationGetRequest {
                 conversation_id: args.conversation_id,
                 max_messages: args.max_messages.unwrap_or(0),
@@ -298,7 +345,10 @@ async fn handle_builtin_call(
 
         "list-conversations" => {
             let args: ListConversationsArgs =
-                serde_json::from_value(request.arguments.clone()).unwrap_or_default();
+                match parse_args("list-conversations", &request.arguments) {
+                    Ok(a) => a,
+                    Err(resp) => return resp,
+                };
             let req = seidrum_common::events::ConversationListRequest {
                 agent_id: agent_id.to_string(),
                 platform: args.platform,
