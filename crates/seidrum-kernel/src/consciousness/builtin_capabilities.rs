@@ -36,6 +36,43 @@ pub async fn handle_subscribe_events(
     args: &SubscribeEventsRequest,
     runtime_subs: &Arc<RwLock<HashMap<String, Vec<RuntimeSubscription>>>>,
 ) -> ToolCallResponse {
+    // S1: Deny subscriptions to internal system subjects
+    const DENIED_PREFIXES: &[&str] = &[
+        "brain.",
+        "capability.",
+        "registry.",
+        "storage.",
+        "plugin.",
+        "llm.",
+        "system.",
+        "agent.",
+    ];
+
+    for subject in &args.subjects {
+        for prefix in DENIED_PREFIXES {
+            if subject.starts_with(prefix) {
+                return ToolCallResponse {
+                    tool_id: "subscribe-events".to_string(),
+                    result: serde_json::json!({"error": format!("Cannot subscribe to internal subject: {}", subject)}),
+                    is_error: true,
+                };
+            }
+        }
+    }
+
+    // S2: Per-agent subscription cap
+    let current_count = {
+        let subs = runtime_subs.read().await;
+        subs.get(agent_id).map(|s| s.len()).unwrap_or(0)
+    };
+    if current_count + args.subjects.len() > 20 {
+        return ToolCallResponse {
+            tool_id: "subscribe-events".to_string(),
+            result: serde_json::json!({"error": "Maximum 20 runtime subscriptions per agent"}),
+            is_error: true,
+        };
+    }
+
     let mut new_subs = Vec::new();
     let expiry = args
         .duration_seconds
@@ -155,6 +192,22 @@ pub async fn handle_delegate_task(
     from_agent_id: &str,
     args: &DelegateTaskRequest,
 ) -> ToolCallResponse {
+    // R1: Check delegation depth to prevent infinite delegation loops
+    let depth = args
+        .context
+        .as_ref()
+        .and_then(|c| c.get("delegation_depth"))
+        .and_then(|d| d.as_u64())
+        .unwrap_or(0);
+
+    if depth >= 5 {
+        return ToolCallResponse {
+            tool_id: "delegate-task".to_string(),
+            result: serde_json::json!({"error": "Maximum delegation depth (5) reached"}),
+            is_error: true,
+        };
+    }
+
     // Create a conversation between the two agents
     let create_req = ConversationCreateRequest {
         platform: "agent".to_string(),
@@ -219,6 +272,7 @@ pub async fn handle_delegate_task(
     .await;
 
     // Send consciousness event to the target agent
+    // R1: Propagate delegation_depth + 1 in the payload
     let event = ConsciousnessEvent {
         agent_id: args.to_agent_id.clone(),
         event_type: "agent_message".to_string(),
@@ -228,6 +282,7 @@ pub async fn handle_delegate_task(
             "from_agent": from_agent_id,
             "message": args.message,
             "context": args.context,
+            "delegation_depth": depth + 1,
         }),
         origin: None,
     };

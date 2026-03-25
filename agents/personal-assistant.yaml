@@ -11,5 +11,4 @@ agent:
     - scope_job_search
     - scope_projects
   subscribe:
-    - channel.*.inbound
     - task.completed.*

@@ -70,6 +70,17 @@ impl ConsciousnessService {
         // Create event subscriptions for each agent's `subscribe` patterns
         for (agent_id, agent) in &self.agents {
             for pattern in &agent.subscribe {
+                // I1: Skip channel inbound patterns — handled by the workflow engine
+                // to prevent duplicate LLM calls.
+                if pattern.starts_with("channel.") && pattern.ends_with(".inbound") {
+                    warn!(
+                        agent_id = %agent_id,
+                        pattern = %pattern,
+                        "Skipping channel inbound subscription (handled by workflow engine)"
+                    );
+                    continue;
+                }
+
                 let nats = self.nats.clone();
                 let agent_id = agent_id.clone();
                 let pattern = pattern.clone();
@@ -616,7 +627,7 @@ async fn process_consciousness_event(
     let history = load_conversation_history(nats, &conversation_id).await;
 
     // 3. Search for relevant skills based on event content
-    let skill_snippets = search_relevant_skills(nats, &user_text).await;
+    let skill_snippets = search_relevant_skills(nats, &user_text, &agent_def.scope).await;
 
     // 4. Build system prompt: base system prompt + cached identity prompt + skill snippets
     let full_system_prompt =
@@ -913,15 +924,20 @@ async fn load_conversation_history(
 }
 
 /// Search for relevant skills based on the event text.
-async fn search_relevant_skills(nats: &async_nats::Client, query: &str) -> Vec<String> {
+async fn search_relevant_skills(
+    nats: &async_nats::Client,
+    query: &str,
+    scope: &str,
+) -> Vec<String> {
     if query.is_empty() {
         return vec![];
     }
 
+    // D1: Pass the agent's scope so skill search respects scope boundaries
     let search_req = SkillSearchRequest {
         query: query.to_string(),
         limit: Some(3),
-        scope: None,
+        scope: Some(scope.to_string()),
     };
 
     match tokio::time::timeout(
