@@ -228,6 +228,16 @@ async fn main() -> anyhow::Result<()> {
 }
 ```
 
+### Agent consciousness
+
+Agents in Seidrum are not request-response handlers -- they are persistent, autonomous processes. Each agent runs a **consciousness loop** that continuously processes events from a dedicated NATS stream (`agent.{id}.consciousness`). Events include user messages, subscribed system events, self-scheduled wake-ups, and messages from other agents.
+
+**Built-in capabilities** available to every agent: `brain-query`, `subscribe-events`, `unsubscribe-events`, `delegate-task`, `schedule-wake`, `send-notification`, `get-conversation`, `list-conversations`, `search-skills`, `load-skill`, `save-skill`.
+
+**Conversations** are first-class objects stored in the brain. Agents maintain structured conversation threads across platforms, preserving tool calls, media attachments, and inner monologue for continuity across sessions.
+
+**Skills** provide behavioral RAG -- reusable instructions and procedures retrieved by semantic similarity at inference time. Skills come from YAML files (`skills/` directory), user instructions, agent self-learning, or packaged distributions installed via `seidrum skill install`. See [Agent Consciousness](docs/AGENT_CONSCIOUSNESS.md) and [Agent Skills](docs/AGENT_SKILLS.md) for details.
+
 Plugins can also be written in **any language** using the API gateway. The gateway exposes a WebSocket and REST API that bridges to NATS:
 
 ```bash
@@ -268,6 +278,8 @@ Detailed design documents are in [`docs/`](docs/):
 - [Event catalog](docs/EVENT_CATALOG.md)
 - [LLM integration](docs/LLM_INTEGRATION.md)
 - [Agent specification](docs/AGENT_SPEC.md)
+- [Agent consciousness](docs/AGENT_CONSCIOUSNESS.md)
+- [Agent skills](docs/AGENT_SKILLS.md)
 - [Tech stack](docs/TECH_STACK.md)
 
 ## Contributing
