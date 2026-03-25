@@ -720,6 +720,9 @@ pub struct ConversationMessage {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub media: Vec<MediaAttachment>,
     pub timestamp: DateTime<Utc>,
+    /// Skills that were active during this message.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub active_skills: Vec<String>,
 }
 
 /// Request to create a new conversation.
@@ -899,6 +902,86 @@ impl Default for GuardrailConfig {
             hitl_after_turns: Some(20),
         }
     }
+}
+
+// ---------------------------------------------------------------------------
+// Skill Events
+// ---------------------------------------------------------------------------
+
+/// Request to search skills by semantic similarity.
+/// Subject: `brain.skill.search` (request/reply)
+#[derive(Serialize, Deserialize, Debug, Clone)]
+pub struct SkillSearchRequest {
+    pub query: String,
+    #[serde(default)]
+    pub limit: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub scope: Option<String>,
+}
+
+/// A single skill search result.
+#[derive(Serialize, Deserialize, Debug, Clone)]
+pub struct SkillSearchResult {
+    pub id: String,
+    pub description: String,
+    pub snippet: String,
+    pub score: f64,
+    pub source: String,
+    #[serde(default)]
+    pub tags: Vec<String>,
+}
+
+/// Response to skill search.
+#[derive(Serialize, Deserialize, Debug, Clone)]
+pub struct SkillSearchResponse {
+    pub skills: Vec<SkillSearchResult>,
+}
+
+/// Request to save a skill.
+/// Subject: `brain.skill.save` (request/reply)
+#[derive(Serialize, Deserialize, Debug, Clone)]
+pub struct SkillSaveRequest {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub id: Option<String>,
+    pub description: String,
+    pub snippet: String,
+    pub source: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub scope: Option<String>,
+    #[serde(default)]
+    pub tags: Vec<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub learned_from: Option<String>,
+}
+
+/// Response to skill save.
+#[derive(Serialize, Deserialize, Debug, Clone)]
+pub struct SkillSaveResponse {
+    pub skill_id: String,
+    pub is_new: bool,
+}
+
+/// Request to get a skill by ID.
+/// Subject: `brain.skill.get` (request/reply)
+#[derive(Serialize, Deserialize, Debug, Clone)]
+pub struct SkillGetRequest {
+    pub skill_id: String,
+}
+
+/// Request to list skills.
+/// Subject: `brain.skill.list` (request/reply)
+#[derive(Serialize, Deserialize, Debug, Clone)]
+pub struct SkillListRequest {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub source_filter: Option<String>,
+    #[serde(default)]
+    pub limit: Option<u32>,
+}
+
+/// Response to skill list.
+#[derive(Serialize, Deserialize, Debug, Clone)]
+pub struct SkillListResponse {
+    pub skills: Vec<SkillSearchResult>,
 }
 
 // ---------------------------------------------------------------------------

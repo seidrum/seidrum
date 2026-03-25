@@ -10,6 +10,7 @@ use registry::service::RegistryService;
 
 mod brain;
 mod consciousness;
+mod embedding;
 mod orchestrator;
 mod plugin_storage;
 mod registry;
@@ -170,6 +171,18 @@ async fn run_serve() -> anyhow::Result<()> {
         consciousness::service::ConsciousnessService::new(nats_client.clone(), &agents_dir)?;
     let consciousness_handle = consciousness_service.spawn().await?;
     info!("consciousness service started");
+
+    // 8. Load system skills from YAML files.
+    let embedding_service = embedding::service::EmbeddingService::from_env()?;
+    let skills_arango =
+        brain::client::ArangoClient::new(&arango_url, &arango_database, &arango_password)?;
+    let skills_dir = "skills/";
+    if let Err(e) =
+        embedding::skill_loader::load_system_skills(&skills_arango, &embedding_service, skills_dir)
+            .await
+    {
+        warn!(error = %e, "Failed to load system skills (non-fatal)");
+    }
 
     // 8. Wait for all services.
     tokio::select! {

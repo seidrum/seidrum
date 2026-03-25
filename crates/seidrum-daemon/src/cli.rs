@@ -35,6 +35,11 @@ pub enum Commands {
         #[command(subcommand)]
         action: PluginAction,
     },
+    /// Manage agent skills
+    Skill {
+        #[command(subcommand)]
+        action: SkillAction,
+    },
 }
 
 #[derive(Subcommand)]
@@ -81,5 +86,21 @@ pub enum PluginAction {
     Restart {
         /// Plugin name
         name: String,
+    },
+}
+
+#[derive(Subcommand)]
+pub enum SkillAction {
+    /// List all installed skills
+    List,
+    /// Install a skill from a YAML file
+    Install {
+        /// Path to skill YAML file
+        path: String,
+    },
+    /// Remove a skill by ID
+    Remove {
+        /// Skill ID
+        skill_id: String,
     },
 }

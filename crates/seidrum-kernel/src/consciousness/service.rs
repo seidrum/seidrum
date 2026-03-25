@@ -156,6 +156,15 @@ impl ConsciousnessService {
             ("send-notification", "Send a proactive message to the user"),
             ("get-conversation", "Load a conversation thread by ID"),
             ("list-conversations", "List recent conversations"),
+            (
+                "search-skills",
+                "Search for behavioral skills by semantic query",
+            ),
+            (
+                "load-skill",
+                "Load a specific skill into conversation context",
+            ),
+            ("save-skill", "Save learned behavior as a reusable skill"),
         ];
 
         let schemas = builtin_capabilities::builtin_tool_schemas();
@@ -357,6 +366,47 @@ async fn handle_builtin_call(
             builtin_capabilities::handle_list_conversations(nats, agent_id, &req).await
         }
 
+        "search-skills" => {
+            let args: SearchSkillsArgs = match parse_args("search-skills", &request.arguments) {
+                Ok(a) => a,
+                Err(resp) => return resp,
+            };
+            let req = seidrum_common::events::SkillSearchRequest {
+                query: args.query,
+                limit: args.limit,
+                scope: None,
+            };
+            builtin_capabilities::handle_search_skills(nats, &req).await
+        }
+
+        "load-skill" => {
+            let args: LoadSkillArgs = match parse_args("load-skill", &request.arguments) {
+                Ok(a) => a,
+                Err(resp) => return resp,
+            };
+            let req = seidrum_common::events::SkillGetRequest {
+                skill_id: args.skill_id,
+            };
+            builtin_capabilities::handle_load_skill(nats, &req).await
+        }
+
+        "save-skill" => {
+            let args: SaveSkillArgs = match parse_args("save-skill", &request.arguments) {
+                Ok(a) => a,
+                Err(resp) => return resp,
+            };
+            let req = seidrum_common::events::SkillSaveRequest {
+                id: None,
+                description: args.description,
+                snippet: args.snippet,
+                source: "learned".to_string(),
+                scope: None,
+                tags: args.tags.unwrap_or_default(),
+                learned_from: None,
+            };
+            builtin_capabilities::handle_save_skill(nats, &req).await
+        }
+
         other => ToolCallResponse {
             tool_id: other.to_string(),
             result: serde_json::json!({"error": format!("Unknown built-in capability: {}", other)}),
@@ -368,6 +418,28 @@ async fn handle_builtin_call(
 // ---------------------------------------------------------------------------
 // Argument parsing structs (from LLM tool call arguments)
 // ---------------------------------------------------------------------------
+
+#[derive(serde::Deserialize, Default)]
+struct SearchSkillsArgs {
+    #[serde(default)]
+    query: String,
+    limit: Option<u32>,
+}
+
+#[derive(serde::Deserialize, Default)]
+struct LoadSkillArgs {
+    #[serde(default)]
+    skill_id: String,
+}
+
+#[derive(serde::Deserialize, Default)]
+struct SaveSkillArgs {
+    #[serde(default)]
+    description: String,
+    #[serde(default)]
+    snippet: String,
+    tags: Option<Vec<String>>,
+}
 
 #[derive(serde::Deserialize, Default)]
 struct SubscribeEventsArgs {
