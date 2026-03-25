@@ -1429,33 +1429,58 @@ async fn handle_skill_search(
 
     let limit = req.limit.unwrap_or(5);
 
-    // For now, return all skills sorted by text match (vector search requires
-    // embedding the query which needs the EmbeddingService — that integration
-    // happens at the consciousness/capability layer). This handler provides
-    // a fallback text-based search.
-    let query = r#"
-        FOR doc IN skills
-            LET score = LENGTH(@query) > 0
-                ? (CONTAINS(LOWER(doc.description), LOWER(@query)) ? 0.9 : 0.0)
-                  + (CONTAINS(LOWER(doc.snippet), LOWER(@query)) ? 0.5 : 0.0)
-                : 1.0
-            FILTER score > 0
-            SORT score DESC
-            LIMIT @limit
-            RETURN {
-                id: doc.id,
-                description: doc.description,
-                snippet: doc.snippet,
-                score: score,
-                source: doc.source,
-                tags: doc.tags || []
-            }
-    "#;
-
-    let bind_vars = serde_json::json!({
-        "query": &req.query,
-        "limit": limit,
-    });
+    // Text-based search with score capped at 1.0.
+    // Vector search (ANN) can be added when the vector index is created.
+    let (query, bind_vars) = if req.query.is_empty() {
+        // Empty query returns all skills
+        (
+            r#"
+                FOR doc IN skills
+                    SORT doc.created_at DESC
+                    LIMIT @limit
+                    RETURN {
+                        id: doc.id, description: doc.description, snippet: doc.snippet,
+                        score: 1.0, source: doc.source, tags: doc.tags || []
+                    }
+            "#,
+            serde_json::json!({ "limit": limit }),
+        )
+    } else if let Some(ref scope) = req.scope {
+        (
+            r#"
+                FOR doc IN skills
+                    LET desc_match = CONTAINS(LOWER(doc.description), LOWER(@query)) ? 0.6 : 0.0
+                    LET snip_match = CONTAINS(LOWER(doc.snippet), LOWER(@query)) ? 0.4 : 0.0
+                    LET score = MIN(desc_match + snip_match, 1.0)
+                    FILTER score > 0
+                    FILTER doc.scope == null OR doc.scope == @scope
+                    SORT score DESC
+                    LIMIT @limit
+                    RETURN {
+                        id: doc.id, description: doc.description, snippet: doc.snippet,
+                        score, source: doc.source, tags: doc.tags || []
+                    }
+            "#,
+            serde_json::json!({ "query": &req.query, "limit": limit, "scope": scope }),
+        )
+    } else {
+        (
+            r#"
+                FOR doc IN skills
+                    LET desc_match = CONTAINS(LOWER(doc.description), LOWER(@query)) ? 0.6 : 0.0
+                    LET snip_match = CONTAINS(LOWER(doc.snippet), LOWER(@query)) ? 0.4 : 0.0
+                    LET score = MIN(desc_match + snip_match, 1.0)
+                    FILTER score > 0
+                    SORT score DESC
+                    LIMIT @limit
+                    RETURN {
+                        id: doc.id, description: doc.description, snippet: doc.snippet,
+                        score, source: doc.source, tags: doc.tags || []
+                    }
+            "#,
+            serde_json::json!({ "query": &req.query, "limit": limit }),
+        )
+    };
 
     let resp = arango.execute_aql(query, &bind_vars).await?;
     let skills: Vec<SkillSearchResult> = resp
@@ -1486,8 +1511,32 @@ async fn handle_skill_save(
 ) -> Result<()> {
     let req: SkillSaveRequest = serde_json::from_slice(&msg.payload).context("parse skill.save")?;
 
+    // Validate required fields
+    if req.description.trim().is_empty() || req.snippet.trim().is_empty() {
+        if let Some(reply) = msg.reply {
+            let resp = serde_json::json!({"error": "description and snippet are required"});
+            let _ = nats.publish(reply, serde_json::to_vec(&resp)?.into()).await;
+        }
+        return Ok(());
+    }
+
     let skill_id = req.id.unwrap_or_else(|| ulid::Ulid::new().to_string());
 
+    // Validate skill ID format
+    if skill_id.is_empty()
+        || skill_id.len() > 254
+        || !skill_id
+            .chars()
+            .all(|c| c.is_alphanumeric() || c == '-' || c == '_')
+    {
+        if let Some(reply) = msg.reply {
+            let resp = serde_json::json!({"error": "Invalid skill ID: must be 1-254 alphanumeric, dash, or underscore"});
+            let _ = nats.publish(reply, serde_json::to_vec(&resp)?.into()).await;
+        }
+        return Ok(());
+    }
+
+    let now = chrono::Utc::now().to_rfc3339();
     let doc = serde_json::json!({
         "id": &skill_id,
         "description": &req.description,
@@ -1495,14 +1544,32 @@ async fn handle_skill_save(
         "source": &req.source,
         "scope": req.scope,
         "tags": req.tags,
-        "created_at": chrono::Utc::now().to_rfc3339(),
+        "updated_at": &now,
         "learned_from": req.learned_from,
     });
 
-    let (_, is_new) = arango
-        .upsert_document("skills", &skill_id, &doc)
-        .await
-        .context("upsert skill")?;
+    // Use AQL UPSERT with separate INSERT/UPDATE to preserve created_at
+    let query = r#"
+        UPSERT { _key: @key }
+        INSERT MERGE(@doc, { _key: @key, created_at: @now })
+        UPDATE MERGE(OLD, @doc)
+        IN skills
+        RETURN { is_new: IS_NULL(OLD) }
+    "#;
+    let bind_vars = serde_json::json!({
+        "key": &skill_id,
+        "doc": &doc,
+        "now": &now,
+    });
+
+    let result = arango.execute_aql(query, &bind_vars).await?;
+    let is_new = result
+        .get("result")
+        .and_then(|v| v.as_array())
+        .and_then(|a| a.first())
+        .and_then(|v| v.get("is_new"))
+        .and_then(|v| v.as_bool())
+        .unwrap_or(true);
 
     info!(skill_id = %skill_id, %is_new, "Skill saved");
 

@@ -172,7 +172,7 @@ async fn run_serve() -> anyhow::Result<()> {
     let consciousness_handle = consciousness_service.spawn().await?;
     info!("consciousness service started");
 
-    // 8. Load system skills from YAML files.
+    // 9. Load system skills from YAML files.
     let embedding_service = embedding::service::EmbeddingService::from_env()?;
     let skills_arango =
         brain::client::ArangoClient::new(&arango_url, &arango_database, &arango_password)?;
@@ -184,7 +184,7 @@ async fn run_serve() -> anyhow::Result<()> {
         warn!(error = %e, "Failed to load system skills (non-fatal)");
     }
 
-    // 8. Wait for all services.
+    // 10. Wait for all services.
     tokio::select! {
         _ = registry_handle => {
             warn!("registry service exited unexpectedly");

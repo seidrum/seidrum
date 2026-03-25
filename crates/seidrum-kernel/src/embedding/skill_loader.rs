@@ -78,8 +78,29 @@ async fn load_and_store_skill(
 
     let skill = file.skill;
 
-    // Generate embedding
-    let emb = embedding.embed(&skill.description).await?;
+    // Validate skill ID
+    if skill.id.is_empty()
+        || skill.id.len() > 254
+        || !skill
+            .id
+            .chars()
+            .all(|c| c.is_alphanumeric() || c == '-' || c == '_')
+    {
+        anyhow::bail!(
+            "Invalid skill ID '{}': must be 1-254 alphanumeric, dash, or underscore characters",
+            skill.id
+        );
+    }
+
+    // Generate embedding from description + snippet for better semantic matching
+    let embed_text = format!("{}\n{}", skill.description, skill.snippet);
+    let emb = match embedding.embed(&embed_text).await {
+        Ok(v) => v,
+        Err(e) => {
+            warn!(skill_id = %skill.id, error = %e, "Failed to generate embedding, storing without");
+            vec![]
+        }
+    };
 
     let doc = serde_json::json!({
         "id": &skill.id,

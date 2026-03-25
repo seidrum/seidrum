@@ -5,7 +5,7 @@
 
 use anyhow::{Context, Result};
 use reqwest::Client;
-use tracing::{debug, warn};
+use tracing::{debug, info, warn};
 
 /// Configurable embedding generator.
 #[derive(Clone)]
@@ -22,6 +22,12 @@ impl EmbeddingService {
     pub fn from_env() -> Result<Self> {
         let provider = std::env::var("EMBEDDING_PROVIDER").unwrap_or_else(|_| "openai".to_string());
         let api_key = std::env::var("OPENAI_API_KEY").unwrap_or_default();
+
+        if api_key.is_empty() {
+            warn!("OPENAI_API_KEY not set — embedding service will be unavailable. Skills will be stored without embeddings.");
+        } else {
+            info!(provider = %provider, "Embedding service configured");
+        }
 
         let http = Client::builder()
             .timeout(std::time::Duration::from_secs(30))
@@ -43,16 +49,20 @@ impl EmbeddingService {
     }
 
     /// Generate an embedding vector from text.
+    /// Returns an error if the service is not configured or the text is empty.
     pub async fn embed(&self, text: &str) -> Result<Vec<f64>> {
         if !self.is_available() {
-            warn!("Embedding service not configured (missing OPENAI_API_KEY)");
-            // Return zero vector as placeholder
-            return Ok(vec![0.0; self.dimension as usize]);
+            anyhow::bail!("Embedding service not configured (missing OPENAI_API_KEY)");
+        }
+
+        let trimmed = text.trim();
+        if trimmed.is_empty() {
+            anyhow::bail!("Cannot embed empty text");
         }
 
         let body = serde_json::json!({
             "model": self.model,
-            "input": text,
+            "input": trimmed,
         });
 
         let resp = self

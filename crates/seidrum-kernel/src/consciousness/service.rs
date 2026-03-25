@@ -384,6 +384,13 @@ async fn handle_builtin_call(
                 Ok(a) => a,
                 Err(resp) => return resp,
             };
+            if args.skill_id.trim().is_empty() {
+                return ToolCallResponse {
+                    tool_id: "load-skill".to_string(),
+                    result: serde_json::json!({"error": "skill_id is required"}),
+                    is_error: true,
+                };
+            }
             let req = seidrum_common::events::SkillGetRequest {
                 skill_id: args.skill_id,
             };
@@ -395,6 +402,13 @@ async fn handle_builtin_call(
                 Ok(a) => a,
                 Err(resp) => return resp,
             };
+            if args.description.trim().is_empty() || args.snippet.trim().is_empty() {
+                return ToolCallResponse {
+                    tool_id: "save-skill".to_string(),
+                    result: serde_json::json!({"error": "description and snippet are required"}),
+                    is_error: true,
+                };
+            }
             let req = seidrum_common::events::SkillSaveRequest {
                 id: None,
                 description: args.description,

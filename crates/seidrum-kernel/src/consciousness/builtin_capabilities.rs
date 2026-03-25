@@ -475,11 +475,21 @@ pub async fn handle_load_skill(
     )
     .await
     {
-        Ok(Ok(resp)) => ToolCallResponse {
-            tool_id: "load-skill".to_string(),
-            result: resp,
-            is_error: false,
-        },
+        Ok(Ok(resp)) => {
+            if resp.is_null() {
+                ToolCallResponse {
+                    tool_id: "load-skill".to_string(),
+                    result: serde_json::json!({"error": format!("Skill '{}' not found", args.skill_id)}),
+                    is_error: true,
+                }
+            } else {
+                ToolCallResponse {
+                    tool_id: "load-skill".to_string(),
+                    result: resp,
+                    is_error: false,
+                }
+            }
+        }
         Ok(Err(e)) => ToolCallResponse {
             tool_id: "load-skill".to_string(),
             result: serde_json::json!({"error": e.to_string()}),
