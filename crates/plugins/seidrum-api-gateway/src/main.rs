@@ -134,6 +134,16 @@ async fn main() -> Result<()> {
             "/dashboard/plugins/{id}/config/schema",
             get(dashboard::get_config_schema),
         )
+        .route("/dashboard/skills", get(dashboard::list_skills))
+        .route("/dashboard/skills/{id}", get(dashboard::get_skill))
+        .route(
+            "/dashboard/conversations",
+            get(dashboard::list_conversations_dashboard),
+        )
+        .route(
+            "/dashboard/conversations/{id}",
+            get(dashboard::get_conversation_dashboard),
+        )
         .layer(middleware::from_fn_with_state(
             state.clone(),
             bearer_auth_middleware,

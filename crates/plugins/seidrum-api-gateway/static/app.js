@@ -43,7 +43,7 @@ function showPage(page) {
     const link = document.querySelector(`#sidebar a[onclick="showPage('${page}')"]`);
     if (link) link.classList.add('active');
 
-    const pages = { overview: renderOverview, plugins: renderPlugins, capabilities: renderCapabilities, storage: renderStorage, events: renderEvents };
+    const pages = { overview: renderOverview, plugins: renderPlugins, capabilities: renderCapabilities, skills: renderSkills, conversations: renderConversations, storage: renderStorage, events: renderEvents };
     if (pages[page]) pages[page]();
 }
 
@@ -280,6 +280,135 @@ async function renderCapabilities() {
                     `).join('')}
                 </tbody>
             </table>
+        `;
+    } catch (e) {
+        if (e.message !== 'Unauthorized') el.innerHTML = `<h2>Error</h2><p>${e.message}</p>`;
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Skills
+// ---------------------------------------------------------------------------
+
+async function renderSkills() {
+    const el = document.getElementById('page-content');
+    el.innerHTML = '<h2>Loading...</h2>';
+
+    try {
+        const data = await api('/api/v1/dashboard/skills');
+        const skills = data.skills || [];
+
+        el.innerHTML = `
+            <h2>Skills (${skills.length})</h2>
+            <table>
+                <thead><tr><th>ID</th><th>Description</th><th>Source</th><th>Tags</th></tr></thead>
+                <tbody>
+                    ${skills.length === 0 ? '<tr><td colspan="4" style="color:var(--text-muted)">No skills found</td></tr>' : ''}
+                    ${skills.map(s => `
+                        <tr class="clickable" onclick="renderSkillDetail('${s.id}')">
+                            <td><code>${s.id}</code></td>
+                            <td>${s.description || ''}</td>
+                            <td><span class="badge badge-tool">${s.source || ''}</span></td>
+                            <td>${(s.tags || []).map(t => '<span class="badge">' + t + '</span>').join(' ')}</td>
+                        </tr>
+                    `).join('')}
+                </tbody>
+            </table>
+        `;
+    } catch (e) {
+        if (e.message !== 'Unauthorized') el.innerHTML = `<h2>Error</h2><p>${e.message}</p>`;
+    }
+}
+
+async function renderSkillDetail(skillId) {
+    const el = document.getElementById('page-content');
+    el.innerHTML = '<h2>Loading...</h2>';
+
+    try {
+        const skill = await api(`/api/v1/dashboard/skills/${skillId}`);
+
+        el.innerHTML = `
+            <h2>${skillId}</h2>
+            <p><a href="#" onclick="renderSkills()">&larr; Back to skills</a></p>
+            <div class="card">
+                <h3>Details</h3>
+                <p><strong>Description:</strong> ${skill.description || 'N/A'}</p>
+                <p><strong>Source:</strong> ${skill.source || 'N/A'}</p>
+                <p><strong>Tags:</strong> ${(skill.tags || []).join(', ') || 'None'}</p>
+                ${skill.created_at ? `<p><strong>Created:</strong> ${new Date(skill.created_at).toLocaleString()}</p>` : ''}
+            </div>
+            ${skill.snippet ? `<div class="card"><h3>Snippet</h3><pre style="white-space:pre-wrap;font-size:12px">${skill.snippet}</pre></div>` : ''}
+        `;
+    } catch (e) {
+        if (e.message !== 'Unauthorized') el.innerHTML = `<h2>Error</h2><p>${e.message}</p>`;
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Conversations
+// ---------------------------------------------------------------------------
+
+async function renderConversations() {
+    const el = document.getElementById('page-content');
+    el.innerHTML = '<h2>Loading...</h2>';
+
+    try {
+        const data = await api('/api/v1/dashboard/conversations');
+        const convos = data.conversations || [];
+
+        el.innerHTML = `
+            <h2>Conversations (${convos.length})</h2>
+            <table>
+                <thead><tr><th>ID</th><th>Platform</th><th>Participants</th><th>Messages</th><th>State</th><th>Updated</th></tr></thead>
+                <tbody>
+                    ${convos.length === 0 ? '<tr><td colspan="6" style="color:var(--text-muted)">No conversations found</td></tr>' : ''}
+                    ${convos.map(c => `
+                        <tr class="clickable" onclick="renderConversationDetail('${c.id}')">
+                            <td><code>${c.id}</code></td>
+                            <td><span class="badge badge-tool">${c.platform}</span></td>
+                            <td>${(c.participants || []).join(', ')}</td>
+                            <td>${c.message_count}</td>
+                            <td><span class="badge badge-${c.state === 'active' ? 'healthy' : 'unknown'}">${c.state}</span></td>
+                            <td style="color:var(--text-muted)">${new Date(c.updated_at).toLocaleString()}</td>
+                        </tr>
+                    `).join('')}
+                </tbody>
+            </table>
+        `;
+    } catch (e) {
+        if (e.message !== 'Unauthorized') el.innerHTML = `<h2>Error</h2><p>${e.message}</p>`;
+    }
+}
+
+async function renderConversationDetail(conversationId) {
+    const el = document.getElementById('page-content');
+    el.innerHTML = '<h2>Loading...</h2>';
+
+    try {
+        const conv = await api(`/api/v1/dashboard/conversations/${conversationId}`);
+
+        const messages = (conv.messages || []).map(m => `
+            <div style="margin-bottom:8px;padding:8px;border-left:3px solid var(--border);border-radius:4px">
+                <strong>${m.role || m.sender || 'unknown'}</strong>
+                <span style="color:var(--text-muted);font-size:11px;margin-left:8px">${m.timestamp ? new Date(m.timestamp).toLocaleString() : ''}</span>
+                <div style="margin-top:4px;white-space:pre-wrap">${m.text || m.content || ''}</div>
+            </div>
+        `).join('');
+
+        el.innerHTML = `
+            <h2>Conversation: ${conversationId}</h2>
+            <p><a href="#" onclick="renderConversations()">&larr; Back to conversations</a></p>
+            <div class="card">
+                <h3>Info</h3>
+                <p><strong>Platform:</strong> ${conv.platform || 'N/A'}</p>
+                <p><strong>Participants:</strong> ${(conv.participants || []).join(', ')}</p>
+                <p><strong>State:</strong> ${conv.state || 'N/A'}</p>
+                ${conv.created_at ? `<p><strong>Created:</strong> ${new Date(conv.created_at).toLocaleString()}</p>` : ''}
+            </div>
+            <div class="card">
+                <h3>Messages (${(conv.messages || []).length})</h3>
+                ${messages || '<p style="color:var(--text-muted)">No messages</p>'}
+            </div>
         `;
     } catch (e) {
         if (e.message !== 'Unauthorized') el.innerHTML = `<h2>Error</h2><p>${e.message}</p>`;
