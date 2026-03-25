@@ -258,11 +258,18 @@ pub struct BrainQueryResponse {
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct AgentContextLoaded {
     pub original_event: EventEnvelope,
+    #[serde(default)]
     pub entities: Vec<serde_json::Value>,
+    #[serde(default)]
     pub facts: Vec<serde_json::Value>,
+    #[serde(default)]
     pub similar_content: Vec<serde_json::Value>,
+    #[serde(default)]
     pub active_tasks: Vec<serde_json::Value>,
+    #[serde(default)]
     pub conversation_history: Vec<serde_json::Value>,
+    #[serde(default)]
+    pub skill_snippets: Vec<serde_json::Value>,
 }
 
 /// Explicitly wake an agent.

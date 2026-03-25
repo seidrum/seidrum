@@ -11,8 +11,10 @@ use axum::response::IntoResponse;
 use axum::Json;
 use chrono::Utc;
 use seidrum_common::events::{
-    ConfigUpdated, PluginHealthRequest, PluginHealthResponse, PluginRegister, StorageGetRequest,
-    StorageGetResponse, StorageSetRequest, StorageSetResponse,
+    ConfigUpdated, ConversationGetRequest, ConversationListRequest, ConversationListResponse,
+    PluginHealthRequest, PluginHealthResponse, PluginRegister, SkillGetRequest, SkillListRequest,
+    SkillListResponse, StorageGetRequest, StorageGetResponse, StorageSetRequest,
+    StorageSetResponse,
 };
 use serde::{Deserialize, Serialize};
 use tracing::warn;
@@ -164,7 +166,9 @@ pub async fn plugin_health(
     )
     .await
     {
-        Ok(Ok(resp)) => Json(serde_json::to_value(resp).unwrap()).into_response(),
+        Ok(Ok(resp)) => {
+            Json(serde_json::to_value(&resp).unwrap_or(serde_json::json!(null))).into_response()
+        }
         Ok(Err(err)) => (
             StatusCode::BAD_GATEWAY,
             Json(serde_json::json!({"error": err.to_string()})),
@@ -317,6 +321,166 @@ pub async fn update_plugin_config(
     }
 
     Json(serde_json::json!({"success": true})).into_response()
+}
+
+// ---------------------------------------------------------------------------
+// Skills
+// ---------------------------------------------------------------------------
+
+/// `GET /api/v1/dashboard/skills`
+///
+/// Returns all skills from the brain.
+pub async fn list_skills(State(state): State<AppState>) -> impl IntoResponse {
+    let req = SkillListRequest {
+        source_filter: None,
+        limit: Some(100),
+    };
+
+    match tokio::time::timeout(
+        Duration::from_secs(5),
+        state
+            .nats
+            .request::<_, SkillListResponse>("brain.skill.list", &req),
+    )
+    .await
+    {
+        Ok(Ok(resp)) => {
+            Json(serde_json::to_value(&resp).unwrap_or(serde_json::json!(null))).into_response()
+        }
+        Ok(Err(err)) => (
+            StatusCode::BAD_GATEWAY,
+            Json(serde_json::json!({"error": err.to_string()})),
+        )
+            .into_response(),
+        Err(_) => (
+            StatusCode::GATEWAY_TIMEOUT,
+            Json(serde_json::json!({"error": "Skill list request timed out"})),
+        )
+            .into_response(),
+    }
+}
+
+/// `GET /api/v1/dashboard/skills/:id`
+///
+/// Returns a single skill by ID.
+pub async fn get_skill(
+    State(state): State<AppState>,
+    Path(skill_id): Path<String>,
+) -> impl IntoResponse {
+    let req = SkillGetRequest { skill_id };
+
+    match tokio::time::timeout(
+        Duration::from_secs(5),
+        state
+            .nats
+            .request::<_, serde_json::Value>("brain.skill.get", &req),
+    )
+    .await
+    {
+        Ok(Ok(resp)) => {
+            if resp.is_null() {
+                (
+                    StatusCode::NOT_FOUND,
+                    Json(serde_json::json!({"error": "Skill not found"})),
+                )
+                    .into_response()
+            } else {
+                Json(resp).into_response()
+            }
+        }
+        Ok(Err(err)) => (
+            StatusCode::BAD_GATEWAY,
+            Json(serde_json::json!({"error": err.to_string()})),
+        )
+            .into_response(),
+        Err(_) => (
+            StatusCode::GATEWAY_TIMEOUT,
+            Json(serde_json::json!({"error": "Skill get request timed out"})),
+        )
+            .into_response(),
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Conversations (dashboard)
+// ---------------------------------------------------------------------------
+
+/// `GET /api/v1/dashboard/conversations`
+///
+/// Returns recent conversations from the brain.
+pub async fn list_conversations_dashboard(State(state): State<AppState>) -> impl IntoResponse {
+    let req = ConversationListRequest {
+        agent_id: "".to_string(),
+        platform: None,
+        limit: 50,
+    };
+
+    match tokio::time::timeout(
+        Duration::from_secs(5),
+        state
+            .nats
+            .request::<_, ConversationListResponse>("brain.conversation.list", &req),
+    )
+    .await
+    {
+        Ok(Ok(resp)) => {
+            Json(serde_json::to_value(&resp).unwrap_or(serde_json::json!(null))).into_response()
+        }
+        Ok(Err(err)) => (
+            StatusCode::BAD_GATEWAY,
+            Json(serde_json::json!({"error": err.to_string()})),
+        )
+            .into_response(),
+        Err(_) => (
+            StatusCode::GATEWAY_TIMEOUT,
+            Json(serde_json::json!({"error": "Conversation list request timed out"})),
+        )
+            .into_response(),
+    }
+}
+
+/// `GET /api/v1/dashboard/conversations/:id`
+///
+/// Returns a single conversation with messages.
+pub async fn get_conversation_dashboard(
+    State(state): State<AppState>,
+    Path(conversation_id): Path<String>,
+) -> impl IntoResponse {
+    let req = ConversationGetRequest {
+        conversation_id,
+        max_messages: 100,
+    };
+
+    match tokio::time::timeout(
+        Duration::from_secs(5),
+        state
+            .nats
+            .request::<_, serde_json::Value>("brain.conversation.get", &req),
+    )
+    .await
+    {
+        Ok(Ok(resp)) => {
+            if resp.is_null() {
+                (
+                    StatusCode::NOT_FOUND,
+                    Json(serde_json::json!({"error": "Conversation not found"})),
+                )
+                    .into_response()
+            } else {
+                Json(resp).into_response()
+            }
+        }
+        Ok(Err(err)) => (
+            StatusCode::BAD_GATEWAY,
+            Json(serde_json::json!({"error": err.to_string()})),
+        )
+            .into_response(),
+        Err(_) => (
+            StatusCode::GATEWAY_TIMEOUT,
+            Json(serde_json::json!({"error": "Conversation get request timed out"})),
+        )
+            .into_response(),
+    }
 }
 
 // ---------------------------------------------------------------------------

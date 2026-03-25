@@ -1,6 +1,15 @@
 // Seidrum Dashboard - Vanilla JS
 
 // ---------------------------------------------------------------------------
+// X1: HTML escaping to prevent XSS
+// ---------------------------------------------------------------------------
+
+function escapeHtml(str) {
+    if (!str) return '';
+    return String(str).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+}
+
+// ---------------------------------------------------------------------------
 // Auth
 // ---------------------------------------------------------------------------
 
@@ -43,7 +52,7 @@ function showPage(page) {
     const link = document.querySelector(`#sidebar a[onclick="showPage('${page}')"]`);
     if (link) link.classList.add('active');
 
-    const pages = { overview: renderOverview, plugins: renderPlugins, capabilities: renderCapabilities, storage: renderStorage, events: renderEvents };
+    const pages = { overview: renderOverview, plugins: renderPlugins, capabilities: renderCapabilities, skills: renderSkills, conversations: renderConversations, storage: renderStorage, events: renderEvents };
     if (pages[page]) pages[page]();
 }
 
@@ -84,10 +93,10 @@ async function renderOverview() {
                     <thead><tr><th>Name</th><th>Version</th><th>Status</th><th>Config</th></tr></thead>
                     <tbody>
                         ${data.plugins.map(p => `
-                            <tr class="clickable" onclick="renderPluginDetail('${p.id}')">
-                                <td><strong>${p.name}</strong><br><span style="color:var(--text-muted);font-size:12px">${p.id}</span></td>
-                                <td>${p.version}</td>
-                                <td><span class="badge badge-${p.health_status}">${p.health_status}</span></td>
+                            <tr class="clickable" onclick="renderPluginDetail('${escapeHtml(p.id)}')">
+                                <td><strong>${escapeHtml(p.name)}</strong><br><span style="color:var(--text-muted);font-size:12px">${escapeHtml(p.id)}</span></td>
+                                <td>${escapeHtml(p.version)}</td>
+                                <td><span class="badge badge-${escapeHtml(p.health_status)}">${escapeHtml(p.health_status)}</span></td>
                                 <td>${p.has_config_schema ? '<span class="badge badge-tool">schema</span>' : ''}</td>
                             </tr>
                         `).join('')}
@@ -96,7 +105,7 @@ async function renderOverview() {
             </div>
         `;
     } catch (e) {
-        if (e.message !== 'Unauthorized') el.innerHTML = `<h2>Error</h2><p>${e.message}</p>`;
+        if (e.message !== 'Unauthorized') el.innerHTML = `<h2>Error</h2><p>${escapeHtml(e.message)}</p>`;
     }
 }
 
@@ -117,19 +126,19 @@ async function renderPlugins() {
                 <thead><tr><th>ID</th><th>Name</th><th>Version</th><th>Status</th><th>Description</th></tr></thead>
                 <tbody>
                     ${data.plugins.map(p => `
-                        <tr class="clickable" onclick="renderPluginDetail('${p.id}')">
-                            <td><code>${p.id}</code></td>
-                            <td>${p.name}</td>
-                            <td>${p.version}</td>
-                            <td><span class="badge badge-${p.health_status}">${p.health_status}</span></td>
-                            <td style="color:var(--text-muted)">${p.description}</td>
+                        <tr class="clickable" onclick="renderPluginDetail('${escapeHtml(p.id)}')">
+                            <td><code>${escapeHtml(p.id)}</code></td>
+                            <td>${escapeHtml(p.name)}</td>
+                            <td>${escapeHtml(p.version)}</td>
+                            <td><span class="badge badge-${escapeHtml(p.health_status)}">${escapeHtml(p.health_status)}</span></td>
+                            <td style="color:var(--text-muted)">${escapeHtml(p.description)}</td>
                         </tr>
                     `).join('')}
                 </tbody>
             </table>
         `;
     } catch (e) {
-        if (e.message !== 'Unauthorized') el.innerHTML = `<h2>Error</h2><p>${e.message}</p>`;
+        if (e.message !== 'Unauthorized') el.innerHTML = `<h2>Error</h2><p>${escapeHtml(e.message)}</p>`;
     }
 }
 
@@ -155,7 +164,7 @@ async function renderPluginDetail(pluginId) {
                 <p>Status: <span class="badge badge-${health.status || 'unknown'}">${health.status || 'unknown'}</span></p>
                 ${health.uptime_seconds ? `<p>Uptime: ${Math.floor(health.uptime_seconds / 60)} minutes</p>` : ''}
                 ${health.events_processed ? `<p>Events processed: ${health.events_processed}</p>` : ''}
-                ${health.last_error ? `<p style="color:var(--error)">Last error: ${health.last_error}</p>` : ''}
+                ${health.last_error ? `<p style="color:var(--error)">Last error: ${escapeHtml(health.last_error)}</p>` : ''}
             </div>
         `;
 
@@ -168,7 +177,7 @@ async function renderPluginDetail(pluginId) {
 
         el.innerHTML = html;
     } catch (e) {
-        if (e.message !== 'Unauthorized') el.innerHTML = `<h2>Error</h2><p>${e.message}</p>`;
+        if (e.message !== 'Unauthorized') el.innerHTML = `<h2>Error</h2><p>${escapeHtml(e.message)}</p>`;
     }
 }
 
@@ -272,17 +281,146 @@ async function renderCapabilities() {
                 <tbody>
                     ${data.tools.map(t => `
                         <tr>
-                            <td><code>${t.tool_id}</code></td>
-                            <td>${t.name}</td>
-                            <td><span class="badge badge-${t.kind}">${t.kind}</span></td>
-                            <td style="color:var(--text-muted)">${t.summary_md}</td>
+                            <td><code>${escapeHtml(t.tool_id)}</code></td>
+                            <td>${escapeHtml(t.name)}</td>
+                            <td><span class="badge badge-${escapeHtml(t.kind)}">${escapeHtml(t.kind)}</span></td>
+                            <td style="color:var(--text-muted)">${escapeHtml(t.summary_md)}</td>
                         </tr>
                     `).join('')}
                 </tbody>
             </table>
         `;
     } catch (e) {
-        if (e.message !== 'Unauthorized') el.innerHTML = `<h2>Error</h2><p>${e.message}</p>`;
+        if (e.message !== 'Unauthorized') el.innerHTML = `<h2>Error</h2><p>${escapeHtml(e.message)}</p>`;
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Skills
+// ---------------------------------------------------------------------------
+
+async function renderSkills() {
+    const el = document.getElementById('page-content');
+    el.innerHTML = '<h2>Loading...</h2>';
+
+    try {
+        const data = await api('/api/v1/dashboard/skills');
+        const skills = data.skills || [];
+
+        el.innerHTML = `
+            <h2>Skills (${skills.length})</h2>
+            <table>
+                <thead><tr><th>ID</th><th>Description</th><th>Source</th><th>Tags</th></tr></thead>
+                <tbody>
+                    ${skills.length === 0 ? '<tr><td colspan="4" style="color:var(--text-muted)">No skills found</td></tr>' : ''}
+                    ${skills.map(s => `
+                        <tr class="clickable" onclick="renderSkillDetail('${escapeHtml(s.id)}')">
+                            <td><code>${escapeHtml(s.id)}</code></td>
+                            <td>${escapeHtml(s.description || '')}</td>
+                            <td><span class="badge badge-tool">${escapeHtml(s.source || '')}</span></td>
+                            <td>${(s.tags || []).map(t => '<span class="badge">' + escapeHtml(t) + '</span>').join(' ')}</td>
+                        </tr>
+                    `).join('')}
+                </tbody>
+            </table>
+        `;
+    } catch (e) {
+        if (e.message !== 'Unauthorized') el.innerHTML = `<h2>Error</h2><p>${escapeHtml(e.message)}</p>`;
+    }
+}
+
+async function renderSkillDetail(skillId) {
+    const el = document.getElementById('page-content');
+    el.innerHTML = '<h2>Loading...</h2>';
+
+    try {
+        const skill = await api(`/api/v1/dashboard/skills/${skillId}`);
+
+        el.innerHTML = `
+            <h2>${skillId}</h2>
+            <p><a href="#" onclick="renderSkills()">&larr; Back to skills</a></p>
+            <div class="card">
+                <h3>Details</h3>
+                <p><strong>Description:</strong> ${escapeHtml(skill.description || 'N/A')}</p>
+                <p><strong>Source:</strong> ${escapeHtml(skill.source || 'N/A')}</p>
+                <p><strong>Tags:</strong> ${escapeHtml((skill.tags || []).join(', ') || 'None')}</p>
+                ${skill.created_at ? `<p><strong>Created:</strong> ${new Date(skill.created_at).toLocaleString()}</p>` : ''}
+            </div>
+            ${skill.snippet ? `<div class="card"><h3>Snippet</h3><pre style="white-space:pre-wrap;font-size:12px">${escapeHtml(skill.snippet)}</pre></div>` : ''}
+        `;
+    } catch (e) {
+        if (e.message !== 'Unauthorized') el.innerHTML = `<h2>Error</h2><p>${escapeHtml(e.message)}</p>`;
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Conversations
+// ---------------------------------------------------------------------------
+
+async function renderConversations() {
+    const el = document.getElementById('page-content');
+    el.innerHTML = '<h2>Loading...</h2>';
+
+    try {
+        const data = await api('/api/v1/dashboard/conversations');
+        const convos = data.conversations || [];
+
+        el.innerHTML = `
+            <h2>Conversations (${convos.length})</h2>
+            <table>
+                <thead><tr><th>ID</th><th>Platform</th><th>Participants</th><th>Messages</th><th>State</th><th>Updated</th></tr></thead>
+                <tbody>
+                    ${convos.length === 0 ? '<tr><td colspan="6" style="color:var(--text-muted)">No conversations found</td></tr>' : ''}
+                    ${convos.map(c => `
+                        <tr class="clickable" onclick="renderConversationDetail('${escapeHtml(c.id)}')">
+                            <td><code>${escapeHtml(c.id)}</code></td>
+                            <td><span class="badge badge-tool">${escapeHtml(c.platform)}</span></td>
+                            <td>${escapeHtml((c.participants || []).join(', '))}</td>
+                            <td>${c.message_count}</td>
+                            <td><span class="badge badge-${c.state === 'active' ? 'healthy' : 'unknown'}">${escapeHtml(c.state)}</span></td>
+                            <td style="color:var(--text-muted)">${new Date(c.updated_at).toLocaleString()}</td>
+                        </tr>
+                    `).join('')}
+                </tbody>
+            </table>
+        `;
+    } catch (e) {
+        if (e.message !== 'Unauthorized') el.innerHTML = `<h2>Error</h2><p>${escapeHtml(e.message)}</p>`;
+    }
+}
+
+async function renderConversationDetail(conversationId) {
+    const el = document.getElementById('page-content');
+    el.innerHTML = '<h2>Loading...</h2>';
+
+    try {
+        const conv = await api(`/api/v1/dashboard/conversations/${conversationId}`);
+
+        const messages = (conv.messages || []).map(m => `
+            <div style="margin-bottom:8px;padding:8px;border-left:3px solid var(--border);border-radius:4px">
+                <strong>${escapeHtml(m.role || m.sender || 'unknown')}</strong>
+                <span style="color:var(--text-muted);font-size:11px;margin-left:8px">${m.timestamp ? new Date(m.timestamp).toLocaleString() : ''}</span>
+                <div style="margin-top:4px;white-space:pre-wrap">${escapeHtml(m.text || m.content || '')}</div>
+            </div>
+        `).join('');
+
+        el.innerHTML = `
+            <h2>Conversation: ${conversationId}</h2>
+            <p><a href="#" onclick="renderConversations()">&larr; Back to conversations</a></p>
+            <div class="card">
+                <h3>Info</h3>
+                <p><strong>Platform:</strong> ${escapeHtml(conv.platform || 'N/A')}</p>
+                <p><strong>Participants:</strong> ${escapeHtml((conv.participants || []).join(', '))}</p>
+                <p><strong>State:</strong> ${escapeHtml(conv.state || 'N/A')}</p>
+                ${conv.created_at ? `<p><strong>Created:</strong> ${new Date(conv.created_at).toLocaleString()}</p>` : ''}
+            </div>
+            <div class="card">
+                <h3>Messages (${(conv.messages || []).length})</h3>
+                ${messages || '<p style="color:var(--text-muted)">No messages</p>'}
+            </div>
+        `;
+    } catch (e) {
+        if (e.message !== 'Unauthorized') el.innerHTML = `<h2>Error</h2><p>${escapeHtml(e.message)}</p>`;
     }
 }
 
@@ -329,15 +467,15 @@ async function listStorageKeys() {
                 <tbody>
                     ${data.keys.map(k => `
                         <tr>
-                            <td><code>${k}</code></td>
-                            <td><button class="btn-sm" onclick="viewStorageKey('${pluginId}', '${namespace}', '${k}')">View</button></td>
+                            <td><code>${escapeHtml(k)}</code></td>
+                            <td><button class="btn-sm" onclick="viewStorageKey('${escapeHtml(pluginId)}', '${escapeHtml(namespace)}', '${escapeHtml(k)}')">View</button></td>
                         </tr>
                     `).join('')}
                 </tbody>
             </table>
         `;
     } catch (e) {
-        results.innerHTML = `<p style="color:var(--error)">${e.message}</p>`;
+        results.innerHTML = `<p style="color:var(--error)">${escapeHtml(e.message)}</p>`;
     }
 }
 
@@ -400,8 +538,8 @@ function startEventStream() {
             const time = new Date().toLocaleTimeString();
             const entry = document.createElement('div');
             entry.className = 'event-entry';
-            entry.innerHTML = `<span class="event-time">${time}</span><span class="event-subject">${data.subject}</span>
-                <pre style="margin-top:4px;font-size:11px;color:var(--text-muted);white-space:pre-wrap">${JSON.stringify(data.payload, null, 2).slice(0, 500)}</pre>`;
+            entry.innerHTML = `<span class="event-time">${time}</span><span class="event-subject">${escapeHtml(data.subject)}</span>
+                <pre style="margin-top:4px;font-size:11px;color:var(--text-muted);white-space:pre-wrap">${escapeHtml(JSON.stringify(data.payload, null, 2).slice(0, 500))}</pre>`;
             log.prepend(entry);
             // Keep max 100 entries
             while (log.children.length > 100) log.lastChild.remove();

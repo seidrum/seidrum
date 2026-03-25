@@ -120,6 +120,11 @@ impl BrainService {
             .subscribe("brain.skill.list")
             .await
             .context("subscribe brain.skill.list")?;
+        let mut skill_delete = self
+            .nats
+            .subscribe("brain.skill.delete")
+            .await
+            .context("subscribe brain.skill.delete")?;
 
         info!("Brain service started — listening on brain.* subjects");
 
@@ -258,6 +263,15 @@ impl BrainService {
                     tokio::spawn(async move {
                         if let Err(e) = handle_skill_list(&arango, &nats, msg).await {
                             error!(error = %e, "brain.skill.list handler failed");
+                        }
+                    });
+                }
+                Some(msg) = skill_delete.next() => {
+                    let arango = self.arango.clone();
+                    let nats = self.nats.clone();
+                    tokio::spawn(async move {
+                        if let Err(e) = handle_skill_delete(&arango, &nats, msg).await {
+                            error!(error = %e, "brain.skill.delete handler failed");
                         }
                     });
                 }
@@ -1347,9 +1361,33 @@ async fn handle_conversation_list(
 
     let limit = if req.limit == 0 { 20 } else { req.limit };
 
+    let agent_id_empty = req.agent_id.is_empty();
+
     let (query, bind_vars) = if let Some(ref platform) = req.platform {
-        (
-            r#"
+        if agent_id_empty {
+            (
+                r#"
+                FOR conv IN conversations
+                    FILTER conv.platform == @platform
+                    SORT conv.updated_at DESC
+                    LIMIT @limit
+                    RETURN {
+                        id: conv._key,
+                        platform: conv.platform,
+                        participants: conv.participants,
+                        message_count: LENGTH(conv.messages),
+                        state: conv.state,
+                        updated_at: conv.updated_at
+                    }
+            "#,
+                serde_json::json!({
+                    "platform": platform,
+                    "limit": limit,
+                }),
+            )
+        } else {
+            (
+                r#"
                 FOR conv IN conversations
                     FILTER conv.agent_id == @agent_id
                     FILTER conv.platform == @platform
@@ -1364,9 +1402,29 @@ async fn handle_conversation_list(
                         updated_at: conv.updated_at
                     }
             "#,
+                serde_json::json!({
+                    "agent_id": &req.agent_id,
+                    "platform": platform,
+                    "limit": limit,
+                }),
+            )
+        }
+    } else if agent_id_empty {
+        (
+            r#"
+                FOR conv IN conversations
+                    SORT conv.updated_at DESC
+                    LIMIT @limit
+                    RETURN {
+                        id: conv._key,
+                        platform: conv.platform,
+                        participants: conv.participants,
+                        message_count: LENGTH(conv.messages),
+                        state: conv.state,
+                        updated_at: conv.updated_at
+                    }
+            "#,
             serde_json::json!({
-                "agent_id": &req.agent_id,
-                "platform": platform,
                 "limit": limit,
             }),
         )
@@ -1663,6 +1721,36 @@ async fn handle_skill_list(
         let _ = nats
             .publish(reply, serde_json::to_vec(&list_resp)?.into())
             .await;
+    }
+
+    Ok(())
+}
+
+/// Delete a skill by ID.
+async fn handle_skill_delete(
+    arango: &ArangoClient,
+    nats: &async_nats::Client,
+    msg: async_nats::Message,
+) -> Result<()> {
+    let req: SkillGetRequest =
+        serde_json::from_slice(&msg.payload).context("parse skill.delete")?;
+
+    debug!(skill_id = %req.skill_id, "handling brain.skill.delete");
+
+    let query = "REMOVE { _key: @key } IN skills";
+    let bind_vars = serde_json::json!({ "key": req.skill_id });
+
+    let result = arango.execute_aql(query, &bind_vars).await;
+
+    if let Some(reply) = msg.reply {
+        let resp = match result {
+            Ok(_) => serde_json::json!({ "success": true, "skill_id": req.skill_id }),
+            Err(e) => {
+                warn!(error = %e, skill_id = %req.skill_id, "failed to delete skill");
+                serde_json::json!({ "success": false, "error": e.to_string() })
+            }
+        };
+        let _ = nats.publish(reply, serde_json::to_vec(&resp)?.into()).await;
     }
 
     Ok(())

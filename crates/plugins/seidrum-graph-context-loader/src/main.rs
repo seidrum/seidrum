@@ -5,7 +5,7 @@ use clap::Parser;
 use futures::StreamExt;
 use seidrum_common::events::{
     AgentContextLoaded, BrainQueryRequest, BrainQueryResponse, ChannelInbound, EventEnvelope,
-    PluginRegister,
+    PluginRegister, SkillSearchRequest, SkillSearchResponse,
 };
 use serde::{Deserialize, Serialize};
 use tracing::{error, info, warn};
@@ -252,6 +252,41 @@ async fn query_active_tasks(nats: &async_nats::Client) -> Result<BrainQueryRespo
     brain_query(nats, &request).await
 }
 
+/// Search for relevant skills via the brain.skill.search NATS endpoint.
+async fn query_skill_search(
+    nats: &async_nats::Client,
+    query: &str,
+    scope: Option<&str>,
+) -> Result<SkillSearchResponse> {
+    let request = SkillSearchRequest {
+        query: query.to_string(),
+        limit: Some(5),
+        scope: scope.map(|s| s.to_string()),
+    };
+
+    let envelope = EventEnvelope::new(
+        "brain.skill.search",
+        "graph-context-loader",
+        None,
+        None,
+        &request,
+    )?;
+    let payload = serde_json::to_vec(&envelope)?;
+
+    let reply = nats
+        .request("brain.skill.search", payload.into())
+        .await
+        .context("brain.skill.search NATS request failed")?;
+
+    let reply_envelope: EventEnvelope = serde_json::from_slice(&reply.payload)
+        .context("failed to parse skill search reply envelope")?;
+
+    let response: SkillSearchResponse = serde_json::from_value(reply_envelope.payload)
+        .context("failed to parse SkillSearchResponse from reply payload")?;
+
+    Ok(response)
+}
+
 // ---------------------------------------------------------------------------
 // Context assembly
 // ---------------------------------------------------------------------------
@@ -264,6 +299,7 @@ fn assemble_context(
     vector_resp: Option<BrainQueryResponse>,
     tasks_resp: Option<BrainQueryResponse>,
     history_resp: Option<BrainQueryResponse>,
+    skill_snippets: Vec<serde_json::Value>,
 ) -> AgentContextLoaded {
     // The get_context response is expected to contain entities and facts.
     let (entities, facts) = match context_resp {
@@ -306,6 +342,7 @@ fn assemble_context(
         similar_content,
         active_tasks,
         conversation_history,
+        skill_snippets,
     }
 }
 
@@ -529,16 +566,52 @@ async fn main() -> Result<()> {
                 }
             };
 
-        // Step 6: Assemble AgentContextLoaded
+        // Step 6: Search for relevant skills
+        let skill_snippets = match tokio::time::timeout(
+            Duration::from_secs(5),
+            query_skill_search(&nats, &inbound.text, envelope.scope.as_deref()),
+        )
+        .await
+        {
+            Ok(Ok(resp)) => {
+                info!(
+                    event_id = %envelope.id,
+                    count = resp.skills.len(),
+                    "Skill search returned results"
+                );
+                resp.skills
+                    .into_iter()
+                    .filter_map(|s| serde_json::to_value(s).ok())
+                    .collect()
+            }
+            Ok(Err(err)) => {
+                warn!(
+                    %err,
+                    event_id = %envelope.id,
+                    "Skill search failed; continuing without skills"
+                );
+                Vec::new()
+            }
+            Err(_) => {
+                warn!(
+                    event_id = %envelope.id,
+                    "Skill search timed out; continuing without skills"
+                );
+                Vec::new()
+            }
+        };
+
+        // Step 7: Assemble AgentContextLoaded
         let context_loaded = assemble_context(
             envelope.clone(),
             context_resp,
             vector_resp,
             tasks_resp,
             history_resp,
+            skill_snippets,
         );
 
-        // Step 7: Publish agent.context.loaded
+        // Step 8: Publish agent.context.loaded
         let context_envelope = EventEnvelope::new(
             "agent.context.loaded",
             "graph-context-loader",
@@ -567,6 +640,7 @@ async fn main() -> Result<()> {
             similar = context_loaded.similar_content.len(),
             tasks = context_loaded.active_tasks.len(),
             history = context_loaded.conversation_history.len(),
+            skills = context_loaded.skill_snippets.len(),
             "Published agent.context.loaded"
         );
     }

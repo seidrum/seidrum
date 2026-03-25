@@ -275,6 +275,7 @@ async fn handle_provider_request(
     let mut total_input_tokens: u32 = 0;
     let mut total_output_tokens: u32 = 0;
     let mut final_content: Option<String> = None;
+    let mut tool_rounds_count: u32 = 0;
     let start = Instant::now();
 
     for round in 0..=max_tool_rounds {
@@ -282,11 +283,7 @@ async fn handle_provider_request(
 
         let api_request = GeminiRequest {
             contents: messages.clone(),
-            system_instruction: if round == 0 {
-                system_instruction.clone()
-            } else {
-                system_instruction.clone()
-            },
+            system_instruction: system_instruction.clone(),
             generation_config: Some(GeminiGenerationConfig {
                 temperature,
                 max_output_tokens: Some(response_max_tokens),
@@ -378,6 +375,7 @@ async fn handle_provider_request(
         }
 
         // Tool calls present -- execute them via tool dispatcher
+        tool_rounds_count += 1;
         info!(
             tool_count = tool_calls.len(),
             round, "Executing tool calls via tool dispatcher"
@@ -489,7 +487,7 @@ async fn handle_provider_request(
         },
         duration_ms,
         finish_reason: "stop".to_string(),
-        tool_rounds: 0,
+        tool_rounds: tool_rounds_count,
     };
 
     info!(
