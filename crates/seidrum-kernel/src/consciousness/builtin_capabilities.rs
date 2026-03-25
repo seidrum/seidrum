@@ -536,21 +536,8 @@ pub async fn handle_save_skill(
     }
 }
 
-// ---------------------------------------------------------------------------
-// Helpers
-// ---------------------------------------------------------------------------
-
-/// NATS request/reply helper.
-async fn nats_request<T: serde::Serialize, R: serde::de::DeserializeOwned>(
-    nats: &async_nats::Client,
-    subject: &str,
-    payload: &T,
-) -> Result<R> {
-    let bytes = serde_json::to_vec(payload)?;
-    let response = nats.request(subject.to_string(), bytes.into()).await?;
-    let result: R = serde_json::from_slice(&response.payload)?;
-    Ok(result)
-}
+// Re-export shared helper
+use super::nats_request;
 
 /// Tool schemas for all built-in capabilities (for LLM context).
 pub fn builtin_tool_schemas() -> Vec<seidrum_common::events::ToolSchema> {

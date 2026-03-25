@@ -1546,6 +1546,7 @@ async fn handle_skill_save(
         "tags": req.tags,
         "updated_at": &now,
         "learned_from": req.learned_from,
+        "embedding": if req.embedding.is_empty() { serde_json::json!(null) } else { serde_json::json!(req.embedding) },
     });
 
     // Use AQL UPSERT with separate INSERT/UPDATE to preserve created_at

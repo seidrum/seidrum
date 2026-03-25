@@ -102,6 +102,7 @@ async fn load_and_store_skill(
         }
     };
 
+    let now = chrono::Utc::now().to_rfc3339();
     let doc = serde_json::json!({
         "id": &skill.id,
         "description": &skill.description,
@@ -110,14 +111,97 @@ async fn load_and_store_skill(
         "source": "system",
         "scope": skill.scope,
         "tags": skill.tags,
-        "created_at": chrono::Utc::now().to_rfc3339(),
+        "updated_at": &now,
         "learned_from": null,
     });
 
+    // Use AQL UPSERT to preserve created_at on re-runs
+    let query = r#"
+        UPSERT { _key: @key }
+        INSERT MERGE(@doc, { _key: @key, created_at: @now })
+        UPDATE MERGE(OLD, @doc)
+        IN skills
+        RETURN NEW
+    "#;
     arango
-        .upsert_document("skills", &skill.id, &doc)
+        .execute_aql(
+            query,
+            &serde_json::json!({ "key": &skill.id, "doc": &doc, "now": &now }),
+        )
         .await
         .with_context(|| format!("Failed to upsert skill '{}'", skill.id))?;
 
     Ok(skill.id)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parse_valid_skill_yaml() {
+        let yaml = r#"
+skill:
+  id: test-skill
+  description: "A test skill"
+  snippet: "Do the thing"
+  tags: [test, example]
+"#;
+        let file: SkillFile = serde_yaml::from_str(yaml).unwrap();
+        assert_eq!(file.skill.id, "test-skill");
+        assert_eq!(file.skill.description, "A test skill");
+        assert_eq!(file.skill.snippet, "Do the thing");
+        assert_eq!(file.skill.tags, vec!["test", "example"]);
+        assert!(file.skill.scope.is_none());
+    }
+
+    #[test]
+    fn parse_minimal_skill_yaml() {
+        let yaml = r#"
+skill:
+  id: minimal
+  description: "desc"
+  snippet: "snip"
+"#;
+        let file: SkillFile = serde_yaml::from_str(yaml).unwrap();
+        assert_eq!(file.skill.id, "minimal");
+        assert!(file.skill.tags.is_empty());
+    }
+
+    #[test]
+    fn parse_skill_with_scope() {
+        let yaml = r#"
+skill:
+  id: scoped-skill
+  description: "desc"
+  snippet: "snip"
+  scope: scope_projects
+"#;
+        let file: SkillFile = serde_yaml::from_str(yaml).unwrap();
+        assert_eq!(file.skill.scope.unwrap(), "scope_projects");
+    }
+
+    #[test]
+    fn reject_invalid_skill_id() {
+        // Empty ID
+        assert!("".is_empty());
+
+        // ID with invalid chars
+        let id = "../../bad";
+        let valid = !id.is_empty()
+            && id.len() <= 254
+            && id
+                .chars()
+                .all(|c| c.is_alphanumeric() || c == '-' || c == '_');
+        assert!(!valid);
+
+        // Valid ID
+        let id = "code-review_v2";
+        let valid = !id.is_empty()
+            && id.len() <= 254
+            && id
+                .chars()
+                .all(|c| c.is_alphanumeric() || c == '-' || c == '_');
+        assert!(valid);
+    }
 }

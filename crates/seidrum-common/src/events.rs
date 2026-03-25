@@ -952,6 +952,9 @@ pub struct SkillSaveRequest {
     pub tags: Vec<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub learned_from: Option<String>,
+    /// Pre-computed embedding vector (if available).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub embedding: Vec<f64>,
 }
 
 /// Response to skill save.
@@ -1278,5 +1281,79 @@ mod tests {
         assert_eq!(event.model_preferences, deserialized.model_preferences);
         assert_eq!(event.correlation_id, deserialized.correlation_id);
         assert_eq!(event.scope, deserialized.scope);
+    }
+
+    #[test]
+    fn roundtrip_skill_search_request() {
+        let req = SkillSearchRequest {
+            query: "code review".to_string(),
+            limit: Some(5),
+            scope: Some("scope_root".to_string()),
+        };
+        let json = serde_json::to_string(&req).unwrap();
+        let de: SkillSearchRequest = serde_json::from_str(&json).unwrap();
+        assert_eq!(req.query, de.query);
+        assert_eq!(req.limit, de.limit);
+        assert_eq!(req.scope, de.scope);
+    }
+
+    #[test]
+    fn roundtrip_skill_save_request() {
+        let req = SkillSaveRequest {
+            id: Some("test-skill".to_string()),
+            description: "A test skill".to_string(),
+            snippet: "Do things correctly".to_string(),
+            source: "learned".to_string(),
+            scope: None,
+            tags: vec!["test".to_string()],
+            learned_from: Some("conv_123".to_string()),
+            embedding: vec![0.1, 0.2, 0.3],
+        };
+        let json = serde_json::to_string(&req).unwrap();
+        let de: SkillSaveRequest = serde_json::from_str(&json).unwrap();
+        assert_eq!(req.description, de.description);
+        assert_eq!(req.snippet, de.snippet);
+        assert_eq!(req.embedding.len(), de.embedding.len());
+    }
+
+    #[test]
+    fn roundtrip_consciousness_event() {
+        let event = ConsciousnessEvent {
+            agent_id: "personal-assistant".to_string(),
+            event_type: "user_message".to_string(),
+            source_subject: Some("channel.telegram.inbound".to_string()),
+            conversation_id: Some("conv_123".to_string()),
+            payload: serde_json::json!({"text": "hello"}),
+            origin: None,
+        };
+        let json = serde_json::to_string(&event).unwrap();
+        let de: ConsciousnessEvent = serde_json::from_str(&json).unwrap();
+        assert_eq!(event.agent_id, de.agent_id);
+        assert_eq!(event.event_type, de.event_type);
+        assert_eq!(event.conversation_id, de.conversation_id);
+    }
+
+    #[test]
+    fn conversation_message_with_active_skills() {
+        let msg = ConversationMessage {
+            role: "assistant".to_string(),
+            content: Some("I'll review this code.".to_string()),
+            tool_calls: vec![],
+            tool_results: vec![],
+            media: vec![],
+            timestamp: Utc::now(),
+            active_skills: vec!["code-review".to_string()],
+        };
+        let json = serde_json::to_string(&msg).unwrap();
+        let de: ConversationMessage = serde_json::from_str(&json).unwrap();
+        assert_eq!(de.active_skills, vec!["code-review"]);
+    }
+
+    #[test]
+    fn conversation_message_without_active_skills() {
+        // Old format without active_skills should still deserialize
+        let json = r#"{"role":"user","content":"hello","timestamp":"2026-03-24T10:00:00Z"}"#;
+        let msg: ConversationMessage = serde_json::from_str(json).unwrap();
+        assert!(msg.active_skills.is_empty());
     }
 }

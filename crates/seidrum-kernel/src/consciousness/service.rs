@@ -409,6 +409,13 @@ async fn handle_builtin_call(
                     is_error: true,
                 };
             }
+            // Try to generate embedding for the skill
+            let embed_text = format!("{}\n{}", args.description, args.snippet);
+            let embedding = match crate::embedding::service::EmbeddingService::from_env() {
+                Ok(svc) if svc.is_available() => svc.embed(&embed_text).await.unwrap_or_default(),
+                _ => vec![],
+            };
+
             let req = seidrum_common::events::SkillSaveRequest {
                 id: None,
                 description: args.description,
@@ -417,6 +424,7 @@ async fn handle_builtin_call(
                 scope: None,
                 tags: args.tags.unwrap_or_default(),
                 learned_from: None,
+                embedding,
             };
             builtin_capabilities::handle_save_skill(nats, &req).await
         }
@@ -558,13 +566,5 @@ fn load_system_prompt() -> Result<String> {
     }
 }
 
-async fn nats_request<T: serde::Serialize, R: serde::de::DeserializeOwned>(
-    nats: &async_nats::Client,
-    subject: &str,
-    payload: &T,
-) -> Result<R> {
-    let bytes = serde_json::to_vec(payload)?;
-    let response = nats.request(subject.to_string(), bytes.into()).await?;
-    let result: R = serde_json::from_slice(&response.payload)?;
-    Ok(result)
-}
+// nats_request is in super::nats_request (consciousness/mod.rs)
+use super::nats_request;
