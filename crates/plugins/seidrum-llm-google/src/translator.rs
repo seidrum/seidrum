@@ -109,6 +109,7 @@ pub fn gemini_to_unified_response(
     agent_id: &str,
     total_input_tokens: u32,
     total_output_tokens: u32,
+    tool_rounds: u32,
 ) -> LlmResponse {
     let total_tokens = total_input_tokens + total_output_tokens;
 
@@ -146,7 +147,7 @@ pub fn gemini_to_unified_response(
         },
         duration_ms,
         finish_reason,
-        tool_rounds: 0,
+        tool_rounds,
     }
 }
 
