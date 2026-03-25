@@ -647,3 +647,79 @@ pub struct ConsciousnessEvent {
 ### `capability.call.consciousness` (request/reply)
 
 Built-in capability calls handled by the consciousness service: `brain-query`, `subscribe-events`, `unsubscribe-events`, `delegate-task`, `schedule-wake`, `send-notification`, `get-conversation`, `list-conversations`.
+
+---
+
+## Skill Events
+
+### `brain.skill.search` (request/reply)
+
+Search skills by semantic similarity. The kernel embeds the query and performs a vector search against the `skills` collection.
+
+```rust
+pub struct SkillSearchRequest {
+    pub query: String,
+    pub limit: Option<u32>,
+    pub scope: Option<String>,
+}
+
+pub struct SkillSearchResult {
+    pub id: String,
+    pub description: String,
+    pub snippet: String,
+    pub score: f64,
+    pub source: String,
+    pub tags: Vec<String>,
+}
+
+pub struct SkillSearchResponse {
+    pub skills: Vec<SkillSearchResult>,
+}
+```
+
+### `brain.skill.save` (request/reply)
+
+Save a new skill or update an existing one. If `id` is `None`, the kernel generates a new ID. The kernel computes an embedding from the description if `embedding` is empty.
+
+```rust
+pub struct SkillSaveRequest {
+    pub id: Option<String>,
+    pub description: String,
+    pub snippet: String,
+    pub source: String,              // "system" | "user" | "learned" | "agent:{id}"
+    pub scope: Option<String>,
+    pub tags: Vec<String>,
+    pub learned_from: Option<String>, // conversation ID that produced the skill
+    pub embedding: Vec<f64>,          // pre-computed embedding (optional)
+}
+
+pub struct SkillSaveResponse {
+    pub skill_id: String,
+    pub is_new: bool,
+}
+```
+
+### `brain.skill.get` (request/reply)
+
+Retrieve a single skill by its ID. Returns a `SkillSearchResult` in the reply payload (or an error if not found).
+
+```rust
+pub struct SkillGetRequest {
+    pub skill_id: String,
+}
+```
+
+### `brain.skill.list` (request/reply)
+
+List skills with optional filtering by source.
+
+```rust
+pub struct SkillListRequest {
+    pub source_filter: Option<String>,
+    pub limit: Option<u32>,
+}
+
+pub struct SkillListResponse {
+    pub skills: Vec<SkillSearchResult>,
+}
+```

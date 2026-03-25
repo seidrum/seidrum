@@ -622,3 +622,53 @@ When a plugin declares a config schema:
 - Config changes are validated against the schema before saving
 - Updated config is persisted to plugin storage (`namespace: "config"`)
 - The plugin is notified via `plugin.{id}.config.update` NATS subject
+
+## Skills System
+
+The skills system provides behavioral RAG for agents -- reusable instructions and procedures that are retrieved by semantic similarity and injected into agent context at inference time. Skills are managed through built-in capabilities and a CLI interface.
+
+### Built-in Skill Capabilities
+
+The consciousness service registers three skill-related capabilities:
+
+| Capability | Description |
+|-----------|-------------|
+| `search-skills` | Search skills by semantic query. Returns matching skill IDs, descriptions, snippets, and relevance scores. |
+| `load-skill` | Explicitly load a skill by ID into the current conversation context, ensuring it persists across turns. |
+| `save-skill` | Create a new skill from the current conversation (for learned behavior). Stores description, snippet, source, and tags. |
+
+These capabilities are available to all agents via `capability.call.consciousness` and use the `brain.skill.*` NATS subjects documented in the [Event Catalog](EVENT_CATALOG.md).
+
+### Skill YAML Format
+
+Skills are defined as YAML files in the `skills/` directory and indexed on kernel startup:
+
+```yaml
+skill:
+  id: code-review
+  description: "Reviewing code changes for bugs, security issues, and style problems"
+  snippet: |
+    When reviewing code: check for OWASP top 10 vulnerabilities, missing error
+    handling, test coverage gaps, and performance implications. Report each issue
+    with file, line, severity, and recommended fix.
+  tags: [code, review, security]
+```
+
+Fields:
+- **id** — Unique identifier for the skill
+- **description** — Short text describing when the skill applies (used for embedding search)
+- **snippet** — The behavioral instruction injected into the agent's context when the skill is active
+- **tags** — Classification tags for filtering and organization
+
+Skills can also be created at runtime by agents (source `"learned"` or `"user"`) and by other agents (source `"agent:{id}"`).
+
+### CLI Commands
+
+```bash
+seidrum skill list                              # List all installed skills
+seidrum skill install <name>                    # Install a skill package from skills/ or a registry
+seidrum skill install <org>/<name>              # Install from an organization namespace
+seidrum skill remove <name>                     # Remove a skill and its embeddings
+```
+
+On install, the CLI copies YAML files to `skills/`, computes embeddings, and stores them in the `skills` ArangoDB collection. Skills are available immediately for retrieval by any agent.
