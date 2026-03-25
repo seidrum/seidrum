@@ -15,7 +15,8 @@ use seidrum_common::events::{
     ConversationCreateResponse, ConversationFindRequest, ConversationGetRequest,
     ConversationListRequest, ConversationListResponse, ConversationSummary, EntityUpsertRequest,
     EntityUpserted, EventEnvelope, FactUpsertRequest, FactUpserted, ScopeAssignRequest,
-    ScopeAssigned,
+    ScopeAssigned, SkillGetRequest, SkillListRequest, SkillListResponse, SkillSaveRequest,
+    SkillSaveResponse, SkillSearchRequest, SkillSearchResponse, SkillSearchResult,
 };
 use serde_json::Value;
 use tracing::{debug, error, info, warn};
@@ -99,6 +100,26 @@ impl BrainService {
             .subscribe("brain.conversation.list")
             .await
             .context("subscribe brain.conversation.list")?;
+        let mut skill_search = self
+            .nats
+            .subscribe("brain.skill.search")
+            .await
+            .context("subscribe brain.skill.search")?;
+        let mut skill_save = self
+            .nats
+            .subscribe("brain.skill.save")
+            .await
+            .context("subscribe brain.skill.save")?;
+        let mut skill_get = self
+            .nats
+            .subscribe("brain.skill.get")
+            .await
+            .context("subscribe brain.skill.get")?;
+        let mut skill_list = self
+            .nats
+            .subscribe("brain.skill.list")
+            .await
+            .context("subscribe brain.skill.list")?;
 
         info!("Brain service started — listening on brain.* subjects");
 
@@ -201,6 +222,42 @@ impl BrainService {
                     tokio::spawn(async move {
                         if let Err(e) = handle_conversation_list(&arango, &nats, msg).await {
                             error!(error = %e, "brain.conversation.list handler failed");
+                        }
+                    });
+                }
+                Some(msg) = skill_search.next() => {
+                    let arango = self.arango.clone();
+                    let nats = self.nats.clone();
+                    tokio::spawn(async move {
+                        if let Err(e) = handle_skill_search(&arango, &nats, msg).await {
+                            error!(error = %e, "brain.skill.search handler failed");
+                        }
+                    });
+                }
+                Some(msg) = skill_save.next() => {
+                    let arango = self.arango.clone();
+                    let nats = self.nats.clone();
+                    tokio::spawn(async move {
+                        if let Err(e) = handle_skill_save(&arango, &nats, msg).await {
+                            error!(error = %e, "brain.skill.save handler failed");
+                        }
+                    });
+                }
+                Some(msg) = skill_get.next() => {
+                    let arango = self.arango.clone();
+                    let nats = self.nats.clone();
+                    tokio::spawn(async move {
+                        if let Err(e) = handle_skill_get(&arango, &nats, msg).await {
+                            error!(error = %e, "brain.skill.get handler failed");
+                        }
+                    });
+                }
+                Some(msg) = skill_list.next() => {
+                    let arango = self.arango.clone();
+                    let nats = self.nats.clone();
+                    tokio::spawn(async move {
+                        if let Err(e) = handle_skill_list(&arango, &nats, msg).await {
+                            error!(error = %e, "brain.skill.list handler failed");
                         }
                     });
                 }
@@ -1349,6 +1406,260 @@ async fn handle_conversation_list(
 
     if let Some(reply) = msg.reply {
         let list_resp = ConversationListResponse { conversations };
+        let _ = nats
+            .publish(reply, serde_json::to_vec(&list_resp)?.into())
+            .await;
+    }
+
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// Skill handlers
+// ---------------------------------------------------------------------------
+
+/// Search skills by semantic similarity (brute-force cosine for now).
+async fn handle_skill_search(
+    arango: &ArangoClient,
+    nats: &async_nats::Client,
+    msg: async_nats::Message,
+) -> Result<()> {
+    let req: SkillSearchRequest =
+        serde_json::from_slice(&msg.payload).context("parse skill.search")?;
+
+    let limit = req.limit.unwrap_or(5);
+
+    // Text-based search with score capped at 1.0.
+    // Vector search (ANN) can be added when the vector index is created.
+    let (query, bind_vars) = if req.query.is_empty() {
+        // Empty query returns all skills
+        (
+            r#"
+                FOR doc IN skills
+                    SORT doc.created_at DESC
+                    LIMIT @limit
+                    RETURN {
+                        id: doc.id, description: doc.description, snippet: doc.snippet,
+                        score: 1.0, source: doc.source, tags: doc.tags || []
+                    }
+            "#,
+            serde_json::json!({ "limit": limit }),
+        )
+    } else if let Some(ref scope) = req.scope {
+        (
+            r#"
+                FOR doc IN skills
+                    LET desc_match = CONTAINS(LOWER(doc.description), LOWER(@query)) ? 0.6 : 0.0
+                    LET snip_match = CONTAINS(LOWER(doc.snippet), LOWER(@query)) ? 0.4 : 0.0
+                    LET score = MIN(desc_match + snip_match, 1.0)
+                    FILTER score > 0
+                    FILTER doc.scope == null OR doc.scope == @scope
+                    SORT score DESC
+                    LIMIT @limit
+                    RETURN {
+                        id: doc.id, description: doc.description, snippet: doc.snippet,
+                        score, source: doc.source, tags: doc.tags || []
+                    }
+            "#,
+            serde_json::json!({ "query": &req.query, "limit": limit, "scope": scope }),
+        )
+    } else {
+        (
+            r#"
+                FOR doc IN skills
+                    LET desc_match = CONTAINS(LOWER(doc.description), LOWER(@query)) ? 0.6 : 0.0
+                    LET snip_match = CONTAINS(LOWER(doc.snippet), LOWER(@query)) ? 0.4 : 0.0
+                    LET score = MIN(desc_match + snip_match, 1.0)
+                    FILTER score > 0
+                    SORT score DESC
+                    LIMIT @limit
+                    RETURN {
+                        id: doc.id, description: doc.description, snippet: doc.snippet,
+                        score, source: doc.source, tags: doc.tags || []
+                    }
+            "#,
+            serde_json::json!({ "query": &req.query, "limit": limit }),
+        )
+    };
+
+    let resp = arango.execute_aql(query, &bind_vars).await?;
+    let skills: Vec<SkillSearchResult> = resp
+        .get("result")
+        .and_then(|v| v.as_array())
+        .map(|arr| {
+            arr.iter()
+                .filter_map(|v| serde_json::from_value(v.clone()).ok())
+                .collect()
+        })
+        .unwrap_or_default();
+
+    if let Some(reply) = msg.reply {
+        let search_resp = SkillSearchResponse { skills };
+        let _ = nats
+            .publish(reply, serde_json::to_vec(&search_resp)?.into())
+            .await;
+    }
+
+    Ok(())
+}
+
+/// Save a skill (upsert by ID).
+async fn handle_skill_save(
+    arango: &ArangoClient,
+    nats: &async_nats::Client,
+    msg: async_nats::Message,
+) -> Result<()> {
+    let req: SkillSaveRequest = serde_json::from_slice(&msg.payload).context("parse skill.save")?;
+
+    // Validate required fields
+    if req.description.trim().is_empty() || req.snippet.trim().is_empty() {
+        if let Some(reply) = msg.reply {
+            let resp = serde_json::json!({"error": "description and snippet are required"});
+            let _ = nats.publish(reply, serde_json::to_vec(&resp)?.into()).await;
+        }
+        return Ok(());
+    }
+
+    let skill_id = req.id.unwrap_or_else(|| ulid::Ulid::new().to_string());
+
+    // Validate skill ID format
+    if skill_id.is_empty()
+        || skill_id.len() > 254
+        || !skill_id
+            .chars()
+            .all(|c| c.is_alphanumeric() || c == '-' || c == '_')
+    {
+        if let Some(reply) = msg.reply {
+            let resp = serde_json::json!({"error": "Invalid skill ID: must be 1-254 alphanumeric, dash, or underscore"});
+            let _ = nats.publish(reply, serde_json::to_vec(&resp)?.into()).await;
+        }
+        return Ok(());
+    }
+
+    let now = chrono::Utc::now().to_rfc3339();
+    let doc = serde_json::json!({
+        "id": &skill_id,
+        "description": &req.description,
+        "snippet": &req.snippet,
+        "source": &req.source,
+        "scope": req.scope,
+        "tags": req.tags,
+        "updated_at": &now,
+        "learned_from": req.learned_from,
+        "embedding": if req.embedding.is_empty() { serde_json::json!(null) } else { serde_json::json!(req.embedding) },
+    });
+
+    // Use AQL UPSERT with separate INSERT/UPDATE to preserve created_at
+    let query = r#"
+        UPSERT { _key: @key }
+        INSERT MERGE(@doc, { _key: @key, created_at: @now })
+        UPDATE MERGE(OLD, @doc)
+        IN skills
+        RETURN { is_new: IS_NULL(OLD) }
+    "#;
+    let bind_vars = serde_json::json!({
+        "key": &skill_id,
+        "doc": &doc,
+        "now": &now,
+    });
+
+    let result = arango.execute_aql(query, &bind_vars).await?;
+    let is_new = result
+        .get("result")
+        .and_then(|v| v.as_array())
+        .and_then(|a| a.first())
+        .and_then(|v| v.get("is_new"))
+        .and_then(|v| v.as_bool())
+        .unwrap_or(true);
+
+    info!(skill_id = %skill_id, %is_new, "Skill saved");
+
+    if let Some(reply) = msg.reply {
+        let resp = SkillSaveResponse { skill_id, is_new };
+        let _ = nats.publish(reply, serde_json::to_vec(&resp)?.into()).await;
+    }
+
+    Ok(())
+}
+
+/// Get a skill by ID.
+async fn handle_skill_get(
+    arango: &ArangoClient,
+    nats: &async_nats::Client,
+    msg: async_nats::Message,
+) -> Result<()> {
+    let req: SkillGetRequest = serde_json::from_slice(&msg.payload).context("parse skill.get")?;
+
+    let doc = arango.get_document("skills", &req.skill_id).await?;
+
+    if let Some(reply) = msg.reply {
+        let resp = doc.unwrap_or(serde_json::json!(null));
+        let _ = nats.publish(reply, serde_json::to_vec(&resp)?.into()).await;
+    }
+
+    Ok(())
+}
+
+/// List skills with optional source filter.
+async fn handle_skill_list(
+    arango: &ArangoClient,
+    nats: &async_nats::Client,
+    msg: async_nats::Message,
+) -> Result<()> {
+    let req: SkillListRequest = serde_json::from_slice(&msg.payload).context("parse skill.list")?;
+
+    let limit = req.limit.unwrap_or(50);
+
+    let (query, bind_vars) = if let Some(ref source) = req.source_filter {
+        (
+            r#"
+                FOR doc IN skills
+                    FILTER doc.source == @source
+                    SORT doc.created_at DESC
+                    LIMIT @limit
+                    RETURN {
+                        id: doc.id,
+                        description: doc.description,
+                        snippet: doc.snippet,
+                        score: 1.0,
+                        source: doc.source,
+                        tags: doc.tags || []
+                    }
+            "#,
+            serde_json::json!({ "source": source, "limit": limit }),
+        )
+    } else {
+        (
+            r#"
+                FOR doc IN skills
+                    SORT doc.created_at DESC
+                    LIMIT @limit
+                    RETURN {
+                        id: doc.id,
+                        description: doc.description,
+                        snippet: doc.snippet,
+                        score: 1.0,
+                        source: doc.source,
+                        tags: doc.tags || []
+                    }
+            "#,
+            serde_json::json!({ "limit": limit }),
+        )
+    };
+
+    let resp = arango.execute_aql(query, &bind_vars).await?;
+    let skills: Vec<SkillSearchResult> = resp
+        .get("result")
+        .and_then(|v| v.as_array())
+        .map(|arr| {
+            arr.iter()
+                .filter_map(|v| serde_json::from_value(v.clone()).ok())
+                .collect()
+        })
+        .unwrap_or_default();
+
+    if let Some(reply) = msg.reply {
+        let list_resp = SkillListResponse { skills };
         let _ = nats
             .publish(reply, serde_json::to_vec(&list_resp)?.into())
             .await;

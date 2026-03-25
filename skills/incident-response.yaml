@@ -1,0 +1,10 @@
+skill:
+  id: incident-response
+  description: "Responding to production incidents, outages, and system failures"
+  snippet: |
+    During an incident: 1) assess severity and impact 2) check recent deployments
+    and changes 3) examine logs and error rates 4) identify the root cause before
+    applying fixes 5) communicate status to stakeholders 6) document the timeline.
+    Prioritize service restoration over root cause analysis. Always have a rollback
+    plan before making changes.
+  tags: [ops, incident, production, monitoring]

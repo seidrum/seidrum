@@ -16,6 +16,7 @@ const VERTEX_COLLECTIONS: &[&str] = &[
     "capabilities",
     "plugin_storage",
     "conversations",
+    "skills",
 ];
 
 /// Edge collections defined in BRAIN_SCHEMA.md.

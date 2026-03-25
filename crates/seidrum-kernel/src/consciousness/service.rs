@@ -156,6 +156,15 @@ impl ConsciousnessService {
             ("send-notification", "Send a proactive message to the user"),
             ("get-conversation", "Load a conversation thread by ID"),
             ("list-conversations", "List recent conversations"),
+            (
+                "search-skills",
+                "Search for behavioral skills by semantic query",
+            ),
+            (
+                "load-skill",
+                "Load a specific skill into conversation context",
+            ),
+            ("save-skill", "Save learned behavior as a reusable skill"),
         ];
 
         let schemas = builtin_capabilities::builtin_tool_schemas();
@@ -357,6 +366,69 @@ async fn handle_builtin_call(
             builtin_capabilities::handle_list_conversations(nats, agent_id, &req).await
         }
 
+        "search-skills" => {
+            let args: SearchSkillsArgs = match parse_args("search-skills", &request.arguments) {
+                Ok(a) => a,
+                Err(resp) => return resp,
+            };
+            let req = seidrum_common::events::SkillSearchRequest {
+                query: args.query,
+                limit: args.limit,
+                scope: None,
+            };
+            builtin_capabilities::handle_search_skills(nats, &req).await
+        }
+
+        "load-skill" => {
+            let args: LoadSkillArgs = match parse_args("load-skill", &request.arguments) {
+                Ok(a) => a,
+                Err(resp) => return resp,
+            };
+            if args.skill_id.trim().is_empty() {
+                return ToolCallResponse {
+                    tool_id: "load-skill".to_string(),
+                    result: serde_json::json!({"error": "skill_id is required"}),
+                    is_error: true,
+                };
+            }
+            let req = seidrum_common::events::SkillGetRequest {
+                skill_id: args.skill_id,
+            };
+            builtin_capabilities::handle_load_skill(nats, &req).await
+        }
+
+        "save-skill" => {
+            let args: SaveSkillArgs = match parse_args("save-skill", &request.arguments) {
+                Ok(a) => a,
+                Err(resp) => return resp,
+            };
+            if args.description.trim().is_empty() || args.snippet.trim().is_empty() {
+                return ToolCallResponse {
+                    tool_id: "save-skill".to_string(),
+                    result: serde_json::json!({"error": "description and snippet are required"}),
+                    is_error: true,
+                };
+            }
+            // Try to generate embedding for the skill
+            let embed_text = format!("{}\n{}", args.description, args.snippet);
+            let embedding = match crate::embedding::service::EmbeddingService::from_env() {
+                Ok(svc) if svc.is_available() => svc.embed(&embed_text).await.unwrap_or_default(),
+                _ => vec![],
+            };
+
+            let req = seidrum_common::events::SkillSaveRequest {
+                id: None,
+                description: args.description,
+                snippet: args.snippet,
+                source: "learned".to_string(),
+                scope: None,
+                tags: args.tags.unwrap_or_default(),
+                learned_from: None,
+                embedding,
+            };
+            builtin_capabilities::handle_save_skill(nats, &req).await
+        }
+
         other => ToolCallResponse {
             tool_id: other.to_string(),
             result: serde_json::json!({"error": format!("Unknown built-in capability: {}", other)}),
@@ -368,6 +440,28 @@ async fn handle_builtin_call(
 // ---------------------------------------------------------------------------
 // Argument parsing structs (from LLM tool call arguments)
 // ---------------------------------------------------------------------------
+
+#[derive(serde::Deserialize, Default)]
+struct SearchSkillsArgs {
+    #[serde(default)]
+    query: String,
+    limit: Option<u32>,
+}
+
+#[derive(serde::Deserialize, Default)]
+struct LoadSkillArgs {
+    #[serde(default)]
+    skill_id: String,
+}
+
+#[derive(serde::Deserialize, Default)]
+struct SaveSkillArgs {
+    #[serde(default)]
+    description: String,
+    #[serde(default)]
+    snippet: String,
+    tags: Option<Vec<String>>,
+}
 
 #[derive(serde::Deserialize, Default)]
 struct SubscribeEventsArgs {
@@ -472,13 +566,5 @@ fn load_system_prompt() -> Result<String> {
     }
 }
 
-async fn nats_request<T: serde::Serialize, R: serde::de::DeserializeOwned>(
-    nats: &async_nats::Client,
-    subject: &str,
-    payload: &T,
-) -> Result<R> {
-    let bytes = serde_json::to_vec(payload)?;
-    let response = nats.request(subject.to_string(), bytes.into()).await?;
-    let result: R = serde_json::from_slice(&response.payload)?;
-    Ok(result)
-}
+// nats_request is in super::nats_request (consciousness/mod.rs)
+use super::nats_request;

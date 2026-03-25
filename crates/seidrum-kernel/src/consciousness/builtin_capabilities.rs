@@ -207,6 +207,7 @@ pub async fn handle_delegate_task(
             tool_results: vec![],
             media: vec![],
             timestamp: Utc::now(),
+            active_skills: vec![],
         },
     };
 
@@ -427,20 +428,116 @@ pub async fn handle_list_conversations(
 }
 
 // ---------------------------------------------------------------------------
-// Helpers
+// Skill handlers
 // ---------------------------------------------------------------------------
 
-/// NATS request/reply helper.
-async fn nats_request<T: serde::Serialize, R: serde::de::DeserializeOwned>(
+/// Handle `search-skills` — search skills by text query via brain service.
+pub async fn handle_search_skills(
     nats: &async_nats::Client,
-    subject: &str,
-    payload: &T,
-) -> Result<R> {
-    let bytes = serde_json::to_vec(payload)?;
-    let response = nats.request(subject.to_string(), bytes.into()).await?;
-    let result: R = serde_json::from_slice(&response.payload)?;
-    Ok(result)
+    args: &seidrum_common::events::SkillSearchRequest,
+) -> ToolCallResponse {
+    match tokio::time::timeout(
+        Duration::from_secs(5),
+        nats_request::<_, seidrum_common::events::SkillSearchResponse>(
+            nats,
+            "brain.skill.search",
+            args,
+        ),
+    )
+    .await
+    {
+        Ok(Ok(resp)) => ToolCallResponse {
+            tool_id: "search-skills".to_string(),
+            result: serde_json::to_value(resp).unwrap_or(serde_json::json!(null)),
+            is_error: false,
+        },
+        Ok(Err(e)) => ToolCallResponse {
+            tool_id: "search-skills".to_string(),
+            result: serde_json::json!({"error": e.to_string()}),
+            is_error: true,
+        },
+        Err(_) => ToolCallResponse {
+            tool_id: "search-skills".to_string(),
+            result: serde_json::json!({"error": "timeout"}),
+            is_error: true,
+        },
+    }
 }
+
+/// Handle `load-skill` — load a specific skill by ID.
+pub async fn handle_load_skill(
+    nats: &async_nats::Client,
+    args: &seidrum_common::events::SkillGetRequest,
+) -> ToolCallResponse {
+    match tokio::time::timeout(
+        Duration::from_secs(5),
+        nats_request::<_, serde_json::Value>(nats, "brain.skill.get", args),
+    )
+    .await
+    {
+        Ok(Ok(resp)) => {
+            if resp.is_null() {
+                ToolCallResponse {
+                    tool_id: "load-skill".to_string(),
+                    result: serde_json::json!({"error": format!("Skill '{}' not found", args.skill_id)}),
+                    is_error: true,
+                }
+            } else {
+                ToolCallResponse {
+                    tool_id: "load-skill".to_string(),
+                    result: resp,
+                    is_error: false,
+                }
+            }
+        }
+        Ok(Err(e)) => ToolCallResponse {
+            tool_id: "load-skill".to_string(),
+            result: serde_json::json!({"error": e.to_string()}),
+            is_error: true,
+        },
+        Err(_) => ToolCallResponse {
+            tool_id: "load-skill".to_string(),
+            result: serde_json::json!({"error": "timeout"}),
+            is_error: true,
+        },
+    }
+}
+
+/// Handle `save-skill` — save a learned behavioral skill.
+pub async fn handle_save_skill(
+    nats: &async_nats::Client,
+    args: &seidrum_common::events::SkillSaveRequest,
+) -> ToolCallResponse {
+    match tokio::time::timeout(
+        Duration::from_secs(5),
+        nats_request::<_, seidrum_common::events::SkillSaveResponse>(
+            nats,
+            "brain.skill.save",
+            args,
+        ),
+    )
+    .await
+    {
+        Ok(Ok(resp)) => ToolCallResponse {
+            tool_id: "save-skill".to_string(),
+            result: serde_json::to_value(resp).unwrap_or(serde_json::json!(null)),
+            is_error: false,
+        },
+        Ok(Err(e)) => ToolCallResponse {
+            tool_id: "save-skill".to_string(),
+            result: serde_json::json!({"error": e.to_string()}),
+            is_error: true,
+        },
+        Err(_) => ToolCallResponse {
+            tool_id: "save-skill".to_string(),
+            result: serde_json::json!({"error": "timeout"}),
+            is_error: true,
+        },
+    }
+}
+
+// Re-export shared helper
+use super::nats_request;
 
 /// Tool schemas for all built-in capabilities (for LLM context).
 pub fn builtin_tool_schemas() -> Vec<seidrum_common::events::ToolSchema> {
@@ -550,6 +647,43 @@ pub fn builtin_tool_schemas() -> Vec<seidrum_common::events::ToolSchema> {
                     "platform": { "type": "string", "description": "Filter by platform" },
                     "limit": { "type": "integer", "description": "Max results (default 20)" }
                 }
+            }),
+        },
+        ToolSchema {
+            name: "search-skills".to_string(),
+            description: "Search for behavioral skills by semantic query".to_string(),
+            parameters: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "query": { "type": "string", "description": "Natural language query to find relevant skills" },
+                    "limit": { "type": "integer", "description": "Max results (default 5)" }
+                },
+                "required": ["query"]
+            }),
+        },
+        ToolSchema {
+            name: "load-skill".to_string(),
+            description: "Load a specific skill by ID into the current conversation context"
+                .to_string(),
+            parameters: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "skill_id": { "type": "string", "description": "Skill ID to load" }
+                },
+                "required": ["skill_id"]
+            }),
+        },
+        ToolSchema {
+            name: "save-skill".to_string(),
+            description: "Save learned behavior as a reusable skill for future use".to_string(),
+            parameters: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "description": { "type": "string", "description": "What triggers this skill (used for semantic search)" },
+                    "snippet": { "type": "string", "description": "The behavioral instruction to inject when this skill is active" },
+                    "tags": { "type": "array", "items": { "type": "string" }, "description": "Tags for categorization" }
+                },
+                "required": ["description", "snippet"]
             }),
         },
     ]

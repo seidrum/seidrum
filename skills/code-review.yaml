@@ -1,0 +1,9 @@
+skill:
+  id: code-review
+  description: "Reviewing code changes for bugs, security issues, and style problems"
+  snippet: |
+    When reviewing code: check for OWASP top 10 vulnerabilities, missing error
+    handling, test coverage gaps, and performance implications. Report each issue
+    with file, line, severity, and recommended fix. Look for race conditions in
+    concurrent code and validate input at system boundaries.
+  tags: [code, review, security, quality]

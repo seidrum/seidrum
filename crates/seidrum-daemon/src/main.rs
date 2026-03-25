@@ -8,7 +8,7 @@ mod status;
 use anyhow::Result;
 use clap::Parser;
 
-use cli::{Cli, Commands, DaemonAction, PluginAction};
+use cli::{Cli, Commands, DaemonAction, PluginAction, SkillAction};
 use paths::SeidrumPaths;
 
 #[tokio::main]
@@ -45,6 +45,24 @@ async fn main() -> Result<()> {
                 let _ = daemon::stop_plugin(&paths, &name).await;
                 tokio::time::sleep(std::time::Duration::from_secs(1)).await;
                 daemon::start_plugin(&paths, &name).await
+            }
+        },
+        Commands::Skill { action } => match action {
+            SkillAction::List => {
+                println!("Skills are stored in ArangoDB. Use the dashboard or agent capabilities to manage skills.");
+                println!("System skills are loaded from the skills/ directory on kernel startup.");
+                Ok(())
+            }
+            SkillAction::Install { path } => {
+                println!("Installing skill from {}...", path);
+                println!("Note: The kernel must be running to install skills.");
+                println!("Copy the file to skills/ and restart the kernel, or use the dashboard.");
+                Ok(())
+            }
+            SkillAction::Remove { skill_id } => {
+                println!("Removing skill '{}'...", skill_id);
+                println!("Note: Use the dashboard to remove skills from the database.");
+                Ok(())
             }
         },
     }
