@@ -1,0 +1,17 @@
+# Minimal infrastructure for E2E tests.
+# Usage: docker compose -f docker-compose.test.yml up -d
+# Then:  cargo test -p seidrum-e2e -- --ignored
+
+services:
+  nats:
+    image: nats:latest
+    command: "--jetstream --store_dir /data"
+    ports:
+      - "4222:4222"
+
+  arangodb:
+    image: arangodb:3.12
+    environment:
+      ARANGO_ROOT_PASSWORD: seidrum_dev
+    ports:
+      - "8529:8529"

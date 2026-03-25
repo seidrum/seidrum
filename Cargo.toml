@@ -22,5 +22,6 @@ members = [
     "crates/plugins/seidrum-claude-code",
     "crates/plugins/seidrum-api-gateway",
     "crates/seidrum-daemon",
+    "crates/seidrum-e2e",
 ]
 resolver = "2"
