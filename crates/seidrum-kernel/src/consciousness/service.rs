@@ -33,6 +33,8 @@ pub struct ConsciousnessService {
     agents: HashMap<String, AgentDefinition>,
     system_prompt: String,
     runtime_subs: Arc<RwLock<HashMap<String, Vec<RuntimeSubscription>>>>,
+    /// Cached identity prompts: agent_id -> rendered prompt text.
+    identity_prompts: HashMap<String, String>,
 }
 
 impl ConsciousnessService {
@@ -41,10 +43,21 @@ impl ConsciousnessService {
         let agents = load_agents(agents_dir)?;
         let system_prompt = load_system_prompt()?;
 
+        // S1+S2: Cache identity prompts at startup to avoid blocking file I/O per event
+        let mut identity_prompts = HashMap::new();
+        for (agent_id, agent_def) in &agents {
+            let prompt = load_agent_identity_prompt(&agent_def.prompt);
+            if !prompt.is_empty() {
+                info!(agent_id = %agent_id, "Cached identity prompt ({} bytes)", prompt.len());
+            }
+            identity_prompts.insert(agent_id.clone(), prompt);
+        }
+
         Ok(Self {
             nats,
             agents,
             system_prompt,
+            identity_prompts,
             runtime_subs: Arc::new(RwLock::new(HashMap::new())),
         })
     }
@@ -82,8 +95,28 @@ impl ConsciousnessService {
                     );
 
                     while let Some(msg) = sub.next().await {
+                        // E1: Reject malformed messages instead of forwarding null
                         let payload: serde_json::Value =
-                            serde_json::from_slice(&msg.payload).unwrap_or(serde_json::json!(null));
+                            match serde_json::from_slice::<serde_json::Value>(&msg.payload) {
+                                Ok(v) if !v.is_null() => v,
+                                Ok(_) => {
+                                    warn!(
+                                        agent_id = %agent_id,
+                                        subject = %msg.subject,
+                                        "Skipping null payload from NATS message"
+                                    );
+                                    continue;
+                                }
+                                Err(e) => {
+                                    warn!(
+                                        agent_id = %agent_id,
+                                        subject = %msg.subject,
+                                        error = %e,
+                                        "Skipping malformed NATS message"
+                                    );
+                                    continue;
+                                }
+                            };
 
                         let event = ConsciousnessEvent {
                             agent_id: agent_id.clone(),
@@ -160,6 +193,11 @@ impl ConsciousnessService {
             let system_prompt = self.system_prompt.clone();
             let agent_def = agent_def.clone();
             let agent_id_proc = agent_id.clone();
+            let cached_identity = self
+                .identity_prompts
+                .get(agent_id)
+                .cloned()
+                .unwrap_or_default();
 
             tokio::spawn(async move {
                 info!(agent_id = %agent_id_proc, "Consciousness processor started");
@@ -170,6 +208,7 @@ impl ConsciousnessService {
                         &agent_id_proc,
                         &agent_def,
                         &system_prompt,
+                        &cached_identity,
                         &event,
                     )
                     .await
@@ -279,10 +318,18 @@ impl ConsciousnessService {
             };
 
             if let Ok(bytes) = serde_json::to_vec(&register) {
-                let _ = self
+                // E2: Log capability registration failures instead of silently ignoring
+                if let Err(e) = self
                     .nats
                     .publish("capability.register".to_string(), bytes.into())
-                    .await;
+                    .await
+                {
+                    warn!(
+                        tool_id = %tool_id,
+                        error = %e,
+                        "Failed to register built-in capability"
+                    );
+                }
             }
         }
 
@@ -549,6 +596,7 @@ async fn process_consciousness_event(
     agent_id: &str,
     agent_def: &AgentDefinition,
     system_prompt: &str,
+    cached_identity: &str,
     event: &ConsciousnessEvent,
 ) -> Result<()> {
     info!(
@@ -570,14 +618,27 @@ async fn process_consciousness_event(
     // 3. Search for relevant skills based on event content
     let skill_snippets = search_relevant_skills(nats, &user_text).await;
 
-    // 4. Build system prompt: base system prompt + identity prompt + skill snippets
-    let full_system_prompt = build_full_system_prompt(system_prompt, agent_def, &skill_snippets);
+    // 4. Build system prompt: base system prompt + cached identity prompt + skill snippets
+    let full_system_prompt =
+        build_full_system_prompt(system_prompt, agent_def, cached_identity, &skill_snippets);
 
     // 5. Build messages array from history + current event
     let messages = build_messages(&history, &user_text, event);
 
-    // 6. Build tool schemas
-    let tools = builtin_tool_schemas();
+    // 6. Build tool schemas, filtered by agent's configured tools (M2)
+    let agent_tools = &agent_def.tools;
+    let mut tools = builtin_tool_schemas();
+    if !agent_tools.is_empty() {
+        // Keep only tools that are in the agent's configured list, plus always include brain-query
+        tools.retain(|t| agent_tools.contains(&t.name) || t.name == "brain-query");
+    }
+
+    // M1: Extract correlation_id from event payload if present
+    let correlation_id = event
+        .payload
+        .get("correlation_id")
+        .and_then(|v| v.as_str())
+        .map(|s| s.to_string());
 
     // Build UnifiedLlmRequest
     let llm_request = UnifiedLlmRequest {
@@ -592,17 +653,21 @@ async fn process_consciousness_event(
         },
         routing_strategy: "best-first".to_string(),
         model_preferences: vec!["gemini-2.0-flash".to_string()],
-        correlation_id: None,
+        correlation_id,
         scope: Some(agent_def.scope.clone()),
     };
 
     // Create guardrail state
     let mut guardrail = GuardrailState::new(build_guardrail_config(agent_def));
 
+    // C1: Use configurable LLM provider instead of hardcoded "google"
+    let llm_provider = std::env::var("LLM_PROVIDER").unwrap_or_else(|_| "google".to_string());
+    let llm_subject = format!("llm.provider.{}", llm_provider);
+
     // 7. Dispatch to LLM provider (120s timeout)
     let llm_response: LlmResponse = match tokio::time::timeout(
         Duration::from_secs(120),
-        nats_request::<_, LlmResponse>(nats, "llm.provider.google", &llm_request),
+        nats_request::<_, LlmResponse>(nats, &llm_subject, &llm_request),
     )
     .await
     {
@@ -626,7 +691,9 @@ async fn process_consciousness_event(
         guardrail.add_provider_rounds(llm_response.tool_rounds);
     }
 
-    // Check guardrails after LLM response
+    // G1: Check guardrails after LLM response and enforce violations
+    let mut guardrail_triggered = false;
+    let mut guardrail_msg = String::new();
     if let Some(tool_calls) = &llm_response.tool_calls {
         for tc in tool_calls {
             if let Some(violation) = guardrail.record_turn(&tc.function_name, &tc.arguments) {
@@ -635,17 +702,41 @@ async fn process_consciousness_event(
                     ?violation,
                     "Guardrail triggered"
                 );
+                guardrail_msg = match violation {
+                    guardrails::GuardrailViolation::TurnLimitReached(n) => {
+                        format!("Tool call limit reached ({} turns). Stopping.", n)
+                    }
+                    guardrails::GuardrailViolation::TimeLimitReached(s) => {
+                        format!("Time limit reached ({}s). Stopping.", s)
+                    }
+                    guardrails::GuardrailViolation::LoopDetected { tool_name, count } => {
+                        format!(
+                            "Loop detected: {} called {} times with same args.",
+                            tool_name, count
+                        )
+                    }
+                    guardrails::GuardrailViolation::HitlRequired(n) => {
+                        format!("Human approval needed after {} turns.", n)
+                    }
+                };
+                guardrail_triggered = true;
                 break;
             }
         }
     }
 
-    let response_text = llm_response.content.clone().unwrap_or_default();
+    // Use guardrail message as response if triggered, otherwise use LLM response
+    let response_text = if guardrail_triggered {
+        guardrail_msg
+    } else {
+        llm_response.content.clone().unwrap_or_default()
+    };
 
     info!(
         agent_id = %agent_id,
         model = %llm_response.model_used,
         tokens = llm_response.tokens.total_tokens,
+        guardrail_triggered = guardrail_triggered,
         "LLM response received"
     );
 
@@ -653,10 +744,12 @@ async fn process_consciousness_event(
     append_to_conversation(nats, &conversation_id, "user", &user_text).await;
     append_to_conversation(nats, &conversation_id, "assistant", &response_text).await;
 
-    // 9. If origin exists, publish to outbound channel
-    if let Some(ref origin) = event.origin {
-        if !response_text.is_empty() {
-            publish_outbound(nats, origin, &response_text).await;
+    // 9. If origin exists, publish to outbound channel (skip if guardrail triggered)
+    if !guardrail_triggered {
+        if let Some(ref origin) = event.origin {
+            if !response_text.is_empty() {
+                publish_outbound(nats, origin, &response_text).await;
+            }
         }
     }
 
@@ -849,10 +942,11 @@ async fn search_relevant_skills(nats: &async_nats::Client, query: &str) -> Vec<S
     }
 }
 
-/// Build the full system prompt from base prompt + agent identity + skill snippets.
+/// Build the full system prompt from base prompt + cached agent identity + skill snippets.
 fn build_full_system_prompt(
     base_system_prompt: &str,
     agent_def: &AgentDefinition,
+    cached_identity: &str,
     skill_snippets: &[String],
 ) -> String {
     let mut parts: Vec<String> = Vec::new();
@@ -862,10 +956,9 @@ fn build_full_system_prompt(
         parts.push(base_system_prompt.to_string());
     }
 
-    // Agent identity prompt (loaded from disk path)
-    let identity = load_agent_identity_prompt(&agent_def.prompt);
-    if !identity.is_empty() {
-        parts.push(format!("## Agent Identity\n\n{}", identity));
+    // S1+S2: Use cached identity prompt instead of reading from disk each time
+    if !cached_identity.is_empty() {
+        parts.push(format!("## Agent Identity\n\n{}", cached_identity));
     }
 
     // Agent description

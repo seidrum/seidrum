@@ -12,6 +12,11 @@ Context: {{ scope_name }}
 ## Recent conversation
 {{ conversation_history }}
 
+{% if active_skills %}
+## Behavioral guidance
+{{ active_skills }}
+{% endif %}
+
 ## Instructions
 - Be direct and concise.
 - If you identify an actionable item, create a task.

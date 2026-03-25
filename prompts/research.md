@@ -15,6 +15,11 @@ Context: {{ scope_name }}
 ## Available tools
 {{ available_tools }}
 
+{% if active_skills %}
+## Behavioral guidance
+{{ active_skills }}
+{% endif %}
+
 ## Instructions
 - Provide thorough, well-structured analysis with citations when possible.
 - Break complex topics into clearly labeled sections.

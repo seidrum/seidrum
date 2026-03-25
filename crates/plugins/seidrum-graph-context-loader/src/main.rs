@@ -581,7 +581,7 @@ async fn main() -> Result<()> {
                 );
                 resp.skills
                     .into_iter()
-                    .map(|s| serde_json::to_value(s).unwrap_or_default())
+                    .filter_map(|s| serde_json::to_value(s).ok())
                     .collect()
             }
             Ok(Err(err)) => {

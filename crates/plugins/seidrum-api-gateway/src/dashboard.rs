@@ -166,7 +166,9 @@ pub async fn plugin_health(
     )
     .await
     {
-        Ok(Ok(resp)) => Json(serde_json::to_value(resp).unwrap()).into_response(),
+        Ok(Ok(resp)) => {
+            Json(serde_json::to_value(&resp).unwrap_or(serde_json::json!(null))).into_response()
+        }
         Ok(Err(err)) => (
             StatusCode::BAD_GATEWAY,
             Json(serde_json::json!({"error": err.to_string()})),
@@ -342,7 +344,9 @@ pub async fn list_skills(State(state): State<AppState>) -> impl IntoResponse {
     )
     .await
     {
-        Ok(Ok(resp)) => Json(serde_json::to_value(resp).unwrap()).into_response(),
+        Ok(Ok(resp)) => {
+            Json(serde_json::to_value(&resp).unwrap_or(serde_json::json!(null))).into_response()
+        }
         Ok(Err(err)) => (
             StatusCode::BAD_GATEWAY,
             Json(serde_json::json!({"error": err.to_string()})),
@@ -419,7 +423,9 @@ pub async fn list_conversations_dashboard(State(state): State<AppState>) -> impl
     )
     .await
     {
-        Ok(Ok(resp)) => Json(serde_json::to_value(resp).unwrap()).into_response(),
+        Ok(Ok(resp)) => {
+            Json(serde_json::to_value(&resp).unwrap_or(serde_json::json!(null))).into_response()
+        }
         Ok(Err(err)) => (
             StatusCode::BAD_GATEWAY,
             Json(serde_json::json!({"error": err.to_string()})),

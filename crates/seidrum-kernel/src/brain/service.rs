@@ -1361,9 +1361,33 @@ async fn handle_conversation_list(
 
     let limit = if req.limit == 0 { 20 } else { req.limit };
 
+    let agent_id_empty = req.agent_id.is_empty();
+
     let (query, bind_vars) = if let Some(ref platform) = req.platform {
-        (
-            r#"
+        if agent_id_empty {
+            (
+                r#"
+                FOR conv IN conversations
+                    FILTER conv.platform == @platform
+                    SORT conv.updated_at DESC
+                    LIMIT @limit
+                    RETURN {
+                        id: conv._key,
+                        platform: conv.platform,
+                        participants: conv.participants,
+                        message_count: LENGTH(conv.messages),
+                        state: conv.state,
+                        updated_at: conv.updated_at
+                    }
+            "#,
+                serde_json::json!({
+                    "platform": platform,
+                    "limit": limit,
+                }),
+            )
+        } else {
+            (
+                r#"
                 FOR conv IN conversations
                     FILTER conv.agent_id == @agent_id
                     FILTER conv.platform == @platform
@@ -1378,9 +1402,29 @@ async fn handle_conversation_list(
                         updated_at: conv.updated_at
                     }
             "#,
+                serde_json::json!({
+                    "agent_id": &req.agent_id,
+                    "platform": platform,
+                    "limit": limit,
+                }),
+            )
+        }
+    } else if agent_id_empty {
+        (
+            r#"
+                FOR conv IN conversations
+                    SORT conv.updated_at DESC
+                    LIMIT @limit
+                    RETURN {
+                        id: conv._key,
+                        platform: conv.platform,
+                        participants: conv.participants,
+                        message_count: LENGTH(conv.messages),
+                        state: conv.state,
+                        updated_at: conv.updated_at
+                    }
+            "#,
             serde_json::json!({
-                "agent_id": &req.agent_id,
-                "platform": platform,
                 "limit": limit,
             }),
         )

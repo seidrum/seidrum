@@ -283,11 +283,7 @@ async fn handle_provider_request(
 
         let api_request = GeminiRequest {
             contents: messages.clone(),
-            system_instruction: if round == 0 {
-                system_instruction.clone()
-            } else {
-                system_instruction.clone()
-            },
+            system_instruction: system_instruction.clone(),
             generation_config: Some(GeminiGenerationConfig {
                 temperature,
                 max_output_tokens: Some(response_max_tokens),

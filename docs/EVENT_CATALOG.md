@@ -304,6 +304,7 @@ struct LlmResponse {
     tokens: TokenUsage,
     duration_ms: u64,
     finish_reason: String,
+    tool_rounds: u32,
 }
 
 struct ToolCall {
@@ -722,4 +723,13 @@ pub struct SkillListRequest {
 pub struct SkillListResponse {
     pub skills: Vec<SkillSearchResult>,
 }
+```
+
+### `brain.skill.delete` (request/reply)
+
+Delete a skill by ID.
+
+```rust
+// Uses SkillGetRequest { skill_id: String }
+// Returns { success: bool, skill_id: String }
 ```
