@@ -20,3 +20,4 @@ target/
 # Docker volumes (if local)
 nats-data/
 arango-data/
+.claude/worktrees/
