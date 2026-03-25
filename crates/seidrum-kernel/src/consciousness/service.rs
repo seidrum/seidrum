@@ -8,17 +8,24 @@
 use std::collections::HashMap;
 use std::path::Path;
 use std::sync::Arc;
+use std::time::Duration;
 
 use anyhow::{Context, Result};
+use chrono::Utc;
 use futures::StreamExt;
 use seidrum_common::config::{load_agent_definition, AgentDefinition};
 use seidrum_common::events::{
-    ConsciousnessEvent, EventEnvelope, ToolCallRequest, ToolCallResponse, ToolRegister,
+    ChannelOutbound, ConsciousnessEvent, Conversation, ConversationAppendRequest,
+    ConversationAppendResponse, ConversationCreateRequest, ConversationCreateResponse,
+    ConversationFindRequest, ConversationGetRequest, ConversationMessage, EventEnvelope,
+    EventOrigin, LlmCallConfig, LlmResponse, SkillSearchRequest, SkillSearchResponse,
+    ToolCallRequest, ToolCallResponse, ToolRegister, UnifiedLlmRequest, UnifiedMessage,
 };
 use tokio::sync::RwLock;
-use tracing::{error, info, warn};
+use tracing::{debug, error, info, warn};
 
-use super::builtin_capabilities::{self, RuntimeSubscription};
+use super::builtin_capabilities::{self, builtin_tool_schemas, RuntimeSubscription};
+use super::guardrails::{self, GuardrailState};
 
 /// The consciousness service manages agent event streams and built-in capabilities.
 pub struct ConsciousnessService {
@@ -94,6 +101,90 @@ impl ConsciousnessService {
                     }
                 });
             }
+        }
+
+        // -----------------------------------------------------------------
+        // Consciousness event processing loop (one mpsc channel per agent)
+        // -----------------------------------------------------------------
+        // Each agent gets a dedicated tokio::mpsc channel so that events are
+        // processed SEQUENTIALLY — preventing concurrent conversation mutations.
+
+        for (agent_id, agent_def) in &self.agents {
+            let (tx, mut rx) = tokio::sync::mpsc::channel::<ConsciousnessEvent>(256);
+
+            // Spawn NATS subscriber → mpsc forwarder
+            let nats_sub = self.nats.clone();
+            let agent_id_sub = agent_id.clone();
+            let tx_clone = tx.clone();
+            tokio::spawn(async move {
+                let subject = format!("agent.{}.consciousness", agent_id_sub);
+                let mut sub = match nats_sub.subscribe(subject.clone()).await {
+                    Ok(s) => s,
+                    Err(e) => {
+                        error!(
+                            agent_id = %agent_id_sub,
+                            error = %e,
+                            "Failed to subscribe to consciousness stream"
+                        );
+                        return;
+                    }
+                };
+
+                info!(
+                    agent_id = %agent_id_sub,
+                    subject = %subject,
+                    "Consciousness processing subscription active"
+                );
+
+                while let Some(msg) = sub.next().await {
+                    let event: ConsciousnessEvent = match serde_json::from_slice(&msg.payload) {
+                        Ok(e) => e,
+                        Err(e) => {
+                            warn!(
+                                agent_id = %agent_id_sub,
+                                error = %e,
+                                "Failed to parse consciousness event"
+                            );
+                            continue;
+                        }
+                    };
+                    if tx_clone.send(event).await.is_err() {
+                        warn!(agent_id = %agent_id_sub, "Consciousness channel closed");
+                        break;
+                    }
+                }
+            });
+
+            // Spawn sequential processor
+            let nats_proc = self.nats.clone();
+            let system_prompt = self.system_prompt.clone();
+            let agent_def = agent_def.clone();
+            let agent_id_proc = agent_id.clone();
+
+            tokio::spawn(async move {
+                info!(agent_id = %agent_id_proc, "Consciousness processor started");
+
+                while let Some(event) = rx.recv().await {
+                    if let Err(e) = process_consciousness_event(
+                        &nats_proc,
+                        &agent_id_proc,
+                        &agent_def,
+                        &system_prompt,
+                        &event,
+                    )
+                    .await
+                    {
+                        error!(
+                            agent_id = %agent_id_proc,
+                            event_type = %event.event_type,
+                            error = %e,
+                            "Consciousness event processing failed"
+                        );
+                    }
+                }
+
+                info!(agent_id = %agent_id_proc, "Consciousness processor stopped");
+            });
         }
 
         // Subscribe to capability.call.consciousness for built-in capability handling
@@ -434,6 +525,524 @@ async fn handle_builtin_call(
             result: serde_json::json!({"error": format!("Unknown built-in capability: {}", other)}),
             is_error: true,
         },
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Consciousness event processing
+// ---------------------------------------------------------------------------
+
+/// Process a single consciousness event for an agent.
+///
+/// Steps:
+///   1. Find or create a conversation
+///   2. Load recent conversation history
+///   3. Search for relevant skills
+///   4. Build system prompt + skill snippets + identity prompt
+///   5. Build UnifiedLlmRequest with messages + tool schemas
+///   6. Dispatch to LLM provider via NATS request/reply
+///   7. Append user message + assistant response to conversation
+///   8. If response has origin, publish to outbound channel
+///   9. Track guardrails
+async fn process_consciousness_event(
+    nats: &async_nats::Client,
+    agent_id: &str,
+    agent_def: &AgentDefinition,
+    system_prompt: &str,
+    event: &ConsciousnessEvent,
+) -> Result<()> {
+    info!(
+        agent_id = %agent_id,
+        event_type = %event.event_type,
+        conversation_id = ?event.conversation_id,
+        "Processing consciousness event"
+    );
+
+    // Build user-facing text from event payload
+    let user_text = extract_user_text(event);
+
+    // 1. Find or create conversation
+    let conversation_id = find_or_create_conversation(nats, agent_id, agent_def, event).await?;
+
+    // 2. Load recent conversation history
+    let history = load_conversation_history(nats, &conversation_id).await;
+
+    // 3. Search for relevant skills based on event content
+    let skill_snippets = search_relevant_skills(nats, &user_text).await;
+
+    // 4. Build system prompt: base system prompt + identity prompt + skill snippets
+    let full_system_prompt = build_full_system_prompt(system_prompt, agent_def, &skill_snippets);
+
+    // 5. Build messages array from history + current event
+    let messages = build_messages(&history, &user_text, event);
+
+    // 6. Build tool schemas
+    let tools = builtin_tool_schemas();
+
+    // Build UnifiedLlmRequest
+    let llm_request = UnifiedLlmRequest {
+        agent_id: agent_id.to_string(),
+        messages,
+        system_prompt: Some(full_system_prompt),
+        tools,
+        config: LlmCallConfig {
+            temperature: Some(0.7),
+            max_tokens: Some(4096),
+            top_p: None,
+        },
+        routing_strategy: "best-first".to_string(),
+        model_preferences: vec!["gemini-2.0-flash".to_string()],
+        correlation_id: None,
+        scope: Some(agent_def.scope.clone()),
+    };
+
+    // Create guardrail state
+    let mut guardrail = GuardrailState::new(build_guardrail_config(agent_def));
+
+    // 7. Dispatch to LLM provider (120s timeout)
+    let llm_response: LlmResponse = match tokio::time::timeout(
+        Duration::from_secs(120),
+        nats_request::<_, LlmResponse>(nats, "llm.provider.google", &llm_request),
+    )
+    .await
+    {
+        Ok(Ok(resp)) => resp,
+        Ok(Err(e)) => {
+            error!(
+                agent_id = %agent_id,
+                error = %e,
+                "LLM request failed"
+            );
+            return Err(e.context("LLM request failed"));
+        }
+        Err(_) => {
+            error!(agent_id = %agent_id, "LLM request timed out (120s)");
+            return Err(anyhow::anyhow!("LLM request timed out"));
+        }
+    };
+
+    // Track guardrail rounds from provider
+    if llm_response.tool_rounds > 0 {
+        guardrail.add_provider_rounds(llm_response.tool_rounds);
+    }
+
+    // Check guardrails after LLM response
+    if let Some(tool_calls) = &llm_response.tool_calls {
+        for tc in tool_calls {
+            if let Some(violation) = guardrail.record_turn(&tc.function_name, &tc.arguments) {
+                warn!(
+                    agent_id = %agent_id,
+                    ?violation,
+                    "Guardrail triggered"
+                );
+                break;
+            }
+        }
+    }
+
+    let response_text = llm_response.content.clone().unwrap_or_default();
+
+    info!(
+        agent_id = %agent_id,
+        model = %llm_response.model_used,
+        tokens = llm_response.tokens.total_tokens,
+        "LLM response received"
+    );
+
+    // 8. Append user message + assistant response to conversation
+    append_to_conversation(nats, &conversation_id, "user", &user_text).await;
+    append_to_conversation(nats, &conversation_id, "assistant", &response_text).await;
+
+    // 9. If origin exists, publish to outbound channel
+    if let Some(ref origin) = event.origin {
+        if !response_text.is_empty() {
+            publish_outbound(nats, origin, &response_text).await;
+        }
+    }
+
+    Ok(())
+}
+
+/// Extract human-readable text from a consciousness event's payload.
+fn extract_user_text(event: &ConsciousnessEvent) -> String {
+    // Try common payload fields in priority order
+    if let Some(text) = event.payload.get("text").and_then(|v| v.as_str()) {
+        return text.to_string();
+    }
+    if let Some(msg) = event.payload.get("message").and_then(|v| v.as_str()) {
+        return msg.to_string();
+    }
+    if let Some(reason) = event.payload.get("reason").and_then(|v| v.as_str()) {
+        return format!("[{}] {}", event.event_type, reason);
+    }
+
+    // Fallback: serialize the event type + payload summary
+    format!(
+        "[{}] {}",
+        event.event_type,
+        serde_json::to_string(&event.payload).unwrap_or_else(|_| "{}".to_string())
+    )
+}
+
+/// Find an existing conversation or create a new one.
+async fn find_or_create_conversation(
+    nats: &async_nats::Client,
+    agent_id: &str,
+    agent_def: &AgentDefinition,
+    event: &ConsciousnessEvent,
+) -> Result<String> {
+    // If event already has a conversation_id, use it
+    if let Some(ref conv_id) = event.conversation_id {
+        if !conv_id.is_empty() {
+            debug!(agent_id = %agent_id, conversation_id = %conv_id, "Using existing conversation ID");
+            return Ok(conv_id.clone());
+        }
+    }
+
+    // Determine platform and metadata key for conversation lookup
+    let (platform, meta_key, meta_value) = if let Some(ref origin) = event.origin {
+        (
+            origin.platform.clone(),
+            "chat_id".to_string(),
+            origin.chat_id.clone(),
+        )
+    } else if let Some(source) = &event.source_subject {
+        // For subscribed events, use the source subject as context
+        (
+            "internal".to_string(),
+            "source_subject".to_string(),
+            source.clone(),
+        )
+    } else {
+        (
+            "internal".to_string(),
+            "event_type".to_string(),
+            event.event_type.clone(),
+        )
+    };
+
+    // Try to find existing conversation
+    let find_req = ConversationFindRequest {
+        agent_id: agent_id.to_string(),
+        platform: platform.clone(),
+        metadata_key: meta_key.clone(),
+        metadata_value: meta_value.clone(),
+    };
+
+    let found: serde_json::Value = match tokio::time::timeout(
+        Duration::from_secs(5),
+        nats_request::<_, serde_json::Value>(nats, "brain.conversation.find", &find_req),
+    )
+    .await
+    {
+        Ok(Ok(v)) => v,
+        Ok(Err(e)) => {
+            warn!(error = %e, "conversation.find failed, creating new");
+            serde_json::json!(null)
+        }
+        Err(_) => {
+            warn!("conversation.find timed out, creating new");
+            serde_json::json!(null)
+        }
+    };
+
+    // If found, extract ID
+    if !found.is_null() {
+        if let Some(id) = found.get("id").and_then(|v| v.as_str()) {
+            debug!(agent_id = %agent_id, conversation_id = %id, "Found existing conversation");
+            return Ok(id.to_string());
+        }
+    }
+
+    // Create new conversation
+    let mut metadata = HashMap::new();
+    metadata.insert(meta_key, meta_value);
+
+    let participants = if let Some(ref origin) = event.origin {
+        vec![
+            format!("user:{}", origin.chat_id),
+            format!("agent:{}", agent_id),
+        ]
+    } else {
+        vec![format!("agent:{}", agent_id)]
+    };
+
+    let create_req = ConversationCreateRequest {
+        platform,
+        participants,
+        agent_id: agent_id.to_string(),
+        scope: agent_def.scope.clone(),
+        metadata,
+    };
+
+    let create_resp: ConversationCreateResponse = tokio::time::timeout(
+        Duration::from_secs(5),
+        nats_request::<_, ConversationCreateResponse>(
+            nats,
+            "brain.conversation.create",
+            &create_req,
+        ),
+    )
+    .await
+    .map_err(|_| anyhow::anyhow!("conversation.create timed out"))?
+    .context("conversation.create failed")?;
+
+    info!(
+        agent_id = %agent_id,
+        conversation_id = %create_resp.conversation_id,
+        "Created new conversation"
+    );
+
+    Ok(create_resp.conversation_id)
+}
+
+/// Load recent conversation history (last 20 messages).
+async fn load_conversation_history(
+    nats: &async_nats::Client,
+    conversation_id: &str,
+) -> Vec<ConversationMessage> {
+    let get_req = ConversationGetRequest {
+        conversation_id: conversation_id.to_string(),
+        max_messages: 20,
+    };
+
+    let conv: Option<Conversation> = match tokio::time::timeout(
+        Duration::from_secs(5),
+        nats_request::<_, serde_json::Value>(nats, "brain.conversation.get", &get_req),
+    )
+    .await
+    {
+        Ok(Ok(v)) if !v.is_null() => serde_json::from_value(v).ok(),
+        _ => None,
+    };
+
+    conv.map(|c| c.messages).unwrap_or_default()
+}
+
+/// Search for relevant skills based on the event text.
+async fn search_relevant_skills(nats: &async_nats::Client, query: &str) -> Vec<String> {
+    if query.is_empty() {
+        return vec![];
+    }
+
+    let search_req = SkillSearchRequest {
+        query: query.to_string(),
+        limit: Some(3),
+        scope: None,
+    };
+
+    match tokio::time::timeout(
+        Duration::from_secs(5),
+        nats_request::<_, SkillSearchResponse>(nats, "brain.skill.search", &search_req),
+    )
+    .await
+    {
+        Ok(Ok(resp)) => resp.skills.into_iter().map(|s| s.snippet).collect(),
+        Ok(Err(e)) => {
+            debug!(error = %e, "Skill search failed (non-fatal)");
+            vec![]
+        }
+        Err(_) => {
+            debug!("Skill search timed out (non-fatal)");
+            vec![]
+        }
+    }
+}
+
+/// Build the full system prompt from base prompt + agent identity + skill snippets.
+fn build_full_system_prompt(
+    base_system_prompt: &str,
+    agent_def: &AgentDefinition,
+    skill_snippets: &[String],
+) -> String {
+    let mut parts: Vec<String> = Vec::new();
+
+    // Base system prompt
+    if !base_system_prompt.is_empty() {
+        parts.push(base_system_prompt.to_string());
+    }
+
+    // Agent identity prompt (loaded from disk path)
+    let identity = load_agent_identity_prompt(&agent_def.prompt);
+    if !identity.is_empty() {
+        parts.push(format!("## Agent Identity\n\n{}", identity));
+    }
+
+    // Agent description
+    if let Some(ref desc) = agent_def.description {
+        parts.push(format!("## Agent Description\n\n{}", desc));
+    }
+
+    // Skill snippets
+    if !skill_snippets.is_empty() {
+        let skills_section = skill_snippets
+            .iter()
+            .enumerate()
+            .map(|(i, s)| format!("### Skill {}\n{}", i + 1, s))
+            .collect::<Vec<_>>()
+            .join("\n\n");
+        parts.push(format!("## Active Skills\n\n{}", skills_section));
+    }
+
+    parts.join("\n\n---\n\n")
+}
+
+/// Load an agent's identity prompt from its prompt file path.
+fn load_agent_identity_prompt(prompt_path: &str) -> String {
+    let path = Path::new(prompt_path);
+    match std::fs::read_to_string(path) {
+        Ok(content) => content,
+        Err(_) => {
+            debug!(path = %prompt_path, "Agent prompt file not found, using empty identity");
+            String::new()
+        }
+    }
+}
+
+/// Build the messages array from conversation history + current event.
+fn build_messages(
+    history: &[ConversationMessage],
+    user_text: &str,
+    _event: &ConsciousnessEvent,
+) -> Vec<UnifiedMessage> {
+    let mut messages: Vec<UnifiedMessage> = Vec::new();
+
+    // Add conversation history
+    for msg in history {
+        messages.push(UnifiedMessage {
+            role: msg.role.clone(),
+            content: msg.content.clone(),
+            tool_calls: if msg.tool_calls.is_empty() {
+                None
+            } else {
+                Some(msg.tool_calls.clone())
+            },
+            tool_results: if msg.tool_results.is_empty() {
+                None
+            } else {
+                Some(msg.tool_results.clone())
+            },
+        });
+    }
+
+    // Add current user message
+    messages.push(UnifiedMessage {
+        role: "user".to_string(),
+        content: Some(user_text.to_string()),
+        tool_calls: None,
+        tool_results: None,
+    });
+
+    messages
+}
+
+/// Build guardrail config, applying per-agent overrides.
+fn build_guardrail_config(agent_def: &AgentDefinition) -> seidrum_common::events::GuardrailConfig {
+    let mut config = guardrails::default_consciousness();
+
+    if let Some(ref overrides) = agent_def.guardrails {
+        if let Some(turn_limit) = overrides.turn_limit {
+            config.turn_limit = turn_limit;
+        }
+        if let Some(time_limit) = overrides.time_limit_seconds {
+            config.time_limit_seconds = time_limit;
+        }
+        if let Some(hitl) = overrides.hitl_after_turns {
+            config.hitl_after_turns = Some(hitl);
+        }
+    }
+
+    config
+}
+
+/// Append a message to a conversation.
+async fn append_to_conversation(
+    nats: &async_nats::Client,
+    conversation_id: &str,
+    role: &str,
+    content: &str,
+) {
+    if content.is_empty() {
+        return;
+    }
+
+    let append_req = ConversationAppendRequest {
+        conversation_id: conversation_id.to_string(),
+        message: ConversationMessage {
+            role: role.to_string(),
+            content: Some(content.to_string()),
+            tool_calls: vec![],
+            tool_results: vec![],
+            media: vec![],
+            timestamp: Utc::now(),
+            active_skills: vec![],
+        },
+    };
+
+    match tokio::time::timeout(
+        Duration::from_secs(5),
+        nats_request::<_, ConversationAppendResponse>(
+            nats,
+            "brain.conversation.append",
+            &append_req,
+        ),
+    )
+    .await
+    {
+        Ok(Ok(_)) => {}
+        Ok(Err(e)) => {
+            warn!(
+                conversation_id = %conversation_id,
+                role = %role,
+                error = %e,
+                "Failed to append message to conversation"
+            );
+        }
+        Err(_) => {
+            warn!(
+                conversation_id = %conversation_id,
+                role = %role,
+                "Timeout appending message to conversation"
+            );
+        }
+    }
+}
+
+/// Publish a response to the originating channel.
+async fn publish_outbound(nats: &async_nats::Client, origin: &EventOrigin, text: &str) {
+    let outbound = ChannelOutbound {
+        platform: origin.platform.clone(),
+        chat_id: origin.chat_id.clone(),
+        text: text.to_string(),
+        format: "markdown".to_string(),
+        reply_to: origin.message_id.clone(),
+        actions: vec![],
+    };
+
+    let subject = format!("channel.{}.outbound", origin.platform);
+    let envelope = match EventEnvelope::new(&subject, "consciousness", None, None, &outbound) {
+        Ok(e) => e,
+        Err(e) => {
+            error!(error = %e, "Failed to create outbound envelope");
+            return;
+        }
+    };
+
+    match serde_json::to_vec(&envelope) {
+        Ok(bytes) => {
+            if let Err(e) = nats.publish(subject.clone(), bytes.into()).await {
+                error!(subject = %subject, error = %e, "Failed to publish outbound");
+            } else {
+                debug!(
+                    platform = %origin.platform,
+                    chat_id = %origin.chat_id,
+                    "Published outbound response"
+                );
+            }
+        }
+        Err(e) => {
+            error!(error = %e, "Failed to serialize outbound envelope");
+        }
     }
 }
 
