@@ -1509,7 +1509,7 @@ async fn handle_skill_search(
                 FOR doc IN skills
                     LET desc_match = CONTAINS(LOWER(doc.description), LOWER(@query)) ? 0.6 : 0.0
                     LET snip_match = CONTAINS(LOWER(doc.snippet), LOWER(@query)) ? 0.4 : 0.0
-                    LET score = MIN(desc_match + snip_match, 1.0)
+                    LET score = MIN([desc_match + snip_match, 1.0])
                     FILTER score > 0
                     FILTER doc.scope == null OR doc.scope == @scope
                     SORT score DESC
@@ -1527,7 +1527,7 @@ async fn handle_skill_search(
                 FOR doc IN skills
                     LET desc_match = CONTAINS(LOWER(doc.description), LOWER(@query)) ? 0.6 : 0.0
                     LET snip_match = CONTAINS(LOWER(doc.snippet), LOWER(@query)) ? 0.4 : 0.0
-                    LET score = MIN(desc_match + snip_match, 1.0)
+                    LET score = MIN([desc_match + snip_match, 1.0])
                     FILTER score > 0
                     SORT score DESC
                     LIMIT @limit
