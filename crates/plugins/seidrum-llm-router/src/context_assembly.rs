@@ -160,6 +160,26 @@ fn format_history(history: &[Value]) -> String {
         .join("\n")
 }
 
+/// Format skill snippets into a readable string for injection into the prompt.
+fn format_skills(skills: &[Value]) -> String {
+    if skills.is_empty() {
+        return String::new();
+    }
+
+    skills
+        .iter()
+        .filter_map(|s| {
+            let id = s.get("id").and_then(|v| v.as_str()).unwrap_or("unknown");
+            let snippet = s.get("snippet").and_then(|v| v.as_str()).unwrap_or("");
+            if snippet.is_empty() {
+                return None;
+            }
+            Some(format!("[Active Skill: {}]\n{}", id, snippet))
+        })
+        .collect::<Vec<_>>()
+        .join("\n\n")
+}
+
 /// Format similar content (RAG results) into a readable string.
 fn format_similar_content(content: &[Value]) -> String {
     if content.is_empty() {
@@ -209,6 +229,9 @@ fn render_prompt(template_content: &str, context: &AgentContextLoaded) -> Result
     // scope_name
     let scope_name = context.original_event.scope.as_deref().unwrap_or("default");
     tera_ctx.insert("scope_name", scope_name);
+
+    // active_skills
+    tera_ctx.insert("active_skills", &format_skills(&context.skill_snippets));
 
     // current_facts
     tera_ctx.insert("current_facts", &format_facts(&context.facts));
@@ -321,13 +344,19 @@ pub fn assemble_context(
     // 4. Proportional allocation
     let facts_budget = (remaining as f64 * 0.20) as usize;
     let tasks_budget = (remaining as f64 * 0.05) as usize;
-    let rag_budget = (remaining as f64 * 0.25) as usize;
+    let rag_budget = (remaining as f64 * 0.15) as usize;
+    let skills_budget = (remaining as f64 * 0.10) as usize;
     let _tools_budget = (remaining as f64 * 0.15) as usize;
     let history_budget = (remaining as f64 * 0.35) as usize;
 
     debug!(
         facts_budget,
-        tasks_budget, rag_budget, _tools_budget, history_budget, "Token budget allocation"
+        tasks_budget,
+        rag_budget,
+        skills_budget,
+        _tools_budget,
+        history_budget,
+        "Token budget allocation"
     );
 
     // 5. Format and truncate each section
@@ -341,6 +370,7 @@ pub fn assemble_context(
         &format_history(&context.conversation_history),
         history_budget,
     );
+    let skills_text = truncate_to_budget(&format_skills(&context.skill_snippets), skills_budget);
 
     // 6. Build messages array as simple role/content pairs
     let mut messages: Vec<SimpleMessage> = Vec::new();
@@ -418,6 +448,7 @@ pub fn assemble_context(
         &facts_text,
         &tasks_text,
         &history_text,
+        &skills_text,
     )?;
 
     let estimated_tokens = count_tokens(&budgeted_system)
@@ -446,6 +477,7 @@ fn render_budgeted_system_prompt(
     facts_text: &str,
     tasks_text: &str,
     history_text: &str,
+    skills_text: &str,
 ) -> Result<String> {
     let mut tera = tera::Tera::default();
     tera.add_raw_template("prompt", template_content)
@@ -459,6 +491,7 @@ fn render_budgeted_system_prompt(
 
     let scope_name = context.original_event.scope.as_deref().unwrap_or("default");
     tera_ctx.insert("scope_name", scope_name);
+    tera_ctx.insert("active_skills", skills_text);
     tera_ctx.insert("current_facts", facts_text);
     tera_ctx.insert("active_tasks", tasks_text);
     tera_ctx.insert("conversation_history", history_text);
@@ -532,6 +565,7 @@ mod tests {
                 serde_json::json!({"role": "user", "content": "Hello"}),
                 serde_json::json!({"role": "assistant", "content": "Hi there!"}),
             ],
+            skill_snippets: vec![],
         }
     }
 

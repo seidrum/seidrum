@@ -116,6 +116,8 @@ struct AgentContextLoaded {
     active_tasks: Vec<serde_json::Value>,
     #[serde(default)]
     conversation_history: Vec<serde_json::Value>,
+    #[serde(default)]
+    skill_snippets: Vec<serde_json::Value>,
 }
 
 // ---------------------------------------------------------------------------
