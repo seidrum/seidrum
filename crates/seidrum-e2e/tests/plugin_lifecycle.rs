@@ -46,9 +46,7 @@ async fn test_plugin_register_and_query() {
     };
 
     let bytes = serde_json::to_vec(&register).unwrap();
-    nats.publish("plugin.register", bytes.into())
-        .await
-        .unwrap();
+    nats.publish("plugin.register", bytes.into()).await.unwrap();
 
     // Give registry time to process
     tokio::time::sleep(Duration::from_millis(500)).await;

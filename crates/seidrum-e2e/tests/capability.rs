@@ -5,8 +5,7 @@
 mod common;
 
 use seidrum_common::events::{
-    ToolDescribeRequest, ToolDescribeResponse, ToolRegister, ToolSearchRequest,
-    ToolSearchResponse,
+    ToolDescribeRequest, ToolDescribeResponse, ToolRegister, ToolSearchRequest, ToolSearchResponse,
 };
 use std::time::Duration;
 
