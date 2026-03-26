@@ -5,57 +5,10 @@
 
 mod common;
 
-use serde::{Deserialize, Serialize};
-
-#[derive(Serialize)]
-struct StorageSetRequest {
-    plugin_id: String,
-    namespace: String,
-    key: String,
-    value: serde_json::Value,
-}
-
-#[derive(Deserialize)]
-struct StorageSetResponse {
-    success: bool,
-}
-
-#[derive(Serialize)]
-struct StorageGetRequest {
-    plugin_id: String,
-    namespace: String,
-    key: String,
-}
-
-#[derive(Deserialize)]
-struct StorageGetResponse {
-    found: bool,
-    value: Option<serde_json::Value>,
-}
-
-#[derive(Serialize)]
-struct StorageDeleteRequest {
-    plugin_id: String,
-    namespace: String,
-    key: String,
-}
-
-#[derive(Deserialize)]
-struct StorageDeleteResponse {
-    success: bool,
-    existed: bool,
-}
-
-#[derive(Serialize)]
-struct StorageListRequest {
-    plugin_id: String,
-    namespace: String,
-}
-
-#[derive(Deserialize)]
-struct StorageListResponse {
-    keys: Vec<String>,
-}
+use seidrum_common::events::{
+    StorageDeleteRequest, StorageDeleteResponse, StorageGetRequest, StorageGetResponse,
+    StorageListRequest, StorageListResponse, StorageSetRequest, StorageSetResponse,
+};
 
 #[tokio::test]
 #[ignore] // Requires NATS + kernel running

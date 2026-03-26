@@ -4,51 +4,11 @@
 
 mod common;
 
-use serde::{Deserialize, Serialize};
+use seidrum_common::events::{
+    ToolDescribeRequest, ToolDescribeResponse, ToolRegister, ToolSearchRequest,
+    ToolSearchResponse,
+};
 use std::time::Duration;
-
-#[derive(Serialize)]
-struct ToolRegister {
-    tool_id: String,
-    plugin_id: String,
-    name: String,
-    summary_md: String,
-    manual_md: String,
-    parameters: serde_json::Value,
-    call_subject: String,
-    kind: String,
-}
-
-#[derive(Serialize)]
-struct ToolSearchRequest {
-    query_text: String,
-    limit: Option<u32>,
-    kind_filter: Option<String>,
-}
-
-#[derive(Deserialize)]
-struct ToolSearchResponse {
-    tools: Vec<ToolSummary>,
-}
-
-#[derive(Deserialize)]
-struct ToolSummary {
-    tool_id: String,
-    name: String,
-}
-
-#[derive(Serialize)]
-struct ToolDescribeRequest {
-    tool_id: String,
-}
-
-#[derive(Deserialize)]
-struct ToolDescribeResponse {
-    tool_id: String,
-    name: String,
-    plugin_id: String,
-    call_subject: String,
-}
 
 #[tokio::test]
 #[ignore]

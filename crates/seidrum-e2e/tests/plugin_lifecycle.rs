@@ -4,35 +4,12 @@
 
 mod common;
 
-use serde::{Deserialize, Serialize};
+use seidrum_common::events::{PluginDeregister, PluginRegister};
+use serde::Deserialize;
 use std::time::Duration;
 
-#[derive(Serialize)]
-struct EventEnvelope {
-    id: String,
-    event_type: String,
-    timestamp: String,
-    source: String,
-    correlation_id: Option<String>,
-    scope: Option<String>,
-    payload: serde_json::Value,
-}
-
-#[derive(Serialize)]
-struct PluginRegister {
-    id: String,
-    name: String,
-    version: String,
-    description: String,
-    consumes: Vec<String>,
-    produces: Vec<String>,
-    health_subject: String,
-    consumed_event_types: Vec<String>,
-    produced_event_types: Vec<String>,
-    config_schema: Option<serde_json::Value>,
-}
-
-#[derive(Serialize)]
+/// Registry query types (defined in kernel, not exported from common).
+#[derive(serde::Serialize)]
 #[serde(tag = "query_type")]
 enum RegistryQuery {
     #[serde(rename = "list_plugins")]
@@ -48,31 +25,13 @@ struct RegistryQueryResponse {
     plugins: Option<Vec<serde_json::Value>>,
 }
 
-#[derive(Serialize)]
-struct PluginDeregister {
-    id: String,
-}
-
-fn make_envelope(source: &str, event_type: &str, payload: &impl Serialize) -> Vec<u8> {
-    let envelope = EventEnvelope {
-        id: ulid::Ulid::new().to_string(),
-        event_type: event_type.to_string(),
-        timestamp: chrono::Utc::now().to_rfc3339(),
-        source: source.to_string(),
-        correlation_id: None,
-        scope: None,
-        payload: serde_json::to_value(payload).unwrap(),
-    };
-    serde_json::to_vec(&envelope).unwrap()
-}
-
 #[tokio::test]
 #[ignore]
 async fn test_plugin_register_and_query() {
     let nats = common::connect_nats().await;
     let plugin_id = common::test_id("e2e-plugin");
 
-    // Register
+    // Register (raw payload — kernel accepts both raw and envelope-wrapped)
     let register = PluginRegister {
         id: plugin_id.clone(),
         name: "E2E Test Plugin".into(),
@@ -86,8 +45,8 @@ async fn test_plugin_register_and_query() {
         config_schema: None,
     };
 
-    let envelope_bytes = make_envelope(&plugin_id, "plugin.register", &register);
-    nats.publish("plugin.register", envelope_bytes.into())
+    let bytes = serde_json::to_vec(&register).unwrap();
+    nats.publish("plugin.register", bytes.into())
         .await
         .unwrap();
 

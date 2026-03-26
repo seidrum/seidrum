@@ -3,82 +3,12 @@
 mod common;
 
 use chrono::Utc;
-use serde::{Deserialize, Serialize};
+use seidrum_common::events::{
+    ConversationAppendRequest, ConversationAppendResponse, ConversationCreateRequest,
+    ConversationCreateResponse, ConversationFindRequest, ConversationGetRequest,
+    ConversationListRequest, ConversationListResponse, ConversationMessage,
+};
 use std::collections::HashMap;
-
-#[derive(Serialize)]
-struct ConversationCreateRequest {
-    platform: String,
-    participants: Vec<String>,
-    agent_id: String,
-    scope: String,
-    metadata: HashMap<String, String>,
-}
-
-#[derive(Deserialize)]
-struct ConversationCreateResponse {
-    conversation_id: String,
-}
-
-#[derive(Serialize)]
-struct ConversationMessage {
-    role: String,
-    content: Option<String>,
-    #[serde(default)]
-    tool_calls: Vec<serde_json::Value>,
-    #[serde(default)]
-    tool_results: Vec<serde_json::Value>,
-    #[serde(default)]
-    media: Vec<serde_json::Value>,
-    timestamp: String,
-    #[serde(default)]
-    active_skills: Vec<String>,
-}
-
-#[derive(Serialize)]
-struct ConversationAppendRequest {
-    conversation_id: String,
-    message: ConversationMessage,
-}
-
-#[derive(Deserialize)]
-struct ConversationAppendResponse {
-    success: bool,
-    message_count: u32,
-}
-
-#[derive(Serialize)]
-struct ConversationGetRequest {
-    conversation_id: String,
-    max_messages: u32,
-}
-
-#[derive(Serialize)]
-struct ConversationFindRequest {
-    agent_id: String,
-    platform: String,
-    metadata_key: String,
-    metadata_value: String,
-}
-
-#[derive(Serialize)]
-struct ConversationListRequest {
-    agent_id: String,
-    platform: Option<String>,
-    limit: u32,
-}
-
-#[derive(Deserialize)]
-struct ConversationListResponse {
-    conversations: Vec<ConversationSummary>,
-}
-
-#[derive(Deserialize)]
-struct ConversationSummary {
-    id: String,
-    platform: String,
-    message_count: u32,
-}
 
 #[tokio::test]
 #[ignore]
@@ -108,7 +38,7 @@ async fn test_conversation_lifecycle() {
             tool_calls: vec![],
             tool_results: vec![],
             media: vec![],
-            timestamp: Utc::now().to_rfc3339(),
+            timestamp: Utc::now(),
             active_skills: vec![],
         },
     };
@@ -126,7 +56,7 @@ async fn test_conversation_lifecycle() {
             tool_calls: vec![],
             tool_results: vec![],
             media: vec![],
-            timestamp: Utc::now().to_rfc3339(),
+            timestamp: Utc::now(),
             active_skills: vec!["code-review".into()],
         },
     };
@@ -201,7 +131,7 @@ async fn test_conversation_get_with_max_messages() {
                 tool_calls: vec![],
                 tool_results: vec![],
                 media: vec![],
-                timestamp: Utc::now().to_rfc3339(),
+                timestamp: Utc::now(),
                 active_skills: vec![],
             },
         };

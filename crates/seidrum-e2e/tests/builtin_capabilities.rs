@@ -4,23 +4,7 @@
 
 mod common;
 
-use serde::{Deserialize, Serialize};
-use std::time::Duration;
-
-#[derive(Serialize)]
-struct ToolCallRequest {
-    tool_id: String,
-    plugin_id: String,
-    arguments: serde_json::Value,
-    correlation_id: Option<String>,
-}
-
-#[derive(Deserialize)]
-struct ToolCallResponse {
-    tool_id: String,
-    result: serde_json::Value,
-    is_error: bool,
-}
+use seidrum_common::events::{ToolCallRequest, ToolCallResponse};
 
 /// Call a built-in capability via capability.call.consciousness
 async fn call_builtin(

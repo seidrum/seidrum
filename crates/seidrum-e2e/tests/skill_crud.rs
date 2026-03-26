@@ -4,62 +4,10 @@
 
 mod common;
 
-use serde::{Deserialize, Serialize};
-
-#[derive(Serialize)]
-struct SkillSaveRequest {
-    id: Option<String>,
-    description: String,
-    snippet: String,
-    source: String,
-    scope: Option<String>,
-    tags: Vec<String>,
-    learned_from: Option<String>,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    embedding: Vec<f64>,
-}
-
-#[derive(Deserialize)]
-struct SkillSaveResponse {
-    skill_id: String,
-    is_new: bool,
-}
-
-#[derive(Serialize)]
-struct SkillSearchRequest {
-    query: String,
-    limit: Option<u32>,
-    scope: Option<String>,
-}
-
-#[derive(Deserialize)]
-struct SkillSearchResponse {
-    skills: Vec<SkillSearchResult>,
-}
-
-#[derive(Deserialize)]
-struct SkillSearchResult {
-    id: String,
-    description: String,
-    snippet: String,
-    score: f64,
-}
-
-#[derive(Serialize)]
-struct SkillGetRequest {
-    skill_id: String,
-}
-
-#[derive(Serialize)]
-struct SkillListRequest {
-    source_filter: Option<String>,
-    limit: Option<u32>,
-}
-
-#[derive(Deserialize)]
-struct SkillListResponse {
-    skills: Vec<SkillSearchResult>,
-}
+use seidrum_common::events::{
+    SkillGetRequest, SkillListRequest, SkillListResponse, SkillSaveRequest, SkillSaveResponse,
+    SkillSearchRequest, SkillSearchResponse,
+};
 
 #[tokio::test]
 #[ignore]
@@ -152,8 +100,6 @@ async fn test_skill_list() {
     let list_resp: SkillListResponse =
         common::nats_request(&nats, "brain.skill.list", &list_req).await;
 
-    // Should at least have system skills loaded at startup
-    // (code-review, incident-response from skills/ directory)
-    // This may be 0 if no skills were loaded — that's OK for a clean test DB
-    assert!(list_resp.skills.len() >= 0);
+    // Verify the response deserializes correctly — the list may be empty on a clean test DB
+    let _ = list_resp.skills.len();
 }
