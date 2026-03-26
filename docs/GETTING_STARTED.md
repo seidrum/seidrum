@@ -116,13 +116,7 @@ Stops all plugins, the kernel, NATS, and ArangoDB.
 
 ## Power-user mode
 
-If you prefer to manage NATS and ArangoDB yourself (e.g., running on a remote server):
-
-```bash
-# Start your own NATS and ArangoDB, then:
-seidrum daemon start    # Only starts kernel + plugins, assumes infra is running
-seidrum daemon stop
-```
+If you prefer to manage NATS and ArangoDB yourself (e.g., running on a remote server), just start them before running `seidrum start`. It will detect the running services and skip managed infrastructure automatically.
 
 ## Troubleshooting
 

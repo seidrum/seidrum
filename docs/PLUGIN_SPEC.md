@@ -582,11 +582,11 @@ Environment values support `${VAR}` and `${VAR:-default}` interpolation.
 ### CLI Commands
 
 ```
-seidrum daemon start/stop/restart/status   — manage the full stack
-seidrum daemon install/uninstall           — systemd (Linux) / launchd (macOS)
+seidrum setup                              — first-run wizard
+seidrum start/stop/status                  — manage infra + kernel + plugins
 seidrum plugin list/enable/disable         — toggle plugins
 seidrum plugin start/stop/restart          — control individual plugins
-seidrum init / seidrum validate            — database and config management
+seidrum service install/uninstall          — systemd (Linux) / launchd (macOS)
 ```
 
 ### Process Supervision

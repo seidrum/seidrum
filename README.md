@@ -107,20 +107,11 @@ See [docs/GETTING_STARTED.md](docs/GETTING_STARTED.md) for detailed instructions
 ### Using the `seidrum` CLI
 
 ```bash
-# Managed mode (handles infrastructure automatically)
+# Getting started
 seidrum setup                 # First-run wizard: downloads NATS, configures everything
 seidrum start                 # Start infrastructure + kernel + all enabled plugins
 seidrum stop                  # Stop everything
 seidrum status                # Show infrastructure + process status
-
-# Power-user mode (you manage NATS/ArangoDB yourself)
-seidrum daemon start          # Start kernel + enabled plugins only (foreground)
-seidrum daemon stop           # Graceful shutdown
-seidrum daemon status         # Show process status
-
-# Install as system service (systemd on Linux, launchd on macOS)
-seidrum daemon install        # Install, enable, and start the service
-seidrum daemon uninstall      # Stop and remove the service
 
 # Plugin management
 seidrum plugin list           # Show all plugins with enabled/disabled state
@@ -129,9 +120,9 @@ seidrum plugin disable email
 seidrum plugin start claude-code
 seidrum plugin stop claude-code
 
-# Database and config
-seidrum init                  # Initialize ArangoDB collections
-seidrum validate              # Validate platform and agent configuration
+# Install as system service (systemd on Linux, launchd on macOS)
+seidrum service install       # Install, enable, and start the service
+seidrum service uninstall     # Stop and remove the service
 ```
 
 ### Docker Compose (full stack)
@@ -232,7 +223,7 @@ Agents in Seidrum are not request-response handlers -- they are persistent, auto
 
 **Conversations** are first-class objects stored in the brain. Agents maintain structured conversation threads across platforms, preserving tool calls, media attachments, and inner monologue for continuity across sessions.
 
-**Skills** provide behavioral RAG -- reusable instructions and procedures retrieved by semantic similarity at inference time. Skills come from YAML files (`skills/` directory), user instructions, agent self-learning, or packaged distributions installed via `seidrum skill install`. See [Agent Consciousness](docs/AGENT_CONSCIOUSNESS.md) and [Agent Skills](docs/AGENT_SKILLS.md) for details.
+**Skills** provide behavioral RAG -- reusable instructions and procedures retrieved by semantic similarity at inference time. Skills come from YAML files (`skills/` directory), user instructions, or agent self-learning. See [Agent Consciousness](docs/AGENT_CONSCIOUSNESS.md) and [Agent Skills](docs/AGENT_SKILLS.md) for details.
 
 Plugins can also be written in **any language** using the API gateway. The gateway exposes a WebSocket and REST API that bridges to NATS:
 
