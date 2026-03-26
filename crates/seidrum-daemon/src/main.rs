@@ -60,7 +60,9 @@ async fn main() -> Result<()> {
                 println!("Infrastructure:");
                 let nats_status = if mgr.is_nats_running() {
                     match mgr.nats_pid() {
-                        Some(pid) => format!("running (PID {}, port {})", pid, mgr.config.nats.port),
+                        Some(pid) => {
+                            format!("running (PID {}, port {})", pid, mgr.config.nats.port)
+                        }
                         None => format!("running (port {})", mgr.config.nats.port),
                     }
                 } else {

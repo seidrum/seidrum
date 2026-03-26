@@ -40,7 +40,9 @@ pub async fn run(paths: &SeidrumPaths, use_defaults: bool) -> Result<()> {
                 println!("Install Docker: https://docs.docker.com/engine/install/");
                 println!("Or Podman:      https://podman.io/getting-started/installation");
             }
-            anyhow::bail!("Docker or Podman is required. Install one and run 'seidrum setup' again.");
+            anyhow::bail!(
+                "Docker or Podman is required. Install one and run 'seidrum setup' again."
+            );
         }
     }
     println!();
@@ -112,7 +114,10 @@ pub async fn run(paths: &SeidrumPaths, use_defaults: bool) -> Result<()> {
         container_runtime: runtime,
     };
 
-    let infra = InfraManager::new(infra_config.clone(), SeidrumPaths::resolve(&paths.config_dir));
+    let infra = InfraManager::new(
+        infra_config.clone(),
+        SeidrumPaths::resolve(&paths.config_dir),
+    );
 
     // 5. Download NATS
     infra.download_nats().await?;
@@ -132,10 +137,24 @@ pub async fn run(paths: &SeidrumPaths, use_defaults: bool) -> Result<()> {
         if !overwrite {
             println!("Keeping existing .env file");
         } else {
-            write_env_file(&env_path, &arango_password, &google_api_key, &openai_api_key, &telegram_token, &gateway_api_key)?;
+            write_env_file(
+                &env_path,
+                &arango_password,
+                &google_api_key,
+                &openai_api_key,
+                &telegram_token,
+                &gateway_api_key,
+            )?;
         }
     } else {
-        write_env_file(&env_path, &arango_password, &google_api_key, &openai_api_key, &telegram_token, &gateway_api_key)?;
+        write_env_file(
+            &env_path,
+            &arango_password,
+            &google_api_key,
+            &openai_api_key,
+            &telegram_token,
+            &gateway_api_key,
+        )?;
     }
 
     // 8. Start infrastructure temporarily for DB init
@@ -213,7 +232,9 @@ fn generate_password(len: usize) -> String {
 /// Generate a random hex string.
 fn generate_hex_key(len: usize) -> String {
     let mut rng = rand::thread_rng();
-    (0..len).map(|_| format!("{:x}", rng.gen::<u8>() % 16)).collect()
+    (0..len)
+        .map(|_| format!("{:x}", rng.gen::<u8>() % 16))
+        .collect()
 }
 
 /// Write the .env file with provided values.

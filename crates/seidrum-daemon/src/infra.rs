@@ -272,7 +272,10 @@ impl InfraManager {
 
         // Check if already running
         if Self::is_port_in_use(self.config.nats.port) {
-            info!(port = self.config.nats.port, "NATS port already in use, assuming external");
+            info!(
+                port = self.config.nats.port,
+                "NATS port already in use, assuming external"
+            );
             return Ok(());
         }
 
@@ -376,7 +379,10 @@ impl InfraManager {
 
         // Check if already running
         if Self::is_port_in_use(self.config.arango.port) {
-            info!(port = self.config.arango.port, "ArangoDB port already in use, assuming external");
+            info!(
+                port = self.config.arango.port,
+                "ArangoDB port already in use, assuming external"
+            );
             return Ok(());
         }
 
@@ -452,9 +458,7 @@ impl InfraManager {
             .output();
 
         match output {
-            Ok(o) if o.status.success() => {
-                String::from_utf8_lossy(&o.stdout).trim() == "true"
-            }
+            Ok(o) if o.status.success() => String::from_utf8_lossy(&o.stdout).trim() == "true",
             _ => false,
         }
     }
@@ -548,7 +552,10 @@ async fn wait_for_http(url: &str, name: &str, max_retries: u32, interval: Durati
             }
             Err(_) => {
                 if attempt % 5 == 0 {
-                    info!(name, attempt, max_retries, "Waiting for {} to start...", name);
+                    info!(
+                        name,
+                        attempt, max_retries, "Waiting for {} to start...", name
+                    );
                 }
             }
         }
