@@ -84,42 +84,39 @@ There is no architectural distinction between a Telegram adapter, an LLM provide
 ### Prerequisites
 
 - [Rust](https://rustup.rs/) (stable)
-- [NATS Server](https://nats.io/) with JetStream enabled
-- [ArangoDB](https://arangodb.com/) 3.12+
-- (Optional) [Docker Compose](https://docs.docker.com/compose/) for infrastructure
+- [Docker](https://docker.com/get-started) (for ArangoDB)
 
 ### Quick start
 
 ```bash
-# Clone
 git clone https://github.com/seidrum/seidrum.git
 cd seidrum
+cargo build --workspace --release
 
-# Start infrastructure
-docker compose up -d nats arangodb
+# Interactive setup — downloads NATS, pulls ArangoDB, configures API keys
+seidrum setup
 
-# Configure
-cp .env.example .env
-# Edit .env with your API keys and tokens
-
-# Build
-cargo build --workspace
-
-# Initialize the brain database
-seidrum init
-
-# Start everything (kernel + all enabled plugins)
-seidrum daemon start
+# Start everything (NATS + ArangoDB + kernel + plugins)
+seidrum start
 ```
+
+Dashboard: http://localhost:8080/dashboard
+
+See [docs/GETTING_STARTED.md](docs/GETTING_STARTED.md) for detailed instructions.
 
 ### Using the `seidrum` CLI
 
 ```bash
-# Daemon management
-seidrum daemon start          # Start kernel + enabled plugins (foreground)
+# Managed mode (handles infrastructure automatically)
+seidrum setup                 # First-run wizard: downloads NATS, configures everything
+seidrum start                 # Start infrastructure + kernel + all enabled plugins
+seidrum stop                  # Stop everything
+seidrum status                # Show infrastructure + process status
+
+# Power-user mode (you manage NATS/ArangoDB yourself)
+seidrum daemon start          # Start kernel + enabled plugins only (foreground)
 seidrum daemon stop           # Graceful shutdown
-seidrum daemon restart        # Stop then start
-seidrum daemon status         # Show all processes with PID, uptime, restarts
+seidrum daemon status         # Show process status
 
 # Install as system service (systemd on Linux, launchd on macOS)
 seidrum daemon install        # Install, enable, and start the service
@@ -131,7 +128,6 @@ seidrum plugin enable telegram
 seidrum plugin disable email
 seidrum plugin start claude-code
 seidrum plugin stop claude-code
-seidrum plugin restart telegram
 
 # Database and config
 seidrum init                  # Initialize ArangoDB collections

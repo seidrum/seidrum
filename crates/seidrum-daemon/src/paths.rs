@@ -12,6 +12,8 @@ pub struct SeidrumPaths {
     pub pid_dir: PathBuf,
     /// Directory for process log files.
     pub log_dir: PathBuf,
+    /// Seidrum home directory (~/.seidrum/).
+    pub seidrum_home: PathBuf,
 }
 
 impl SeidrumPaths {
@@ -33,6 +35,7 @@ impl SeidrumPaths {
             config_dir: config_dir.to_path_buf(),
             pid_dir: seidrum_dir.join("pids"),
             log_dir: seidrum_dir.join("logs"),
+            seidrum_home: seidrum_dir,
         }
     }
 
@@ -40,7 +43,39 @@ impl SeidrumPaths {
     pub fn ensure_dirs(&self) -> anyhow::Result<()> {
         std::fs::create_dir_all(&self.pid_dir)?;
         std::fs::create_dir_all(&self.log_dir)?;
+        std::fs::create_dir_all(self.managed_bin_dir())?;
+        std::fs::create_dir_all(self.nats_data_dir())?;
         Ok(())
+    }
+
+    /// Directory for managed binaries (~/.seidrum/bin/).
+    pub fn managed_bin_dir(&self) -> PathBuf {
+        self.seidrum_home.join("bin")
+    }
+
+    /// Directory for persistent data (~/.seidrum/data/).
+    pub fn data_dir(&self) -> PathBuf {
+        self.seidrum_home.join("data")
+    }
+
+    /// NATS JetStream data directory (~/.seidrum/data/nats/).
+    pub fn nats_data_dir(&self) -> PathBuf {
+        self.seidrum_home.join("data").join("nats")
+    }
+
+    /// Infrastructure config file (~/.seidrum/infra.yaml).
+    pub fn infra_config(&self) -> PathBuf {
+        self.seidrum_home.join("infra.yaml")
+    }
+
+    /// NATS server PID file.
+    pub fn nats_pid_file(&self) -> PathBuf {
+        self.pid_dir.join("nats-server.pid")
+    }
+
+    /// ArangoDB container ID file.
+    pub fn arango_container_id_file(&self) -> PathBuf {
+        self.pid_dir.join("arangodb.container-id")
     }
 
     /// Path to the daemon's own PID file.
@@ -90,6 +125,7 @@ mod tests {
             config_dir: PathBuf::from("/etc/seidrum"),
             pid_dir: PathBuf::from("/var/run/seidrum"),
             log_dir: PathBuf::from("/var/log/seidrum"),
+            seidrum_home: PathBuf::from("/home/test/.seidrum"),
         };
 
         assert_eq!(

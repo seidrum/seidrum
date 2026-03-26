@@ -17,7 +17,19 @@ pub struct Cli {
 
 #[derive(Subcommand)]
 pub enum Commands {
-    /// Manage the Seidrum daemon
+    /// First-run setup wizard (downloads NATS, configures ArangoDB, generates .env)
+    Setup {
+        /// Skip interactive prompts, use generated defaults
+        #[arg(long)]
+        defaults: bool,
+    },
+    /// Start everything (infrastructure + kernel + plugins)
+    Start,
+    /// Stop everything (plugins + kernel + infrastructure)
+    Stop,
+    /// Show status of infrastructure and all processes
+    Status,
+    /// Manage the Seidrum daemon (power-user: no infrastructure management)
     Daemon {
         #[command(subcommand)]
         action: DaemonAction,

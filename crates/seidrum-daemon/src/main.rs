@@ -1,8 +1,10 @@
 mod cli;
 mod config;
 mod daemon;
+pub mod infra;
 mod install;
 mod paths;
+mod setup;
 mod status;
 
 use anyhow::Result;
@@ -19,6 +21,66 @@ async fn main() -> Result<()> {
     let paths = SeidrumPaths::resolve(&cli.config_dir);
 
     match cli.command {
+        Commands::Setup { defaults } => setup::run(&paths, defaults).await,
+        Commands::Start => {
+            // Load infra config, start infra, then start daemon
+            let infra = infra::InfraManager::load(&paths)?;
+            match infra {
+                Some(mgr) => {
+                    paths.ensure_dirs()?;
+                    println!("Starting infrastructure...");
+                    mgr.start_nats()?;
+                    mgr.start_arango()?;
+                    mgr.wait_for_healthy().await?;
+                    println!("Infrastructure ready.");
+                    daemon::start(&paths).await
+                }
+                None => {
+                    println!("No infrastructure config found. Run 'seidrum setup' first.");
+                    println!("Or use 'seidrum daemon start' if you manage NATS/ArangoDB yourself.");
+                    Ok(())
+                }
+            }
+        }
+        Commands::Stop => {
+            // Stop daemon first, then infrastructure
+            let _ = daemon::stop(&paths).await;
+
+            if let Ok(Some(mgr)) = infra::InfraManager::load(&paths) {
+                println!("Stopping infrastructure...");
+                mgr.stop_nats()?;
+                mgr.stop_arango()?;
+                println!("Infrastructure stopped.");
+            }
+            Ok(())
+        }
+        Commands::Status => {
+            // Show infra status, then daemon/plugin status
+            if let Ok(Some(mgr)) = infra::InfraManager::load(&paths) {
+                println!("Infrastructure:");
+                let nats_status = if mgr.is_nats_running() {
+                    match mgr.nats_pid() {
+                        Some(pid) => format!("running (PID {}, port {})", pid, mgr.config.nats.port),
+                        None => format!("running (port {})", mgr.config.nats.port),
+                    }
+                } else {
+                    "not running".to_string()
+                };
+                let arango_status = if mgr.is_arango_running() {
+                    format!(
+                        "running (container {}, port {})",
+                        mgr.arango_container_name(),
+                        mgr.config.arango.port
+                    )
+                } else {
+                    "not running".to_string()
+                };
+                println!("  NATS:     {}", nats_status);
+                println!("  ArangoDB: {}", arango_status);
+                println!();
+            }
+            status::show(&paths).await
+        }
         Commands::Daemon { action } => match action {
             DaemonAction::Start => daemon::start(&paths).await,
             DaemonAction::Stop => daemon::stop(&paths).await,
