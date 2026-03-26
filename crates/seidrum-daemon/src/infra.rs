@@ -10,6 +10,15 @@ use tracing::info;
 
 use crate::paths::SeidrumPaths;
 
+/// Quick check: can we connect to NATS on the given port?
+pub fn is_nats_reachable(port: u16) -> bool {
+    std::net::TcpStream::connect_timeout(
+        &std::net::SocketAddr::from(([127, 0, 0, 1], port)),
+        Duration::from_millis(500),
+    )
+    .is_ok()
+}
+
 /// Pinned NATS server version.
 pub const NATS_VERSION: &str = "2.10.24";
 

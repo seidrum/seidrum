@@ -29,41 +29,20 @@ pub enum Commands {
     Stop,
     /// Show status of infrastructure and all processes
     Status,
-    /// Manage the Seidrum daemon (power-user: no infrastructure management)
-    Daemon {
-        #[command(subcommand)]
-        action: DaemonAction,
-    },
-    /// Initialize the brain database
-    Init,
-    /// Validate configuration
-    Validate {
-        /// Path to platform config file
-        #[arg(long, default_value = "config/platform.yaml")]
-        config: String,
-    },
     /// Manage plugins
     Plugin {
         #[command(subcommand)]
         action: PluginAction,
     },
-    /// Manage agent skills
-    Skill {
+    /// Install or remove the system service (systemd/launchd)
+    Service {
         #[command(subcommand)]
-        action: SkillAction,
+        action: ServiceAction,
     },
 }
 
 #[derive(Subcommand)]
-pub enum DaemonAction {
-    /// Start kernel + enabled plugins (foreground)
-    Start,
-    /// Stop the running daemon
-    Stop,
-    /// Restart the daemon
-    Restart,
-    /// Show status of all processes
-    Status,
+pub enum ServiceAction {
     /// Install as a system service (systemd/launchd)
     Install,
     /// Remove the system service
@@ -98,21 +77,5 @@ pub enum PluginAction {
     Restart {
         /// Plugin name
         name: String,
-    },
-}
-
-#[derive(Subcommand)]
-pub enum SkillAction {
-    /// List all installed skills
-    List,
-    /// Install a skill from a YAML file
-    Install {
-        /// Path to skill YAML file
-        path: String,
-    },
-    /// Remove a skill by ID
-    Remove {
-        /// Skill ID
-        skill_id: String,
     },
 }

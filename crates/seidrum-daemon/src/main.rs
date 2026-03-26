@@ -10,7 +10,7 @@ mod status;
 use anyhow::Result;
 use clap::Parser;
 
-use cli::{Cli, Commands, DaemonAction, PluginAction, SkillAction};
+use cli::{Cli, Commands, PluginAction, ServiceAction};
 use paths::SeidrumPaths;
 
 #[tokio::main]
@@ -23,24 +23,21 @@ async fn main() -> Result<()> {
     match cli.command {
         Commands::Setup { defaults } => setup::run(&paths, defaults).await,
         Commands::Start => {
-            // Load infra config, start infra, then start daemon
+            // Start managed infra if configured, otherwise assume external infra
             let infra = infra::InfraManager::load(&paths)?;
-            match infra {
-                Some(mgr) => {
-                    paths.ensure_dirs()?;
-                    println!("Starting infrastructure...");
-                    mgr.start_nats()?;
-                    mgr.start_arango()?;
-                    mgr.wait_for_healthy().await?;
-                    println!("Infrastructure ready.");
-                    daemon::start(&paths).await
-                }
-                None => {
-                    println!("No infrastructure config found. Run 'seidrum setup' first.");
-                    println!("Or use 'seidrum daemon start' if you manage NATS/ArangoDB yourself.");
-                    Ok(())
-                }
+            if let Some(mgr) = &infra {
+                paths.ensure_dirs()?;
+                println!("Starting infrastructure...");
+                mgr.start_nats()?;
+                mgr.start_arango()?;
+                mgr.wait_for_healthy().await?;
+                println!("Infrastructure ready.");
+            } else if !infra::is_nats_reachable(4222) {
+                println!("No managed infrastructure and NATS is not reachable on :4222.");
+                println!("Run 'seidrum setup' to configure, or start NATS/ArangoDB manually.");
+                return Ok(());
             }
+            daemon::start(&paths).await
         }
         Commands::Stop => {
             // Stop daemon first, then infrastructure
@@ -83,22 +80,6 @@ async fn main() -> Result<()> {
             }
             status::show(&paths).await
         }
-        Commands::Daemon { action } => match action {
-            DaemonAction::Start => daemon::start(&paths).await,
-            DaemonAction::Stop => daemon::stop(&paths).await,
-            DaemonAction::Restart => {
-                let _ = daemon::stop(&paths).await;
-                tokio::time::sleep(std::time::Duration::from_secs(2)).await;
-                daemon::start(&paths).await
-            }
-            DaemonAction::Status => status::show(&paths).await,
-            DaemonAction::Install => install::install(&paths),
-            DaemonAction::Uninstall => install::uninstall(&paths),
-        },
-        Commands::Init => daemon::run_kernel_command(&paths, &["init"]).await,
-        Commands::Validate { config } => {
-            daemon::run_kernel_command(&paths, &["validate", "--config", &config]).await
-        }
         Commands::Plugin { action } => match action {
             PluginAction::List => config::list_plugins(&paths),
             PluginAction::Enable { name } => config::set_enabled(&paths, &name, true),
@@ -111,23 +92,9 @@ async fn main() -> Result<()> {
                 daemon::start_plugin(&paths, &name).await
             }
         },
-        Commands::Skill { action } => match action {
-            SkillAction::List => {
-                println!("Skills are stored in ArangoDB. Use the dashboard or agent capabilities to manage skills.");
-                println!("System skills are loaded from the skills/ directory on kernel startup.");
-                Ok(())
-            }
-            SkillAction::Install { path } => {
-                println!("Installing skill from {}...", path);
-                println!("Note: The kernel must be running to install skills.");
-                println!("Copy the file to skills/ and restart the kernel, or use the dashboard.");
-                Ok(())
-            }
-            SkillAction::Remove { skill_id } => {
-                println!("Removing skill '{}'...", skill_id);
-                println!("Note: Use the dashboard to remove skills from the database.");
-                Ok(())
-            }
+        Commands::Service { action } => match action {
+            ServiceAction::Install => install::install(&paths),
+            ServiceAction::Uninstall => install::uninstall(&paths),
         },
     }
 }
