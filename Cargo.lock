@@ -3505,6 +3505,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "seidrum-e2e"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "async-nats",
+ "chrono",
+ "seidrum-common",
+ "serde",
+ "serde_json",
+ "tokio",
+ "ulid",
+]
+
+[[package]]
 name = "seidrum-email"
 version = "0.1.0"
 dependencies = [
