@@ -1,14 +1,16 @@
 mod cli;
 mod config;
 mod daemon;
+pub mod infra;
 mod install;
 mod paths;
+mod setup;
 mod status;
 
 use anyhow::Result;
 use clap::Parser;
 
-use cli::{Cli, Commands, DaemonAction, PluginAction, SkillAction};
+use cli::{Cli, Commands, PluginAction, ServiceAction};
 use paths::SeidrumPaths;
 
 #[tokio::main]
@@ -19,21 +21,64 @@ async fn main() -> Result<()> {
     let paths = SeidrumPaths::resolve(&cli.config_dir);
 
     match cli.command {
-        Commands::Daemon { action } => match action {
-            DaemonAction::Start => daemon::start(&paths).await,
-            DaemonAction::Stop => daemon::stop(&paths).await,
-            DaemonAction::Restart => {
-                let _ = daemon::stop(&paths).await;
-                tokio::time::sleep(std::time::Duration::from_secs(2)).await;
-                daemon::start(&paths).await
+        Commands::Setup { defaults } => setup::run(&paths, defaults).await,
+        Commands::Start => {
+            // Start managed infra if configured, otherwise assume external infra
+            let infra = infra::InfraManager::load(&paths)?;
+            if let Some(mgr) = &infra {
+                paths.ensure_dirs()?;
+                println!("Starting infrastructure...");
+                mgr.start_nats()?;
+                mgr.start_arango()?;
+                mgr.wait_for_healthy().await?;
+                println!("Infrastructure ready.");
+            } else if !infra::is_nats_reachable(4222) {
+                println!("No managed infrastructure and NATS is not reachable on :4222.");
+                println!("Run 'seidrum setup' to configure, or start NATS/ArangoDB manually.");
+                return Ok(());
             }
-            DaemonAction::Status => status::show(&paths).await,
-            DaemonAction::Install => install::install(&paths),
-            DaemonAction::Uninstall => install::uninstall(&paths),
-        },
-        Commands::Init => daemon::run_kernel_command(&paths, &["init"]).await,
-        Commands::Validate { config } => {
-            daemon::run_kernel_command(&paths, &["validate", "--config", &config]).await
+            daemon::start(&paths).await
+        }
+        Commands::Stop => {
+            // Stop daemon first, then infrastructure
+            let _ = daemon::stop(&paths).await;
+
+            if let Ok(Some(mgr)) = infra::InfraManager::load(&paths) {
+                println!("Stopping infrastructure...");
+                mgr.stop_nats()?;
+                mgr.stop_arango()?;
+                println!("Infrastructure stopped.");
+            }
+            Ok(())
+        }
+        Commands::Status => {
+            // Show infra status, then daemon/plugin status
+            if let Ok(Some(mgr)) = infra::InfraManager::load(&paths) {
+                println!("Infrastructure:");
+                let nats_status = if mgr.is_nats_running() {
+                    match mgr.nats_pid() {
+                        Some(pid) => {
+                            format!("running (PID {}, port {})", pid, mgr.config.nats.port)
+                        }
+                        None => format!("running (port {})", mgr.config.nats.port),
+                    }
+                } else {
+                    "not running".to_string()
+                };
+                let arango_status = if mgr.is_arango_running() {
+                    format!(
+                        "running (container {}, port {})",
+                        mgr.arango_container_name(),
+                        mgr.config.arango.port
+                    )
+                } else {
+                    "not running".to_string()
+                };
+                println!("  NATS:     {}", nats_status);
+                println!("  ArangoDB: {}", arango_status);
+                println!();
+            }
+            status::show(&paths).await
         }
         Commands::Plugin { action } => match action {
             PluginAction::List => config::list_plugins(&paths),
@@ -47,23 +92,9 @@ async fn main() -> Result<()> {
                 daemon::start_plugin(&paths, &name).await
             }
         },
-        Commands::Skill { action } => match action {
-            SkillAction::List => {
-                println!("Skills are stored in ArangoDB. Use the dashboard or agent capabilities to manage skills.");
-                println!("System skills are loaded from the skills/ directory on kernel startup.");
-                Ok(())
-            }
-            SkillAction::Install { path } => {
-                println!("Installing skill from {}...", path);
-                println!("Note: The kernel must be running to install skills.");
-                println!("Copy the file to skills/ and restart the kernel, or use the dashboard.");
-                Ok(())
-            }
-            SkillAction::Remove { skill_id } => {
-                println!("Removing skill '{}'...", skill_id);
-                println!("Note: Use the dashboard to remove skills from the database.");
-                Ok(())
-            }
+        Commands::Service { action } => match action {
+            ServiceAction::Install => install::install(&paths),
+            ServiceAction::Uninstall => install::uninstall(&paths),
         },
     }
 }
