@@ -1,8 +1,6 @@
 // Conversion between unified LLM format and OpenAI-specific format.
 
-use seidrum_common::events::{
-    ToolCallRequest, ToolSchema, UnifiedMessage, UnifiedToolCall,
-};
+use seidrum_common::events::{ToolCallRequest, ToolSchema, UnifiedMessage, UnifiedToolCall};
 
 use crate::openai_types::{OpenAiFunctionSchema, OpenAiMessage, OpenAiTool, OpenAiToolCall};
 
@@ -47,10 +45,7 @@ pub fn unified_to_openai_messages(messages: &[UnifiedMessage]) -> Vec<OpenAiMess
         // Tool results become separate messages
         if let Some(tool_results) = &msg.tool_results {
             for tr in tool_results {
-                result.push(OpenAiMessage::tool_result(
-                    &tr.tool_call_id,
-                    &tr.content,
-                ));
+                result.push(OpenAiMessage::tool_result(&tr.tool_call_id, &tr.content));
             }
         }
     }
@@ -212,9 +207,6 @@ mod tests {
         assert_eq!(unified.len(), 1);
         assert_eq!(unified[0].id, "call_123");
         assert_eq!(unified[0].name, "search");
-        assert_eq!(
-            unified[0].arguments,
-            serde_json::json!({"query": "test"})
-        );
+        assert_eq!(unified[0].arguments, serde_json::json!({"query": "test"}));
     }
 }

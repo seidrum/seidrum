@@ -120,7 +120,11 @@ impl TraceCollectorService {
                 store.retain(|_, t| t.last_event_at > cutoff);
                 let evicted = before - store.len();
                 if evicted > 0 {
-                    info!(evicted, remaining = store.len(), "Trace compaction: evicted stale traces");
+                    info!(
+                        evicted,
+                        remaining = store.len(),
+                        "Trace compaction: evicted stale traces"
+                    );
                 }
             }
         });

@@ -1,5 +1,5 @@
-mod auth;
 mod audit;
+mod auth;
 mod connections;
 mod dashboard;
 mod event_stream;
@@ -27,10 +27,10 @@ use tower_http::cors::CorsLayer;
 use tower_http::trace::TraceLayer;
 use tracing::{info, warn};
 
-use auth::AuthHandler;
 use audit::AuditLog;
+use auth::AuthHandler;
 use connections::ConnectionManager;
-use rate_limiter::{RateLimiter, RateLimitConfig};
+use rate_limiter::{RateLimitConfig, RateLimiter};
 
 const PLUGIN_ID: &str = "api-gateway";
 const PLUGIN_NAME: &str = "API Gateway";
@@ -271,15 +271,12 @@ async fn auth_rate_limit_middleware(
         .to_string();
 
     // Extract API key from query parameters if present (deprecated — prefer Authorization header)
-    let api_key_param = req
-        .uri()
-        .query()
-        .and_then(|q| {
-            q.split('&')
-                .find(|p| p.starts_with("api_key="))
-                .and_then(|p| p.strip_prefix("api_key="))
-                .map(|k| k.to_string())
-        });
+    let api_key_param = req.uri().query().and_then(|q| {
+        q.split('&')
+            .find(|p| p.starts_with("api_key="))
+            .and_then(|p| p.strip_prefix("api_key="))
+            .map(|k| k.to_string())
+    });
 
     if api_key_param.is_some() {
         warn!(
@@ -345,7 +342,10 @@ async fn auth_rate_limit_middleware(
     let mut response = next.run(req).await;
     response.headers_mut().insert(
         "X-Rate-Limit-Remaining",
-        remaining.to_string().parse().unwrap_or_else(|_| axum::http::HeaderValue::from_static("0")),
+        remaining
+            .to_string()
+            .parse()
+            .unwrap_or_else(|_| axum::http::HeaderValue::from_static("0")),
     );
 
     response
@@ -392,7 +392,10 @@ async fn auth_token_handler(
                     .build(),
             )
             .await;
-        return (StatusCode::UNAUTHORIZED, axum::Json(serde_json::json!({"error": "invalid api_key"})))
+        return (
+            StatusCode::UNAUTHORIZED,
+            axum::Json(serde_json::json!({"error": "invalid api_key"})),
+        )
             .into_response();
     }
 
@@ -415,7 +418,12 @@ async fn auth_token_handler(
                     )
                     .await;
 
-                let ttl = state.auth_handler.jwt_service.as_ref().unwrap().token_ttl_secs;
+                let ttl = state
+                    .auth_handler
+                    .jwt_service
+                    .as_ref()
+                    .unwrap()
+                    .token_ttl_secs;
                 (
                     StatusCode::OK,
                     axum::Json(auth::TokenResponse {
@@ -425,13 +433,11 @@ async fn auth_token_handler(
                 )
                     .into_response()
             }
-            Err(e) => {
-                (
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    axum::Json(serde_json::json!({"error": format!("token generation failed: {}", e)})),
-                )
-                    .into_response()
-            }
+            Err(e) => (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                axum::Json(serde_json::json!({"error": format!("token generation failed: {}", e)})),
+            )
+                .into_response(),
         }
     } else {
         (
@@ -495,7 +501,9 @@ async fn get_trace(
                 }
                 Err(e) => (
                     StatusCode::INTERNAL_SERVER_ERROR,
-                    axum::Json(serde_json::json!({"error": format!("failed to query trace: {}", e)})),
+                    axum::Json(
+                        serde_json::json!({"error": format!("failed to query trace: {}", e)}),
+                    ),
                 )
                     .into_response(),
             }
@@ -545,7 +553,9 @@ async fn list_traces(
                 }
                 Err(e) => (
                     StatusCode::INTERNAL_SERVER_ERROR,
-                    axum::Json(serde_json::json!({"error": format!("failed to query traces: {}", e)})),
+                    axum::Json(
+                        serde_json::json!({"error": format!("failed to query traces: {}", e)}),
+                    ),
                 )
                     .into_response(),
             }

@@ -51,19 +51,27 @@ impl RateLimiter {
 
     /// Check if a request from the given subject is allowed.
     /// Returns (allowed, remaining_tokens, retry_after_secs).
-    pub async fn check_rate_limit(&self, subject: &str, is_admin: bool) -> (bool, u32, Option<u32>) {
-        let rpm = if is_admin { self.config.admin_rpm } else { self.config.regular_rpm };
+    pub async fn check_rate_limit(
+        &self,
+        subject: &str,
+        is_admin: bool,
+    ) -> (bool, u32, Option<u32>) {
+        let rpm = if is_admin {
+            self.config.admin_rpm
+        } else {
+            self.config.regular_rpm
+        };
         let tokens_per_sec = rpm as f64 / 60.0;
 
         let now = unix_timestamp_secs();
         let mut buckets = self.buckets.write().await;
 
-        let bucket = buckets.entry(subject.to_string()).or_insert_with(|| {
-            TokenBucket {
+        let bucket = buckets
+            .entry(subject.to_string())
+            .or_insert_with(|| TokenBucket {
                 tokens: rpm as f64,
                 last_refill: now,
-            }
-        });
+            });
 
         // Refill tokens based on elapsed time
         let elapsed = now.saturating_sub(bucket.last_refill);
@@ -93,7 +101,10 @@ impl RateLimiter {
 
         let after = buckets.len();
         if before != after {
-            debug!(removed = before - after, "Cleaned up stale rate limit entries");
+            debug!(
+                removed = before - after,
+                "Cleaned up stale rate limit entries"
+            );
         }
     }
 }

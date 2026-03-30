@@ -1,8 +1,8 @@
 //! JWT token generation and validation for API gateway authentication.
 
-use std::time::{SystemTime, UNIX_EPOCH};
 use anyhow::Result;
 use serde::{Deserialize, Serialize};
+use std::time::{SystemTime, UNIX_EPOCH};
 // tracing available if needed for debug/warn
 
 /// JWT claims payload.
@@ -100,7 +100,7 @@ fn base64_url_decode(s: &str) -> Result<Vec<u8>> {
 /// Simple HMAC-SHA256 using ring or manual implementation.
 /// For simplicity, use a basic implementation with the sha2 crate.
 fn hmac_sha256(key: &[u8], data: &[u8]) -> Vec<u8> {
-    use sha2::{Sha256, Digest};
+    use sha2::{Digest, Sha256};
 
     // HMAC: H((K' XOR opad) || H((K' XOR ipad) || message))
     let block_size = 64;
@@ -139,7 +139,9 @@ mod tests {
     #[test]
     fn test_generate_and_validate_token() {
         let service = JwtService::new("test-secret-key", 3600);
-        let token = service.generate_token("user1", "admin", vec!["scope_root".to_string()]).unwrap();
+        let token = service
+            .generate_token("user1", "admin", vec!["scope_root".to_string()])
+            .unwrap();
         let claims = service.validate_token(&token).unwrap();
         assert_eq!(claims.sub, "user1");
         assert_eq!(claims.role, "admin");

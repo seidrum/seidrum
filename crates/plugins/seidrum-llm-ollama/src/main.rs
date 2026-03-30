@@ -277,11 +277,7 @@ async fn handle_provider_request(
         );
 
         // Extract text content
-        let content_text = api_response
-            .message
-            .content
-            .clone()
-            .unwrap_or_default();
+        let content_text = api_response.message.content.clone().unwrap_or_default();
 
         // Extract tool calls
         let tool_calls = api_response

@@ -1,10 +1,10 @@
 // Conversion between unified LLM format and Ollama-specific format.
 
-use seidrum_common::events::{
-    ToolCallRequest, ToolSchema, UnifiedMessage, UnifiedToolCall,
-};
+use seidrum_common::events::{ToolCallRequest, ToolSchema, UnifiedMessage, UnifiedToolCall};
 
-use crate::ollama_types::{OllamaFunctionCall, OllamaFunctionSchema, OllamaMessage, OllamaTool, OllamaToolCall};
+use crate::ollama_types::{
+    OllamaFunctionCall, OllamaFunctionSchema, OllamaMessage, OllamaTool, OllamaToolCall,
+};
 
 /// Convert unified messages to Ollama message format.
 ///
@@ -176,13 +176,11 @@ mod tests {
 
     #[test]
     fn test_unified_to_ollama_tools() {
-        let tools = vec![
-            ToolSchema {
-                name: "search".to_string(),
-                description: "Search the web".to_string(),
-                parameters: serde_json::json!({"type": "object"}),
-            },
-        ];
+        let tools = vec![ToolSchema {
+            name: "search".to_string(),
+            description: "Search the web".to_string(),
+            parameters: serde_json::json!({"type": "object"}),
+        }];
 
         let ollama_tools = unified_to_ollama_tools(&tools);
         assert_eq!(ollama_tools.len(), 1);

@@ -61,7 +61,11 @@ struct Cli {
     routing_strategy: String,
 
     /// Comma-separated list of fallback providers
-    #[arg(long, env = "LLM_FALLBACK_PROVIDERS", default_value = "google,openai,anthropic")]
+    #[arg(
+        long,
+        env = "LLM_FALLBACK_PROVIDERS",
+        default_value = "google,openai,anthropic"
+    )]
     fallback_providers: String,
 }
 
@@ -374,12 +378,17 @@ async fn handle_message(
         context_assembly::count_tokens(sys_prompt)
             + messages
                 .iter()
-                .map(|m| context_assembly::count_tokens(&m.content.as_ref().unwrap_or(&String::new())) + 4)
+                .map(|m| {
+                    context_assembly::count_tokens(&m.content.as_ref().unwrap_or(&String::new()))
+                        + 4
+                })
                 .sum::<usize>()
     } else {
         messages
             .iter()
-            .map(|m| context_assembly::count_tokens(&m.content.as_ref().unwrap_or(&String::new())) + 4)
+            .map(|m| {
+                context_assembly::count_tokens(&m.content.as_ref().unwrap_or(&String::new())) + 4
+            })
             .sum::<usize>()
     };
 
@@ -446,31 +455,29 @@ async fn handle_message(
         let duration_ms = start.elapsed().as_millis() as u64;
 
         match provider_response {
-            Ok(Ok(resp_msg)) => {
-                match serde_json::from_slice::<LlmResponse>(&resp_msg.payload) {
-                    Ok(resp) => {
-                        info!(
-                            provider = %provider.name(),
-                            model = %resp.model_used,
-                            duration_ms,
-                            tokens = resp.tokens.total_tokens,
-                            "LLM provider response received"
-                        );
-                        selected_provider = Some(provider.clone());
-                        llm_response = Some(resp);
-                        break;
-                    }
-                    Err(e) => {
-                        let err_msg = format!(
-                            "Provider {} failed to parse response: {}",
-                            provider.name(),
-                            e
-                        );
-                        warn!(error = %e, provider = %provider.name(), "Failed to parse response");
-                        last_error = Some(err_msg);
-                    }
+            Ok(Ok(resp_msg)) => match serde_json::from_slice::<LlmResponse>(&resp_msg.payload) {
+                Ok(resp) => {
+                    info!(
+                        provider = %provider.name(),
+                        model = %resp.model_used,
+                        duration_ms,
+                        tokens = resp.tokens.total_tokens,
+                        "LLM provider response received"
+                    );
+                    selected_provider = Some(provider.clone());
+                    llm_response = Some(resp);
+                    break;
                 }
-            }
+                Err(e) => {
+                    let err_msg = format!(
+                        "Provider {} failed to parse response: {}",
+                        provider.name(),
+                        e
+                    );
+                    warn!(error = %e, provider = %provider.name(), "Failed to parse response");
+                    last_error = Some(err_msg);
+                }
+            },
             Ok(Err(e)) => {
                 let err_msg = format!("Provider {} request failed: {}", provider.name(), e);
                 warn!(error = %e, provider = %provider.name(), "NATS request failed");
@@ -486,7 +493,10 @@ async fn handle_message(
 
     // If no provider succeeded, return error response
     let llm_response = llm_response.unwrap_or_else(|| {
-        let provider_name = selected_provider.as_ref().map(|p| p.name()).unwrap_or("unknown");
+        let provider_name = selected_provider
+            .as_ref()
+            .map(|p| p.name())
+            .unwrap_or("unknown");
         let error_msg = last_error.unwrap_or_else(|| "All providers failed".to_string());
 
         error!("All provider attempts failed: {}", error_msg);
@@ -534,10 +544,7 @@ async fn handle_message(
 // ---------------------------------------------------------------------------
 
 /// Parse routing configuration from CLI arguments.
-fn build_routing_config(
-    strategy: &str,
-    fallback_str: &str,
-) -> Result<routing::RoutingStrategy> {
+fn build_routing_config(strategy: &str, fallback_str: &str) -> Result<routing::RoutingStrategy> {
     match strategy {
         "fixed" => Ok(routing::RoutingStrategy::Fixed(routing::Provider::Google)),
         "fallback" => {

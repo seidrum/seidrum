@@ -11,8 +11,8 @@ use tokio::sync::Mutex;
 use tracing::{error, info, warn};
 
 use seidrum_common::events::{
-    AgentFeedback, ChannelInbound, EventEnvelope, FeedbackType, LlmResponse,
-    PluginHealthResponse, PluginRegister,
+    AgentFeedback, ChannelInbound, EventEnvelope, FeedbackType, LlmResponse, PluginHealthResponse,
+    PluginRegister,
 };
 
 // ---------------------------------------------------------------------------
@@ -130,10 +130,16 @@ fn extract_preference(text: &str) -> (Option<String>, Option<String>) {
     let lower = text.to_lowercase();
 
     if lower.contains("short") && lower.contains("response") {
-        return (Some("response_length".to_string()), Some("short".to_string()));
+        return (
+            Some("response_length".to_string()),
+            Some("short".to_string()),
+        );
     }
     if lower.contains("long") && lower.contains("response") {
-        return (Some("response_length".to_string()), Some("long".to_string()));
+        return (
+            Some("response_length".to_string()),
+            Some("long".to_string()),
+        );
     }
     if lower.contains("concise") {
         return (Some("style".to_string()), Some("concise".to_string()));
@@ -174,14 +180,14 @@ async fn main() -> Result<()> {
     info!("Connected to NATS");
 
     // Initialize response buffer (LRU cache)
-    let response_buffer: Arc<Mutex<LruCache<String, ResponseContext>>> =
-        Arc::new(Mutex::new(LruCache::new(
-            std::num::NonZeroUsize::new(cli.response_buffer_size).unwrap(),
-        )));
+    let response_buffer: Arc<Mutex<LruCache<String, ResponseContext>>> = Arc::new(Mutex::new(
+        LruCache::new(std::num::NonZeroUsize::new(cli.response_buffer_size).unwrap()),
+    ));
 
     // Track plugin health (shared state for spawned tasks)
     let events_processed = Arc::new(AtomicU64::new(0));
-    let last_error: Arc<tokio::sync::Mutex<Option<String>>> = Arc::new(tokio::sync::Mutex::new(None));
+    let last_error: Arc<tokio::sync::Mutex<Option<String>>> =
+        Arc::new(tokio::sync::Mutex::new(None));
     let start_time = Instant::now();
 
     // Publish plugin registration
@@ -203,8 +209,13 @@ async fn main() -> Result<()> {
         produced_event_types: vec!["AgentFeedback".to_string()],
         config_schema: None,
     };
-    let register_envelope =
-        EventEnvelope::new("plugin.register", "feedback-extractor", None, None, &register)?;
+    let register_envelope = EventEnvelope::new(
+        "plugin.register",
+        "feedback-extractor",
+        None,
+        None,
+        &register,
+    )?;
     nats.publish(
         "plugin.register",
         serde_json::to_vec(&register_envelope)?.into(),
@@ -249,7 +260,9 @@ async fn main() -> Result<()> {
                                     agent_id: envelope.scope.clone().unwrap_or_default(),
                                     conversation_id: None,
                                     message_id: Some(inbound.chat_id.clone()),
-                                    feedback_type: feedback_type.clone().unwrap_or(FeedbackType::Preference),
+                                    feedback_type: feedback_type
+                                        .clone()
+                                        .unwrap_or(FeedbackType::Preference),
                                     content: inbound.text.clone(),
                                     prior_context: {
                                         // Try to get prior response context
@@ -288,8 +301,9 @@ async fn main() -> Result<()> {
                                     }
                                 };
 
-                                if let Err(e) =
-                                    nats_clone.publish("agent.feedback", payload_bytes.into()).await
+                                if let Err(e) = nats_clone
+                                    .publish("agent.feedback", payload_bytes.into())
+                                    .await
                                 {
                                     error!(error = %e, "Failed to publish agent.feedback event");
                                 }

@@ -15,8 +15,8 @@ use seidrum_common::events::{
     ConversationCreateResponse, ConversationFindRequest, ConversationGetRequest,
     ConversationListRequest, ConversationListResponse, ConversationSummary, EntityUpsertRequest,
     EntityUpserted, EventEnvelope, FactUpsertRequest, FactUpserted, PreferencesQueryRequest,
-    PreferencesQueryResponse, ScopeAssignRequest, ScopeAssigned, SkillGetRequest,
-    SkillListRequest, SkillListResponse, SkillSaveRequest, SkillSaveResponse, SkillSearchRequest,
+    PreferencesQueryResponse, ScopeAssignRequest, ScopeAssigned, SkillGetRequest, SkillListRequest,
+    SkillListResponse, SkillSaveRequest, SkillSaveResponse, SkillSearchRequest,
     SkillSearchResponse, SkillSearchResult, UserPreference,
 };
 use serde_json::Value;
@@ -1013,8 +1013,12 @@ async fn handle_query_request(
 
     let result = match req.query_type.as_str() {
         "aql" => handle_aql_query(arango, &req, &envelope, resolved_scopes.as_ref()).await,
-        "vector_search" => handle_vector_search(arango, embedding, &req, scope_svc, &envelope).await,
-        "hybrid_search" => handle_hybrid_search(arango, embedding, &req, scope_svc, &envelope).await,
+        "vector_search" => {
+            handle_vector_search(arango, embedding, &req, scope_svc, &envelope).await
+        }
+        "hybrid_search" => {
+            handle_hybrid_search(arango, embedding, &req, scope_svc, &envelope).await
+        }
         "graph_traverse" => handle_graph_traverse(arango, &req, &envelope).await,
         "get_facts" => handle_get_facts(arango, &req, &envelope).await,
         "get_context" => handle_get_context(arango, &req, &envelope).await,
@@ -1359,11 +1363,17 @@ async fn handle_hybrid_search(
                             "depth": graph_depth,
                         });
 
-                        if let Ok(traverse_resp) = arango.execute_aql(traverse_aql, &traverse_vars).await {
-                            if let Some(neighbors) = traverse_resp.get("result").and_then(|v| v.as_array()) {
+                        if let Ok(traverse_resp) =
+                            arango.execute_aql(traverse_aql, &traverse_vars).await
+                        {
+                            if let Some(neighbors) =
+                                traverse_resp.get("result").and_then(|v| v.as_array())
+                            {
                                 for neighbor in neighbors {
                                     if let Some(vertex) = neighbor.get("vertex") {
-                                        if let Some(neighbor_key) = vertex.get("_key").and_then(|k| k.as_str()) {
+                                        if let Some(neighbor_key) =
+                                            vertex.get("_key").and_then(|k| k.as_str())
+                                        {
                                             if !seen_keys.contains(neighbor_key) {
                                                 seen_keys.insert(neighbor_key.to_string());
                                                 all_results.push(neighbor.clone());

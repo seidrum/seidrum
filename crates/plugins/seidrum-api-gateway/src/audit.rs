@@ -1,7 +1,7 @@
 //! Audit logging for API gateway events.
 
 use chrono::{DateTime, Utc};
-use serde::{Serialize, Deserialize};
+use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 use tokio::sync::RwLock;
 use tracing::info;
@@ -10,12 +10,12 @@ use tracing::info;
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct AuditEntry {
     pub timestamp: DateTime<Utc>,
-    pub action: String,       // "auth.login", "config.update", "plugin.register", etc.
-    pub subject: String,      // who did it (user ID or API key)
-    pub resource: String,     // what was affected
-    pub method: String,       // HTTP method
-    pub path: String,         // request path
-    pub status: u16,          // response status code
+    pub action: String,   // "auth.login", "config.update", "plugin.register", etc.
+    pub subject: String,  // who did it (user ID or API key)
+    pub resource: String, // what was affected
+    pub method: String,   // HTTP method
+    pub path: String,     // request path
+    pub status: u16,      // response status code
     pub details: Option<String>, // additional context
 }
 

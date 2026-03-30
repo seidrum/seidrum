@@ -1,8 +1,6 @@
 // Conversion between unified LLM format and Anthropic-specific format.
 
-use seidrum_common::events::{
-    ToolCallRequest, ToolSchema, UnifiedMessage, UnifiedToolCall,
-};
+use seidrum_common::events::{ToolCallRequest, ToolSchema, UnifiedMessage, UnifiedToolCall};
 
 use crate::anthropic_types::{AnthropicContent, AnthropicMessage, AnthropicTool};
 
@@ -25,9 +23,7 @@ pub fn unified_to_anthropic_messages(messages: &[UnifiedMessage]) -> Vec<Anthrop
         // Add text content
         if let Some(text) = &msg.content {
             if !text.is_empty() {
-                content.push(AnthropicContent::Text {
-                    text: text.clone(),
-                });
+                content.push(AnthropicContent::Text { text: text.clone() });
             }
         }
 
@@ -211,13 +207,11 @@ mod tests {
 
     #[test]
     fn test_unified_to_anthropic_tools() {
-        let tools = vec![
-            ToolSchema {
-                name: "search".to_string(),
-                description: "Search the web".to_string(),
-                parameters: serde_json::json!({"type": "object"}),
-            },
-        ];
+        let tools = vec![ToolSchema {
+            name: "search".to_string(),
+            description: "Search the web".to_string(),
+            parameters: serde_json::json!({"type": "object"}),
+        }];
 
         let anthropic_tools = unified_to_anthropic_tools(&tools);
         assert_eq!(anthropic_tools.len(), 1);

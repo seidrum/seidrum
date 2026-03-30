@@ -7,7 +7,6 @@
 /// - Routing strategy hints
 ///
 /// Supports fixed routing, fallback lists, and intelligent profile-based routing.
-
 use serde::{Deserialize, Serialize};
 use tracing::debug;
 
@@ -78,10 +77,10 @@ pub struct IntelligentRoutingConfig {
 impl Default for IntelligentRoutingConfig {
     fn default() -> Self {
         Self {
-            tool_heavy: Provider::Google,    // Gemini is good at tool calling
-            simple: Provider::Ollama,        // Local = fast + free
-            complex: Provider::Anthropic,    // Claude for reasoning
-            private: Provider::Ollama,       // Local = no data leaves machine
+            tool_heavy: Provider::Google, // Gemini is good at tool calling
+            simple: Provider::Ollama,     // Local = fast + free
+            complex: Provider::Anthropic, // Claude for reasoning
+            private: Provider::Ollama,    // Local = no data leaves machine
             fallback: Provider::Google,
         }
     }
@@ -113,10 +112,7 @@ pub struct RequestProfile {
 /// 2. Check routing strategy hint and scope for privacy requirements
 /// 3. Route by request characteristics (tool-heavy, simple, complex)
 /// 4. Use fallback as the default
-pub fn select_provider(
-    profile: &RequestProfile,
-    config: &RoutingStrategy,
-) -> Provider {
+pub fn select_provider(profile: &RequestProfile, config: &RoutingStrategy) -> Provider {
     match config {
         RoutingStrategy::Fixed(p) => p.clone(),
         RoutingStrategy::Fallback(providers) => {
@@ -179,7 +175,10 @@ fn select_intelligent(profile: &RequestProfile, config: &IntelligentRoutingConfi
 
     // 4. Route by request characteristics
     if profile.tool_count > 3 {
-        debug!(tool_count = profile.tool_count, "Routing to tool-heavy provider");
+        debug!(
+            tool_count = profile.tool_count,
+            "Routing to tool-heavy provider"
+        );
         return config.tool_heavy.clone();
     }
 

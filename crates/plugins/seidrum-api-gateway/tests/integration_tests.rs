@@ -2,10 +2,10 @@
 
 #[cfg(test)]
 mod tests {
+    use seidrum_api_gateway::audit::{AuditEntryBuilder, AuditLog};
     use seidrum_api_gateway::auth::AuthHandler;
     use seidrum_api_gateway::jwt::JwtService;
-    use seidrum_api_gateway::rate_limiter::{RateLimiter, RateLimitConfig};
-    use seidrum_api_gateway::audit::{AuditLog, AuditEntryBuilder};
+    use seidrum_api_gateway::rate_limiter::{RateLimitConfig, RateLimiter};
 
     #[test]
     fn test_auth_handler_api_key() {
@@ -19,11 +19,7 @@ mod tests {
     #[test]
     fn test_auth_handler_jwt() {
         let jwt_secret = "jwt-secret";
-        let handler = AuthHandler::new(
-            "api-key".to_string(),
-            Some(jwt_secret.to_string()),
-            3600,
-        );
+        let handler = AuthHandler::new("api-key".to_string(), Some(jwt_secret.to_string()), 3600);
 
         let jwt_svc = handler.jwt_service.as_ref().unwrap();
         let token = jwt_svc
@@ -53,9 +49,7 @@ mod tests {
     #[test]
     fn test_jwt_expiration() {
         let jwt = JwtService::new("secret123", 0);
-        let token = jwt
-            .generate_token("user1", "admin", vec![])
-            .unwrap();
+        let token = jwt.generate_token("user1", "admin", vec![]).unwrap();
 
         std::thread::sleep(std::time::Duration::from_secs(1));
         let result = jwt.validate_token(&token);

@@ -116,9 +116,13 @@ async fn run_serve() -> anyhow::Result<()> {
 
     // Create embedding service
     let embedding_service = embedding::service::EmbeddingService::from_env()?;
-    info!("Embedding service initialized (available: {})", embedding_service.is_available());
+    info!(
+        "Embedding service initialized (available: {})",
+        embedding_service.is_available()
+    );
 
-    let brain_service = brain::service::BrainService::new(arango_client, nats_client.clone(), embedding_service);
+    let brain_service =
+        brain::service::BrainService::new(arango_client, nats_client.clone(), embedding_service);
     let brain_handle = tokio::spawn(async move {
         if let Err(e) = brain_service.run().await {
             error!(error = %e, "brain service exited with error");

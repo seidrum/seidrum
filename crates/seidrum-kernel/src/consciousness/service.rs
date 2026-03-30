@@ -257,10 +257,9 @@ impl ConsciousnessService {
                         };
 
                         // If preference info is present, store as a fact
-                        if let (Some(key), Some(value)) = (
-                            feedback.preference_key,
-                            feedback.preference_value,
-                        ) {
+                        if let (Some(key), Some(value)) =
+                            (feedback.preference_key, feedback.preference_value)
+                        {
                             let _ = store_preference_fact(
                                 &nats_feedback,
                                 &feedback.agent_id,
@@ -1145,22 +1144,20 @@ async fn query_user_preferences(
     )
     .await
     {
-        Ok(Ok(resp)) => {
-            match serde_json::from_slice::<PreferencesQueryResponse>(&resp.payload) {
-                Ok(r) => {
-                    debug!(
-                        agent_id = %agent_id,
-                        count = r.preferences.len(),
-                        "Loaded user preferences"
-                    );
-                    r.preferences
-                }
-                Err(e) => {
-                    warn!(agent_id = %agent_id, error = %e, "Failed to deserialize preferences response");
-                    Vec::new()
-                }
+        Ok(Ok(resp)) => match serde_json::from_slice::<PreferencesQueryResponse>(&resp.payload) {
+            Ok(r) => {
+                debug!(
+                    agent_id = %agent_id,
+                    count = r.preferences.len(),
+                    "Loaded user preferences"
+                );
+                r.preferences
             }
-        }
+            Err(e) => {
+                warn!(agent_id = %agent_id, error = %e, "Failed to deserialize preferences response");
+                Vec::new()
+            }
+        },
         Ok(Err(e)) => {
             debug!(agent_id = %agent_id, error = %e, "Preferences query request failed");
             Vec::new()

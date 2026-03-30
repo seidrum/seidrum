@@ -1485,7 +1485,10 @@ mod tests {
         assert_eq!(pref.key, deserialized.key);
         assert_eq!(pref.value, deserialized.value);
         assert_eq!(pref.confidence, deserialized.confidence);
-        assert_eq!(pref.source_feedback_count, deserialized.source_feedback_count);
+        assert_eq!(
+            pref.source_feedback_count,
+            deserialized.source_feedback_count
+        );
     }
 
     #[test]

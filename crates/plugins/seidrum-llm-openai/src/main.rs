@@ -13,7 +13,10 @@ use seidrum_common::events::{
 };
 
 use openai_types::{OpenAiMessage, OpenAiRequest, OpenAiResponse};
-use translator::{openai_tool_calls_to_unified, tool_call_to_dispatch_request, unified_to_openai_messages, unified_to_openai_tools};
+use translator::{
+    openai_tool_calls_to_unified, tool_call_to_dispatch_request, unified_to_openai_messages,
+    unified_to_openai_tools,
+};
 
 // ---------------------------------------------------------------------------
 // CLI args

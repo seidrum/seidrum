@@ -51,7 +51,11 @@ impl AuthHandler {
 
     /// Authenticate a request, supporting both API key and JWT Bearer token.
     /// Returns AuthResult if valid, None otherwise.
-    pub fn authenticate(&self, auth_header: &str, api_key_param: Option<String>) -> Option<AuthResult> {
+    pub fn authenticate(
+        &self,
+        auth_header: &str,
+        api_key_param: Option<String>,
+    ) -> Option<AuthResult> {
         // Try JWT Bearer token first
         if let Some(token) = auth_header.strip_prefix("Bearer ") {
             if let Some(jwt_service) = &self.jwt_service {
