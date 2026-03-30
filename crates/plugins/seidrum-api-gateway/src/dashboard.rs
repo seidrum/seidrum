@@ -27,6 +27,7 @@ use crate::AppState;
 
 #[derive(Serialize)]
 #[serde(tag = "query_type")]
+#[allow(dead_code)]
 enum RegistryQuery {
     #[serde(rename = "list_plugins")]
     ListPlugins,
@@ -37,13 +38,12 @@ enum RegistryQuery {
 }
 
 #[derive(Deserialize)]
+#[allow(dead_code)]
 struct RegistryQueryResponse {
-    #[allow(dead_code)]
     success: bool,
     plugin: Option<PluginRegister>,
     plugins: Option<Vec<PluginRegister>>,
     config_schema: Option<serde_json::Value>,
-    #[allow(dead_code)]
     error: Option<String>,
 }
 

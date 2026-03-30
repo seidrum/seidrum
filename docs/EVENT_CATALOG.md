@@ -438,6 +438,106 @@ struct DecayCompleted {
 
 ---
 
+## Feedback Events
+
+### `agent.feedback`
+Emitted when the feedback extractor detects user feedback.
+
+```rust
+struct AgentFeedback {
+    agent_id: String,
+    conversation_id: Option<String>,
+    feedback_type: String,          // "correction" | "confirmation" | "preference" | "rating"
+    content: String,
+    prior_context: Option<String>,
+    preference_key: Option<String>,
+    preference_value: Option<String>,
+    confidence: f64,                // 0.0-1.0
+    timestamp: DateTime<Utc>,
+}
+```
+
+### `agent.preferences.query` (request/reply)
+
+Query aggregated user preferences for an agent.
+
+Request:
+```rust
+struct PreferencesQueryRequest {
+    agent_id: String,
+    scope: Option<String>,
+    category: Option<String>,
+}
+```
+
+Response:
+```rust
+struct PreferencesQueryResponse {
+    preferences: Vec<UserPreference>,
+}
+
+struct UserPreference {
+    key: String,
+    value: String,
+    category: Option<String>,
+    confidence: f64,
+    updated_at: DateTime<Utc>,
+}
+```
+
+---
+
+## Trace Events
+
+### `trace.get` (request/reply)
+
+Get a specific trace by correlation_id.
+
+```rust
+struct TraceGetRequest {
+    correlation_id: String,
+}
+
+struct TraceGetResponse {
+    trace: Option<ExecutionTrace>,
+}
+
+struct ExecutionTrace {
+    correlation_id: String,
+    start_time: DateTime<Utc>,
+    end_time: Option<DateTime<Utc>>,
+    events: Vec<TraceEvent>,
+    duration_ms: Option<u64>,
+}
+
+struct TraceEvent {
+    timestamp: DateTime<Utc>,
+    event_type: String,
+    source: String,
+    duration_ms: Option<u64>,
+    status: String,                 // "success" | "error" | "pending"
+}
+```
+
+### `trace.list` (request/reply)
+
+List recent traces with optional filters.
+
+```rust
+struct TraceListRequest {
+    limit: Option<u32>,
+    agent_id: Option<String>,
+    start_time: Option<DateTime<Utc>>,
+    end_time: Option<DateTime<Utc>>,
+}
+
+struct TraceListResponse {
+    traces: Vec<ExecutionTrace>,
+}
+```
+
+---
+
 ## Plugin Storage Events
 
 ### `storage.get` (request/reply)

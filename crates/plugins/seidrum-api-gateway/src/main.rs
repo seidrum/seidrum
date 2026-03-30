@@ -1,7 +1,11 @@
+mod audit;
 mod auth;
 mod connections;
 mod dashboard;
+mod event_stream;
+mod jwt;
 mod protocol;
+mod rate_limiter;
 mod rest;
 mod ws;
 
@@ -9,11 +13,11 @@ use std::time::Instant;
 
 use anyhow::{Context, Result};
 use axum::extract::ws::WebSocketUpgrade;
-use axum::extract::{Query, Request, State};
+use axum::extract::{Path, Query, Request, State};
 use axum::http::{header, StatusCode, Uri};
 use axum::middleware::{self, Next};
 use axum::response::IntoResponse;
-use axum::routing::{delete, get, post, put};
+use axum::routing::{delete, get, post};
 use axum::Router;
 use clap::Parser;
 use rust_embed::Embed;
@@ -21,9 +25,12 @@ use seidrum_common::events::PluginRegister;
 use seidrum_common::nats_utils::NatsClient;
 use tower_http::cors::CorsLayer;
 use tower_http::trace::TraceLayer;
-use tracing::info;
+use tracing::{info, warn};
 
+use audit::AuditLog;
+use auth::AuthHandler;
 use connections::ConnectionManager;
+use rate_limiter::{RateLimitConfig, RateLimiter};
 
 const PLUGIN_ID: &str = "api-gateway";
 const PLUGIN_NAME: &str = "API Gateway";
@@ -44,6 +51,22 @@ struct Cli {
     /// API key for authentication (required)
     #[arg(long, env = "GATEWAY_API_KEY")]
     api_key: String,
+
+    /// JWT secret for token signing
+    #[arg(long, env = "GATEWAY_JWT_SECRET")]
+    jwt_secret: Option<String>,
+
+    /// JWT token TTL in seconds
+    #[arg(long, env = "GATEWAY_JWT_TTL", default_value = "86400")]
+    jwt_ttl: u64,
+
+    /// Rate limit: requests per minute for regular users
+    #[arg(long, env = "GATEWAY_RATE_LIMIT", default_value = "60")]
+    rate_limit: u32,
+
+    /// Rate limit: requests per minute for admin users
+    #[arg(long, env = "GATEWAY_RATE_LIMIT_ADMIN", default_value = "300")]
+    rate_limit_admin: u32,
 }
 
 /// Shared application state.
@@ -52,6 +75,9 @@ pub struct AppState {
     pub nats: NatsClient,
     pub connections: ConnectionManager,
     pub api_key: String,
+    pub auth_handler: AuthHandler,
+    pub rate_limiter: RateLimiter,
+    pub audit_log: AuditLog,
     pub start_time: Instant,
 }
 
@@ -92,10 +118,20 @@ async fn main() -> Result<()> {
     info!("Plugin registered");
 
     // Build shared state
+    let auth_handler = AuthHandler::new(cli.api_key.clone(), cli.jwt_secret.clone(), cli.jwt_ttl);
+    let rate_limit_config = RateLimitConfig {
+        regular_rpm: cli.rate_limit,
+        admin_rpm: cli.rate_limit_admin,
+        cleanup_interval_secs: 300,
+    };
+
     let state = AppState {
         nats: nats.clone(),
         connections: ConnectionManager::new(),
         api_key: cli.api_key,
+        auth_handler,
+        rate_limiter: RateLimiter::new(rate_limit_config),
+        audit_log: AuditLog::new(1000),
         start_time: Instant::now(),
     };
 
@@ -109,9 +145,21 @@ async fn main() -> Result<()> {
         }
     });
 
+    // Spawn rate limiter cleanup (every 5 minutes)
+    let cleanup_limiter = state.rate_limiter.clone();
+    tokio::spawn(async move {
+        let mut interval = tokio::time::interval(std::time::Duration::from_secs(300));
+        loop {
+            interval.tick().await;
+            cleanup_limiter.cleanup_stale_entries(600).await;
+        }
+    });
+
     // Build axum router
     // Authenticated REST + dashboard API routes
     let api_routes = Router::new()
+        .route("/auth/token", post(auth_token_handler))
+        .route("/audit", get(get_audit_log))
         .route("/plugins", get(rest::list_plugins))
         .route("/plugins/{id}", delete(rest::deregister_plugin))
         .route("/capabilities/{id}/call", post(rest::call_capability))
@@ -120,6 +168,9 @@ async fn main() -> Result<()> {
         .route("/storage/set", post(rest::storage_set))
         .route("/storage/delete", post(rest::storage_delete))
         .route("/storage/list", post(rest::storage_list))
+        // Trace endpoints
+        .route("/traces", get(list_traces))
+        .route("/traces/:correlation_id", get(get_trace))
         // Dashboard endpoints
         .route("/dashboard/overview", get(dashboard::overview))
         .route(
@@ -146,11 +197,12 @@ async fn main() -> Result<()> {
         )
         .layer(middleware::from_fn_with_state(
             state.clone(),
-            bearer_auth_middleware,
+            auth_rate_limit_middleware,
         ));
 
     let app = Router::new()
         .route("/ws", get(ws_handler))
+        .route("/ws/events", get(ws_events_handler))
         .route("/api/v1/health", get(rest::health))
         .nest("/api/v1", api_routes)
         // Dashboard static files (no auth — HTML/CSS/JS)
@@ -184,9 +236,13 @@ async fn ws_handler(
     Query(query): Query<WsQuery>,
     ws: WebSocketUpgrade,
 ) -> impl IntoResponse {
-    let api_key = query.api_key.unwrap_or_default();
+    let api_key = query.api_key.clone();
 
-    if !auth::validate_api_key(&api_key, &state.api_key) {
+    // Authenticate the request
+    let auth_header = format!("ApiKey {}", api_key.unwrap_or_default());
+    let auth_result = state.auth_handler.authenticate(&auth_header, None);
+
+    if auth_result.is_none() {
         return StatusCode::UNAUTHORIZED.into_response();
     }
 
@@ -197,25 +253,319 @@ async fn ws_handler(
         .into_response()
 }
 
-/// Middleware that checks the Authorization: Bearer header against the API key.
-async fn bearer_auth_middleware(
+/// Middleware that enforces authentication, rate limiting, and audit logging.
+async fn auth_rate_limit_middleware(
     State(state): State<AppState>,
-    req: Request,
+    mut req: Request,
     next: Next,
 ) -> impl IntoResponse {
+    let method = req.method().to_string();
+    let path = req.uri().path().to_string();
+
+    // Extract authorization header
     let auth_header = req
         .headers()
         .get("authorization")
         .and_then(|v| v.to_str().ok())
-        .unwrap_or("");
+        .unwrap_or("")
+        .to_string();
 
-    let token = auth_header.strip_prefix("Bearer ").unwrap_or("");
+    // Extract API key from query parameters if present (deprecated — prefer Authorization header)
+    let api_key_param = req.uri().query().and_then(|q| {
+        q.split('&')
+            .find(|p| p.starts_with("api_key="))
+            .and_then(|p| p.strip_prefix("api_key="))
+            .map(|k| k.to_string())
+    });
 
-    if !auth::validate_api_key(token, &state.api_key) {
+    if api_key_param.is_some() {
+        warn!(
+            path = %path,
+            "API key passed via query parameter — this is deprecated and will be removed. Use the Authorization header instead."
+        );
+    }
+
+    // Authenticate
+    let auth_result = state.auth_handler.authenticate(&auth_header, api_key_param);
+
+    let auth_result = match auth_result {
+        Some(result) => result,
+        None => {
+            state
+                .audit_log
+                .log(
+                    audit::AuditEntryBuilder::new("auth.failed", "unknown", &path)
+                        .method(&method)
+                        .path(&path)
+                        .status(401)
+                        .build(),
+                )
+                .await;
+            return StatusCode::UNAUTHORIZED.into_response();
+        }
+    };
+
+    // Check rate limit
+    let (allowed, remaining, retry_after) = state
+        .rate_limiter
+        .check_rate_limit(&auth_result.subject, auth_result.is_admin())
+        .await;
+
+    if !allowed {
+        let retry_after_secs = retry_after.unwrap_or(1);
+        state
+            .audit_log
+            .log(
+                audit::AuditEntryBuilder::new("rate_limit.exceeded", &auth_result.subject, &path)
+                    .method(&method)
+                    .path(&path)
+                    .status(429)
+                    .details(&format!("retry_after: {}s", retry_after_secs))
+                    .build(),
+            )
+            .await;
+
+        return (
+            StatusCode::TOO_MANY_REQUESTS,
+            [(
+                axum::http::header::RETRY_AFTER,
+                axum::http::HeaderValue::from_str(&retry_after_secs.to_string()).unwrap(),
+            )],
+        )
+            .into_response();
+    }
+
+    // Store auth result in extensions for handlers to use
+    req.extensions_mut().insert(auth_result);
+
+    // Add rate limit info to response headers (if applicable)
+    let mut response = next.run(req).await;
+    response.headers_mut().insert(
+        "X-Rate-Limit-Remaining",
+        remaining
+            .to_string()
+            .parse()
+            .unwrap_or_else(|_| axum::http::HeaderValue::from_static("0")),
+    );
+
+    response
+}
+
+/// WebSocket handler for real-time event streaming with optional filtering.
+/// Requires authentication via api_key query parameter.
+async fn ws_events_handler(
+    State(state): State<AppState>,
+    Query(query): Query<event_stream::EventStreamQuery>,
+    ws: WebSocketUpgrade,
+) -> impl IntoResponse {
+    // Authenticate the request via api_key query parameter or Authorization header
+    let api_key = query.api_key.clone();
+    let auth_header = format!("ApiKey {}", api_key.unwrap_or_default());
+    let auth_result = state.auth_handler.authenticate(&auth_header, None);
+
+    if auth_result.is_none() {
         return StatusCode::UNAUTHORIZED.into_response();
     }
 
-    next.run(req).await.into_response()
+    let nats = state.nats.clone();
+    ws.on_upgrade(move |socket| {
+        event_stream::handle_event_stream(socket, nats, query.filter, query.correlation_id)
+    })
+    .into_response()
+}
+
+/// Handle JWT token generation from API key.
+/// POST /api/v1/auth/token
+async fn auth_token_handler(
+    State(state): State<AppState>,
+    axum::Json(req): axum::Json<auth::TokenRequest>,
+) -> impl IntoResponse {
+    // Validate the API key
+    if !auth::validate_api_key(&req.api_key, &state.api_key) {
+        state
+            .audit_log
+            .log(
+                audit::AuditEntryBuilder::new("auth.token_failed", "unknown", "auth_token")
+                    .method("POST")
+                    .path("/api/v1/auth/token")
+                    .status(401)
+                    .build(),
+            )
+            .await;
+        return (
+            StatusCode::UNAUTHORIZED,
+            axum::Json(serde_json::json!({"error": "invalid api_key"})),
+        )
+            .into_response();
+    }
+
+    // Generate JWT token
+    if let Some(jwt_service) = &state.auth_handler.jwt_service {
+        let subject = req.subject.unwrap_or_else(|| "api-user".to_string());
+        let role = req.role.unwrap_or_else(|| "admin".to_string());
+        let scopes = req.scopes.unwrap_or_else(|| vec!["scope_root".to_string()]);
+
+        match jwt_service.generate_token(&subject, &role, scopes) {
+            Ok(token) => {
+                state
+                    .audit_log
+                    .log(
+                        audit::AuditEntryBuilder::new("auth.token_issued", &subject, "auth_token")
+                            .method("POST")
+                            .path("/api/v1/auth/token")
+                            .status(200)
+                            .build(),
+                    )
+                    .await;
+
+                let ttl = state
+                    .auth_handler
+                    .jwt_service
+                    .as_ref()
+                    .unwrap()
+                    .token_ttl_secs;
+                (
+                    StatusCode::OK,
+                    axum::Json(auth::TokenResponse {
+                        token,
+                        expires_in: ttl,
+                    }),
+                )
+                    .into_response()
+            }
+            Err(e) => (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                axum::Json(serde_json::json!({"error": format!("token generation failed: {}", e)})),
+            )
+                .into_response(),
+        }
+    } else {
+        (
+            StatusCode::BAD_REQUEST,
+            axum::Json(serde_json::json!({"error": "JWT service not configured"})),
+        )
+            .into_response()
+    }
+}
+
+/// Get recent audit log entries.
+/// GET /api/v1/audit?limit=50&since=<iso8601>
+async fn get_audit_log(
+    State(state): State<AppState>,
+    Query(params): Query<std::collections::HashMap<String, String>>,
+) -> impl IntoResponse {
+    let limit = params
+        .get("limit")
+        .and_then(|l| l.parse::<usize>().ok())
+        .unwrap_or(50);
+
+    let since = params
+        .get("since")
+        .and_then(|s| chrono::DateTime::parse_from_rfc3339(s).ok())
+        .map(|dt| dt.with_timezone(&chrono::Utc));
+
+    let entries = state.audit_log.query(limit, since).await;
+    (StatusCode::OK, axum::Json(entries)).into_response()
+}
+
+/// Get a specific trace by correlation_id.
+async fn get_trace(
+    State(state): State<AppState>,
+    Path(correlation_id): Path<String>,
+) -> impl IntoResponse {
+    let req = event_stream::trace_collector::TraceGetRequest { correlation_id };
+    match serde_json::to_vec(&req) {
+        Ok(req_bytes) => {
+            match state
+                .nats
+                .inner()
+                .request("trace.get".to_string(), req_bytes.into())
+                .await
+            {
+                Ok(msg) => {
+                    match serde_json::from_slice::<Option<event_stream::trace_collector::Trace>>(
+                        &msg.payload,
+                    ) {
+                        Ok(Some(trace)) => (StatusCode::OK, axum::Json(trace)).into_response(),
+                        Ok(None) => (
+                            StatusCode::NOT_FOUND,
+                            axum::Json(serde_json::json!({"error": "trace not found"})),
+                        )
+                            .into_response(),
+                        Err(e) => (
+                            StatusCode::INTERNAL_SERVER_ERROR,
+                            axum::Json(serde_json::json!({"error": format!("failed to parse trace: {}", e)})),
+                        )
+                            .into_response(),
+                    }
+                }
+                Err(e) => (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    axum::Json(
+                        serde_json::json!({"error": format!("failed to query trace: {}", e)}),
+                    ),
+                )
+                    .into_response(),
+            }
+        }
+        Err(e) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            axum::Json(serde_json::json!({"error": format!("failed to serialize request: {}", e)})),
+        )
+            .into_response(),
+    }
+}
+
+/// List recent traces with optional filtering.
+async fn list_traces(
+    State(state): State<AppState>,
+    Query(params): Query<std::collections::HashMap<String, String>>,
+) -> impl IntoResponse {
+    let limit = params
+        .get("limit")
+        .and_then(|l| l.parse::<usize>().ok())
+        .or(Some(50));
+    let since = params
+        .get("since")
+        .and_then(|s| chrono::DateTime::parse_from_rfc3339(s).ok())
+        .map(|dt| dt.with_timezone(&chrono::Utc));
+
+    let req = event_stream::trace_collector::TraceListRequest { limit, since };
+    match serde_json::to_vec(&req) {
+        Ok(req_bytes) => {
+            match state
+                .nats
+                .inner()
+                .request("trace.list".to_string(), req_bytes.into())
+                .await
+            {
+                Ok(msg) => {
+                    match serde_json::from_slice::<event_stream::trace_collector::TraceListResponse>(
+                        &msg.payload,
+                    ) {
+                        Ok(response) => (StatusCode::OK, axum::Json(response)).into_response(),
+                        Err(e) => (
+                            StatusCode::INTERNAL_SERVER_ERROR,
+                            axum::Json(serde_json::json!({"error": format!("failed to parse traces: {}", e)})),
+                        )
+                            .into_response(),
+                    }
+                }
+                Err(e) => (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    axum::Json(
+                        serde_json::json!({"error": format!("failed to query traces: {}", e)}),
+                    ),
+                )
+                    .into_response(),
+            }
+        }
+        Err(e) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            axum::Json(serde_json::json!({"error": format!("failed to serialize request: {}", e)})),
+        )
+            .into_response(),
+    }
 }
 
 // ---------------------------------------------------------------------------

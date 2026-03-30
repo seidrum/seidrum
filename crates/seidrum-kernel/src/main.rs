@@ -17,6 +17,7 @@ mod registry;
 mod scheduler;
 mod scope;
 mod tool_registry;
+mod trace_collector;
 
 #[derive(Parser)]
 #[command(name = "seidrum-kernel", about = "Seidrum kernel daemon")]
@@ -113,7 +114,15 @@ async fn run_serve() -> anyhow::Result<()> {
         brain::client::ArangoClient::new(&arango_url, &arango_database, &arango_password)?;
     info!("ArangoDB client created ({})", arango_url);
 
-    let brain_service = brain::service::BrainService::new(arango_client, nats_client.clone());
+    // Create embedding service
+    let embedding_service = embedding::service::EmbeddingService::from_env()?;
+    info!(
+        "Embedding service initialized (available: {})",
+        embedding_service.is_available()
+    );
+
+    let brain_service =
+        brain::service::BrainService::new(arango_client, nats_client.clone(), embedding_service);
     let brain_handle = tokio::spawn(async move {
         if let Err(e) = brain_service.run().await {
             error!(error = %e, "brain service exited with error");
@@ -172,6 +181,14 @@ async fn run_serve() -> anyhow::Result<()> {
     let consciousness_handle = consciousness_service.spawn().await?;
     info!("consciousness service started");
 
+    // 8. Spawn the trace collector service.
+    let trace_collector = trace_collector::service::TraceCollectorService::new(
+        nats_client.clone(),
+        10000, // max traces in memory
+    );
+    let trace_collector_handle = trace_collector.spawn().await?;
+    info!("trace collector service started");
+
     // 9. Load system skills from YAML files.
     let embedding_service = embedding::service::EmbeddingService::from_env()?;
     let skills_arango =
@@ -206,6 +223,9 @@ async fn run_serve() -> anyhow::Result<()> {
         }
         _ = consciousness_handle => {
             warn!("consciousness service exited unexpectedly");
+        }
+        _ = trace_collector_handle => {
+            warn!("trace collector service exited unexpectedly");
         }
         _ = tokio::signal::ctrl_c() => {
             info!("received Ctrl-C, shutting down...");
@@ -449,6 +469,9 @@ fn run_validate(config_path: &str) -> bool {
             "graph-context-loader",
             "llm-router",
             "llm-google",
+            "llm-openai",
+            "llm-anthropic",
+            "llm-ollama",
             "tool-dispatcher",
             "event-emitter",
             "response-formatter",
@@ -464,6 +487,7 @@ fn run_validate(config_path: &str) -> bool {
             "cli",
             "claude-code",
             "api-gateway",
+            "feedback-extractor",
         ]
         .into_iter()
         .collect();

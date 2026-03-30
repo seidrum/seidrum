@@ -28,6 +28,7 @@ pub async fn nats_request<T: serde::Serialize, R: serde::de::DeserializeOwned>(
 }
 
 /// Generate a unique test ID to avoid collisions between test runs.
+#[allow(dead_code)]
 pub fn test_id(prefix: &str) -> String {
     format!("{}-{}", prefix, ulid::Ulid::new().to_string())
 }

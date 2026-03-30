@@ -225,6 +225,99 @@ Config:
   tools: tool registry and pinned tools config
 ```
 
+### llm-openai
+
+```
+Consumes: llm.request.openai
+Produces: llm.response
+
+Behavior:
+1. Subscribes to llm.request.openai events
+2. Formats request according to OpenAI API schema
+3. Calls OpenAI API (https://api.openai.com/v1/chat/completions)
+4. Handles tool calls via function_calling mode
+5. Returns llm.response event
+
+Config:
+  model: OpenAI model name (default: gpt-4o)
+  max_tokens: maximum response tokens
+  temperature: sampling temperature
+
+Env:
+  - OPENAI_API_KEY (required)
+  - LLM_MODEL (optional, overrides config)
+```
+
+### llm-anthropic
+
+```
+Consumes: llm.request.anthropic
+Produces: llm.response
+
+Behavior:
+1. Subscribes to llm.request.anthropic events
+2. Formats request according to Anthropic API schema
+3. Calls Anthropic API (https://api.anthropic.com/v1/messages)
+4. Handles tool use via tools mode
+5. Returns llm.response event
+
+Config:
+  model: Anthropic model name (default: claude-sonnet-4-6)
+  max_tokens: maximum response tokens
+  temperature: sampling temperature
+
+Env:
+  - ANTHROPIC_API_KEY (required)
+  - LLM_MODEL (optional, overrides config)
+```
+
+### llm-ollama
+
+```
+Consumes: llm.request.ollama
+Produces: llm.response
+
+Behavior:
+1. Subscribes to llm.request.ollama events
+2. Formats request according to Ollama API schema
+3. Calls Ollama API (POST http://{host}:11434/api/chat)
+4. Supports local model inference with tool calling
+5. Returns llm.response event
+
+Config:
+  model: Ollama model name (default: llama3.2)
+  ollama_url: Ollama server URL (default: http://localhost:11434)
+  max_tokens: maximum response tokens
+  temperature: sampling temperature
+
+Env:
+  - OLLAMA_URL (optional, overrides config)
+  - LLM_MODEL (optional, overrides config)
+```
+
+### feedback-extractor
+
+```
+Consumes: channel.*.inbound
+Produces: agent.feedback
+
+Behavior:
+1. Listen to all incoming messages from any channel
+2. Analyze message text for feedback signals:
+   - Corrections to prior assistant responses
+   - Confirmations of accuracy
+   - Explicit preference statements
+   - Ratings or sentiment indicators
+3. Extract structured feedback with confidence scores
+4. Publish agent.feedback event with categorized feedback type
+5. Optionally store preferences in brain for future reference
+
+Config:
+  confidence_threshold: minimum confidence to emit event (default: 0.5)
+  max_feedback_length: truncate very long feedback (default: 2000)
+  categories: list of feedback categories to detect (default: [correction, confirmation, preference, rating])
+```
+
 ### entity-extractor
 
 ```

@@ -84,6 +84,7 @@ pub struct GeminiFunctionResponse {
 
 impl GeminiContent {
     /// Create a simple text message.
+    #[allow(dead_code)]
     pub fn text(role: &str, content: &str) -> Self {
         Self {
             role: role.to_string(),
@@ -155,6 +156,7 @@ pub struct GeminiCandidate {
 
 #[derive(Deserialize, Debug)]
 #[serde(rename_all = "camelCase")]
+#[allow(dead_code)]
 pub struct GeminiUsageMetadata {
     #[serde(default)]
     pub prompt_token_count: u32,

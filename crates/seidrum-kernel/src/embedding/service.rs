@@ -14,6 +14,7 @@ pub struct EmbeddingService {
     api_key: String,
     http: Client,
     model: String,
+    #[allow(dead_code)]
     pub dimension: u32,
 }
 

@@ -1,0 +1,17 @@
+skill:
+  id: daily-digest
+  name: Daily Digest
+  description: Compile a daily summary of new entities, facts, completed tasks, and notable patterns
+  trigger:
+    event_pattern: "agent.proactive-monitor.wake"
+    wake_reason_contains: "daily_digest"
+  steps:
+    - query: "FOR f IN facts FILTER f.created_at >= DATE_SUBTRACT(DATE_NOW(), 1, 'day') SORT f.created_at DESC LIMIT 20 RETURN f"
+      label: "Recent facts"
+    - query: "FOR t IN tasks FILTER t.status == 'completed' AND t.completed_at >= DATE_SUBTRACT(DATE_NOW(), 1, 'day') RETURN t"
+      label: "Completed tasks"
+    - query: "FOR e IN entities FILTER e.created_at >= DATE_SUBTRACT(DATE_NOW(), 1, 'day') SORT e.created_at DESC LIMIT 10 RETURN e"
+      label: "New entities"
+  output:
+    format: summary
+    channel: telegram

@@ -1,0 +1,13 @@
+skill:
+  id: task-followup
+  name: Task Follow-up
+  description: Check on a task's completion status and remind the user if overdue
+  trigger:
+    event_pattern: "agent.proactive-monitor.wake"
+    wake_reason_contains: "task_followup"
+  steps:
+    - query: "FOR t IN tasks FILTER t._key == @task_key RETURN t"
+      label: "Task status"
+  output:
+    format: notification
+    channel: telegram

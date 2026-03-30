@@ -124,7 +124,7 @@ fn run_systemctl(user_args: &[&str], command: &str) -> Result<()> {
 fn uninstall_systemd() -> Result<()> {
     let unit_path = systemd_unit_path();
     let is_user = unsafe { libc::getuid() } != 0;
-    let user_flag = if is_user { " --user" } else { "" };
+    let _user_flag = if is_user { " --user" } else { "" };
 
     // Stop and disable first
     let _ = std::process::Command::new("systemctl")

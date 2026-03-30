@@ -46,6 +46,8 @@ services:
       dockerfile: crates/plugins/seidrum-llm-router/Dockerfile
     environment:
       NATS_URL: nats://nats:4222
+      LLM_ROUTING_STRATEGY: ${LLM_ROUTING_STRATEGY:-fallback}
+      LLM_FALLBACK_PROVIDERS: ${LLM_FALLBACK_PROVIDERS:-google,openai,anthropic}
     depends_on: [nats]
     restart: unless-stopped
 
@@ -163,6 +165,48 @@ services:
       NATS_URL: nats://nats:4222
       NOTIFICATION_CHANNEL: ${NOTIFICATION_CHANNEL:-telegram}
       NOTIFICATION_LEVEL: ${NOTIFICATION_LEVEL:-all}
+    depends_on: [nats]
+    restart: unless-stopped
+
+  llm-openai:
+    build:
+      context: .
+      dockerfile: crates/plugins/seidrum-llm-openai/Dockerfile
+    environment:
+      NATS_URL: nats://nats:4222
+      OPENAI_API_KEY: ${OPENAI_API_KEY}
+      LLM_MODEL: ${LLM_OPENAI_MODEL:-gpt-4o}
+    depends_on: [nats]
+    restart: unless-stopped
+
+  llm-anthropic:
+    build:
+      context: .
+      dockerfile: crates/plugins/seidrum-llm-anthropic/Dockerfile
+    environment:
+      NATS_URL: nats://nats:4222
+      ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY}
+      LLM_MODEL: ${LLM_ANTHROPIC_MODEL:-claude-sonnet-4-6}
+    depends_on: [nats]
+    restart: unless-stopped
+
+  llm-ollama:
+    build:
+      context: .
+      dockerfile: crates/plugins/seidrum-llm-ollama/Dockerfile
+    environment:
+      NATS_URL: nats://nats:4222
+      OLLAMA_URL: ${OLLAMA_URL:-http://ollama:11434}
+      LLM_MODEL: ${LLM_OLLAMA_MODEL:-llama3.2}
+    depends_on: [nats]
+    restart: unless-stopped
+
+  feedback-extractor:
+    build:
+      context: .
+      dockerfile: crates/plugins/seidrum-feedback-extractor/Dockerfile
+    environment:
+      NATS_URL: nats://nats:4222
     depends_on: [nats]
     restart: unless-stopped
 

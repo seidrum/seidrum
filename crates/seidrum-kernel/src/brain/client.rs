@@ -239,6 +239,44 @@ impl ArangoClient {
         Ok(())
     }
 
+    /// Create a vector index on a collection (ArangoDB 3.12+).
+    pub async fn create_vector_index(
+        &self,
+        collection: &str,
+        field: &str,
+        dimension: u32,
+        metric: &str,
+    ) -> Result<()> {
+        let url = self.db_url(&format!("/_api/index?collection={}", collection));
+        let body = serde_json::json!({
+            "type": "mdi-prefixed",
+            "fields": [field],
+            "params": {
+                "metric": metric,
+                "dimension": dimension,
+            }
+        });
+        let resp = self.post(&url, &body).await?;
+
+        if resp.get("error").and_then(|v| v.as_bool()).unwrap_or(false) {
+            let code = resp.get("errorNum").and_then(|v| v.as_u64()).unwrap_or(0);
+            // 1210 = index already exists
+            if code == 1210 {
+                debug!("Vector index on '{}' already exists", field);
+                return Ok(());
+            }
+            anyhow::bail!(
+                "Failed to create vector index on '{}.{}': {}",
+                collection,
+                field,
+                resp.get("errorMessage")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("unknown error")
+            );
+        }
+        Ok(())
+    }
+
     // ------------------------------------------------------------------
     // View operations
     // ------------------------------------------------------------------

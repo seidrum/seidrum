@@ -81,6 +81,7 @@ impl GuardrailState {
 }
 
 /// Default guardrails for user conversations.
+#[allow(dead_code)]
 pub fn default_user_conversation() -> GuardrailConfig {
     GuardrailConfig {
         turn_limit: 50,
@@ -101,6 +102,7 @@ pub fn default_consciousness() -> GuardrailConfig {
 }
 
 /// Default guardrails for delegated tasks.
+#[allow(dead_code)]
 pub fn default_delegation() -> GuardrailConfig {
     GuardrailConfig {
         turn_limit: 200,

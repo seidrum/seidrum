@@ -256,20 +256,16 @@ async fn create_indexes(client: &ArangoClient) -> Result<()> {
         .await
         .context("tools.name index")?;
 
-    // TODO: Vector indexes for entities.embedding and content.embedding.
-    // ArangoDB 3.12+ supports vector indexes natively, but they require
-    // specific server configuration. Add these once the ArangoDB instance
-    // is confirmed to support the vector index type:
-    //
-    //   db.entities.ensureIndex({
-    //     type: "vector", fields: ["embedding"],
-    //     params: { dimension: 1536, metric: "cosine", nLists: 100 }
-    //   });
-    //
-    //   db.content.ensureIndex({
-    //     type: "vector", fields: ["embedding"],
-    //     params: { dimension: 1536, metric: "cosine", nLists: 200 }
-    //   });
+    // -- Vector indexes (ArangoDB 3.12+) --
+    // Vector search uses MDI-prefixed indexes for efficient similarity queries.
+    client
+        .create_vector_index("entities", "embedding", 1536, "cosine")
+        .await
+        .context("entities.embedding vector index")?;
+    client
+        .create_vector_index("content", "embedding", 1536, "cosine")
+        .await
+        .context("content.embedding vector index")?;
 
     Ok(())
 }

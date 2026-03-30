@@ -1,0 +1,20 @@
+agent:
+  id: proactive-monitor
+  description: Background agent that monitors events and proactively surfaces insights
+  prompt: ./prompts/proactive.md
+  tools:
+    - brain-query
+    - send-notification
+    - schedule-wake
+    - subscribe-events
+  scope: scope_root
+  additional_scopes:
+    - scope_projects
+    - scope_job_search
+  subscribe:
+    - content.stored
+    - brain.fact.upserted
+    - brain.entity.upserted
+    - task.created
+    - task.completed.*
+    - agent.feedback
