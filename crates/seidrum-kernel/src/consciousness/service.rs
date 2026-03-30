@@ -15,11 +15,12 @@ use chrono::Utc;
 use futures::StreamExt;
 use seidrum_common::config::{load_agent_definition, AgentDefinition};
 use seidrum_common::events::{
-    ChannelOutbound, ConsciousnessEvent, Conversation, ConversationAppendRequest,
+    AgentFeedback, ChannelOutbound, ConsciousnessEvent, Conversation, ConversationAppendRequest,
     ConversationAppendResponse, ConversationCreateRequest, ConversationCreateResponse,
     ConversationFindRequest, ConversationGetRequest, ConversationMessage, EventEnvelope,
-    EventOrigin, LlmCallConfig, LlmResponse, SkillSearchRequest, SkillSearchResponse,
-    ToolCallRequest, ToolCallResponse, ToolRegister, UnifiedLlmRequest, UnifiedMessage,
+    EventOrigin, FactUpsertRequest, LlmCallConfig, LlmResponse, PreferencesQueryRequest,
+    PreferencesQueryResponse, SkillSearchRequest, SkillSearchResponse, ToolCallRequest,
+    ToolCallResponse, ToolRegister, UnifiedLlmRequest, UnifiedMessage, UserPreference,
 };
 use tokio::sync::RwLock;
 use tracing::{debug, error, info, warn};
@@ -236,6 +237,46 @@ impl ConsciousnessService {
                 info!(agent_id = %agent_id_proc, "Consciousness processor stopped");
             });
         }
+
+        // -----------------------------------------------------------------
+        // Feedback handler (Phase 2.3): Subscribe to agent.feedback events
+        // and store preference facts in the brain
+        // -----------------------------------------------------------------
+        let nats_feedback = self.nats.clone();
+        tokio::spawn(async move {
+            match nats_feedback.subscribe("agent.feedback".to_string()).await {
+                Ok(mut feedback_sub) => {
+                    info!("Consciousness: feedback handler subscription active");
+                    while let Some(msg) = feedback_sub.next().await {
+                        let feedback: AgentFeedback = match serde_json::from_slice(&msg.payload) {
+                            Ok(f) => f,
+                            Err(e) => {
+                                warn!(error = %e, "Failed to parse agent.feedback event");
+                                continue;
+                            }
+                        };
+
+                        // If preference info is present, store as a fact
+                        if let (Some(key), Some(value)) = (
+                            feedback.preference_key,
+                            feedback.preference_value,
+                        ) {
+                            let _ = store_preference_fact(
+                                &nats_feedback,
+                                &feedback.agent_id,
+                                &key,
+                                &value,
+                                feedback.confidence,
+                            )
+                            .await;
+                        }
+                    }
+                }
+                Err(e) => {
+                    error!(error = %e, "Failed to subscribe to agent.feedback");
+                }
+            }
+        });
 
         // Subscribe to capability.call.consciousness for built-in capability handling
         let mut capability_sub = self
@@ -629,9 +670,17 @@ async fn process_consciousness_event(
     // 3. Search for relevant skills based on event content
     let skill_snippets = search_relevant_skills(nats, &user_text, &agent_def.scope).await;
 
-    // 4. Build system prompt: base system prompt + cached identity prompt + skill snippets
-    let full_system_prompt =
-        build_full_system_prompt(system_prompt, agent_def, cached_identity, &skill_snippets);
+    // 3a. Query user preferences (Phase 2.3)
+    let preferences = query_user_preferences(nats, agent_id, &conversation_id).await;
+
+    // 4. Build system prompt: base system prompt + cached identity prompt + skill snippets + preferences
+    let full_system_prompt = build_full_system_prompt_with_preferences(
+        system_prompt,
+        agent_def,
+        cached_identity,
+        &skill_snippets,
+        &preferences,
+    );
 
     // 5. Build messages array from history + current event
     let messages = build_messages(&history, &user_text, event);
@@ -959,6 +1008,7 @@ async fn search_relevant_skills(
 }
 
 /// Build the full system prompt from base prompt + cached agent identity + skill snippets.
+#[allow(dead_code)]
 fn build_full_system_prompt(
     base_system_prompt: &str,
     agent_def: &AgentDefinition,
@@ -994,6 +1044,201 @@ fn build_full_system_prompt(
     }
 
     parts.join("\n\n---\n\n")
+}
+
+/// Build the full system prompt including user preferences (Phase 2.3).
+fn build_full_system_prompt_with_preferences(
+    base_system_prompt: &str,
+    agent_def: &AgentDefinition,
+    cached_identity: &str,
+    skill_snippets: &[String],
+    preferences: &[UserPreference],
+) -> String {
+    let mut parts: Vec<String> = Vec::new();
+
+    // Base system prompt
+    if !base_system_prompt.is_empty() {
+        parts.push(base_system_prompt.to_string());
+    }
+
+    // S1+S2: Use cached identity prompt instead of reading from disk each time
+    if !cached_identity.is_empty() {
+        parts.push(format!("## Agent Identity\n\n{}", cached_identity));
+    }
+
+    // Agent description
+    if let Some(ref desc) = agent_def.description {
+        parts.push(format!("## Agent Description\n\n{}", desc));
+    }
+
+    // Skill snippets
+    if !skill_snippets.is_empty() {
+        let skills_section = skill_snippets
+            .iter()
+            .enumerate()
+            .map(|(i, s)| format!("### Skill {}\n{}", i + 1, s))
+            .collect::<Vec<_>>()
+            .join("\n\n");
+        parts.push(format!("## Active Skills\n\n{}", skills_section));
+    }
+
+    // User preferences (Phase 2.3)
+    if !preferences.is_empty() {
+        let prefs_section = preferences
+            .iter()
+            .map(|p| {
+                format!(
+                    "- {}: {} (confidence: {:.0}%)",
+                    p.key,
+                    p.value,
+                    p.confidence * 100.0
+                )
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+        parts.push(format!(
+            "## User Preferences\nThe following preferences have been learned from past interactions. Apply them:\n{}",
+            prefs_section
+        ));
+    }
+
+    parts.join("\n\n---\n\n")
+}
+
+/// Query user preferences for an agent via NATS request/reply (Phase 2.3).
+async fn query_user_preferences(
+    nats: &async_nats::Client,
+    agent_id: &str,
+    _conversation_id: &str,
+) -> Vec<UserPreference> {
+    let prefs_request = PreferencesQueryRequest {
+        agent_id: agent_id.to_string(),
+        scope: None,
+        category: None,
+    };
+
+    let prefs_envelope = match EventEnvelope::new(
+        "agent.preferences.query",
+        "consciousness",
+        None,
+        None,
+        &prefs_request,
+    ) {
+        Ok(e) => e,
+        Err(e) => {
+            warn!(agent_id = %agent_id, error = %e, "Failed to create preferences query envelope");
+            return Vec::new();
+        }
+    };
+
+    let prefs_bytes = match serde_json::to_vec(&prefs_envelope) {
+        Ok(b) => b,
+        Err(e) => {
+            warn!(agent_id = %agent_id, error = %e, "Failed to serialize preferences query");
+            return Vec::new();
+        }
+    };
+
+    match tokio::time::timeout(
+        Duration::from_secs(5),
+        nats.request("agent.preferences.query", prefs_bytes.into()),
+    )
+    .await
+    {
+        Ok(Ok(resp)) => {
+            match serde_json::from_slice::<PreferencesQueryResponse>(&resp.payload) {
+                Ok(r) => {
+                    debug!(
+                        agent_id = %agent_id,
+                        count = r.preferences.len(),
+                        "Loaded user preferences"
+                    );
+                    r.preferences
+                }
+                Err(e) => {
+                    warn!(agent_id = %agent_id, error = %e, "Failed to deserialize preferences response");
+                    Vec::new()
+                }
+            }
+        }
+        Ok(Err(e)) => {
+            debug!(agent_id = %agent_id, error = %e, "Preferences query request failed");
+            Vec::new()
+        }
+        Err(_) => {
+            debug!(agent_id = %agent_id, "Preferences query timed out (5s)");
+            Vec::new()
+        }
+    }
+}
+
+/// Store a user preference as a fact in the knowledge graph (Phase 2.3).
+async fn store_preference_fact(
+    nats: &async_nats::Client,
+    agent_id: &str,
+    preference_key: &str,
+    preference_value: &str,
+    confidence: f64,
+) -> Result<()> {
+    // Store as a fact: agent entity has a preference
+    // subject = agent_id
+    // predicate = user_prefers_{key}
+    // value = preference_value
+    let predicate = format!("user_prefers_{}", preference_key);
+
+    let fact_request = FactUpsertRequest {
+        subject: agent_id.to_string(),
+        predicate,
+        object: None,
+        value: Some(preference_value.to_string()),
+        confidence,
+        source_content: format!("User preference: {} = {}", preference_key, preference_value),
+        valid_from: Some(Utc::now()),
+    };
+
+    let fact_envelope = EventEnvelope::new(
+        "brain.fact.upsert",
+        "consciousness",
+        None,
+        None,
+        &fact_request,
+    )?;
+
+    let fact_bytes = serde_json::to_vec(&fact_envelope)?;
+
+    match tokio::time::timeout(
+        Duration::from_secs(5),
+        nats.request("brain.fact.upsert", fact_bytes.into()),
+    )
+    .await
+    {
+        Ok(Ok(_resp)) => {
+            debug!(
+                agent_id = %agent_id,
+                key = %preference_key,
+                value = %preference_value,
+                "Stored preference fact"
+            );
+            Ok(())
+        }
+        Ok(Err(e)) => {
+            warn!(
+                agent_id = %agent_id,
+                key = %preference_key,
+                error = %e,
+                "Failed to store preference fact"
+            );
+            Err(anyhow::anyhow!("Preference fact upsert failed: {}", e))
+        }
+        Err(_) => {
+            warn!(
+                agent_id = %agent_id,
+                key = %preference_key,
+                "Preference fact upsert timed out (5s)"
+            );
+            Err(anyhow::anyhow!("Preference fact upsert timed out"))
+        }
+    }
 }
 
 /// Load an agent's identity prompt from its prompt file path.

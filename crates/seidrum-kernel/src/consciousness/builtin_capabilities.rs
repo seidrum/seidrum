@@ -8,7 +8,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Duration;
 
-use anyhow::Result;
+// anyhow::Result available if needed
 use chrono::Utc;
 use futures::StreamExt;
 use seidrum_common::events::{
@@ -25,6 +25,7 @@ use tracing::{error, info, warn};
 /// A runtime event subscription for an agent.
 pub struct RuntimeSubscription {
     pub pattern: String,
+    #[allow(dead_code)]
     pub expiry: Option<chrono::DateTime<Utc>>,
     pub handle: JoinHandle<()>,
 }

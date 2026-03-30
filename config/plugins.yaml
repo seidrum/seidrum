@@ -17,6 +17,9 @@ plugins:
   llm-router:
     binary: seidrum-llm-router
     enabled: true
+    env:
+      LLM_ROUTING_STRATEGY: "${LLM_ROUTING_STRATEGY:-fallback}"
+      LLM_FALLBACK_PROVIDERS: "${LLM_FALLBACK_PROVIDERS:-google,openai,anthropic}"
 
   llm-google:
     binary: seidrum-llm-google
@@ -70,6 +73,31 @@ plugins:
     enabled: true
     env:
       GOOGLE_API_KEY: "${GOOGLE_API_KEY}"
+
+  llm-openai:
+    binary: seidrum-llm-openai
+    enabled: false
+    env:
+      OPENAI_API_KEY: "${OPENAI_API_KEY}"
+      LLM_MODEL: "${LLM_OPENAI_MODEL:-gpt-4o}"
+
+  llm-anthropic:
+    binary: seidrum-llm-anthropic
+    enabled: false
+    env:
+      ANTHROPIC_API_KEY: "${ANTHROPIC_API_KEY}"
+      LLM_MODEL: "${LLM_ANTHROPIC_MODEL:-claude-sonnet-4-6}"
+
+  llm-ollama:
+    binary: seidrum-llm-ollama
+    enabled: false
+    env:
+      OLLAMA_URL: "${OLLAMA_URL:-http://localhost:11434}"
+      LLM_MODEL: "${LLM_OLLAMA_MODEL:-llama3.2}"
+
+  feedback-extractor:
+    binary: seidrum-feedback-extractor
+    enabled: true
 
   code-executor:
     binary: seidrum-code-executor

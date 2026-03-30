@@ -458,12 +458,14 @@ impl ToolRegistryService {
     }
 
     /// Get a tool by ID from the in-memory cache.
+    #[allow(dead_code)]
     pub async fn get_tool(&self, tool_id: &str) -> Option<ToolEntry> {
         let tools = self.tools.read().await;
         tools.get(tool_id).cloned()
     }
 
     /// List all registered tools.
+    #[allow(dead_code)]
     pub async fn list_tools(&self) -> Vec<ToolEntry> {
         let tools = self.tools.read().await;
         tools.values().cloned().collect()

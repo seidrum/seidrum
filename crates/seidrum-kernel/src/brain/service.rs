@@ -10,7 +10,7 @@ use anyhow::{Context, Result};
 use chrono::Utc;
 use futures::StreamExt;
 use seidrum_common::events::{
-    BrainQueryRequest, BrainQueryResponse, ContentStoreRequest, ContentStored, Conversation,
+    BrainQueryRequest, BrainQueryResponse, ContentStoreRequest, ContentStored,
     ConversationAppendRequest, ConversationAppendResponse, ConversationCreateRequest,
     ConversationCreateResponse, ConversationFindRequest, ConversationGetRequest,
     ConversationListRequest, ConversationListResponse, ConversationSummary, EntityUpsertRequest,
@@ -22,6 +22,7 @@ use serde_json::Value;
 use tracing::{debug, error, info, warn};
 
 use super::client::ArangoClient;
+use crate::embedding::service::EmbeddingService;
 use crate::scope::service::ScopeService;
 
 /// Long-lived service that handles brain NATS subjects.
@@ -29,16 +30,22 @@ pub struct BrainService {
     arango: ArangoClient,
     nats: async_nats::Client,
     scope_service: ScopeService,
+    embedding: EmbeddingService,
 }
 
 impl BrainService {
     /// Create a new brain service.
-    pub fn new(arango: ArangoClient, nats: async_nats::Client) -> Self {
+    pub fn new(
+        arango: ArangoClient,
+        nats: async_nats::Client,
+        embedding: EmbeddingService,
+    ) -> Self {
         let scope_service = ScopeService::new(arango.clone());
         Self {
             arango,
             nats,
             scope_service,
+            embedding,
         }
     }
 
@@ -133,8 +140,9 @@ impl BrainService {
                 Some(msg) = content_store.next() => {
                     let arango = self.arango.clone();
                     let nats = self.nats.clone();
+                    let embedding = self.embedding.clone();
                     tokio::spawn(async move {
-                        if let Err(e) = handle_content_store(&arango, &nats, msg).await {
+                        if let Err(e) = handle_content_store(&arango, &nats, &embedding, msg).await {
                             error!(error = %e, "brain.content.store handler failed");
                         }
                     });
@@ -142,8 +150,9 @@ impl BrainService {
                 Some(msg) = entity_upsert.next() => {
                     let arango = self.arango.clone();
                     let nats = self.nats.clone();
+                    let embedding = self.embedding.clone();
                     tokio::spawn(async move {
-                        if let Err(e) = handle_entity_upsert(&arango, &nats, msg).await {
+                        if let Err(e) = handle_entity_upsert(&arango, &nats, &embedding, msg).await {
                             error!(error = %e, "brain.entity.upsert handler failed");
                         }
                     });
@@ -179,8 +188,9 @@ impl BrainService {
                     let arango = self.arango.clone();
                     let nats = self.nats.clone();
                     let scope_svc = self.scope_service.clone();
+                    let embedding = self.embedding.clone();
                     tokio::spawn(async move {
-                        if let Err(e) = handle_query_request(&arango, &nats, &scope_svc, msg).await {
+                        if let Err(e) = handle_query_request(&arango, &nats, &scope_svc, &embedding, msg).await {
                             error!(error = %e, "brain.query.request handler failed");
                         }
                     });
@@ -380,6 +390,7 @@ fn generate_task_key() -> String {
 async fn handle_content_store(
     arango: &ArangoClient,
     nats: &async_nats::Client,
+    embedding: &EmbeddingService,
     msg: async_nats::Message,
 ) -> Result<()> {
     let (envelope, req): (EventEnvelope, ContentStoreRequest) = parse_envelope(&msg)?;
@@ -407,14 +418,46 @@ async fn handle_content_store(
         .await
         .context("failed to insert content document")?;
 
-    // TODO: generate embedding if req.generate_embedding is true
-    // (requires embedding service integration)
+    // Generate embedding if requested
+    let mut embedding_generated = false;
+    if req.generate_embedding {
+        match embedding.embed(&req.raw_text).await {
+            Ok(vector) => {
+                // Update the document with the embedding
+                let update = serde_json::json!({ "embedding": vector });
+                match arango
+                    .execute_aql(
+                        "UPDATE { _key: @key } WITH @update IN content RETURN NEW",
+                        &serde_json::json!({
+                            "key": content_key,
+                            "update": update,
+                        }),
+                    )
+                    .await
+                {
+                    Ok(_) => {
+                        embedding_generated = true;
+                        debug!(content_key = %content_key, "Embedding generated and stored");
+                    }
+                    Err(e) => {
+                        warn!(error = %e, "Failed to store embedding for content {}", content_key);
+                    }
+                }
+            }
+            Err(e) => {
+                warn!(
+                    error = %e,
+                    "Embedding generation failed for content {}, continuing without", content_key
+                );
+            }
+        }
+    }
 
     let response = ContentStored {
         content_key: content_key.clone(),
         content_type: req.content_type,
         channel: req.channel,
-        embedding_generated: false, // placeholder until embedding service
+        embedding_generated,
         timestamp: req.timestamp,
     };
 
@@ -435,6 +478,7 @@ async fn handle_content_store(
 async fn handle_entity_upsert(
     arango: &ArangoClient,
     nats: &async_nats::Client,
+    embedding: &EmbeddingService,
     msg: async_nats::Message,
 ) -> Result<()> {
     let (envelope, req): (EventEnvelope, EntityUpsertRequest) = parse_envelope(&msg)?;
@@ -471,6 +515,44 @@ async fn handle_entity_upsert(
                 &serde_json::json!({ "key": entity_key, "now": now }),
             )
             .await;
+    }
+
+    // Generate embedding from entity name and properties
+    let embedding_text = format!(
+        "{} {}",
+        req.name,
+        if req.properties.is_empty() {
+            String::new()
+        } else {
+            format!("{:?}", req.properties)
+        }
+    );
+
+    match embedding.embed(&embedding_text).await {
+        Ok(vector) => {
+            // Update the entity with the embedding
+            let update = serde_json::json!({ "embedding": vector });
+            match arango
+                .execute_aql(
+                    "UPDATE { _key: @key } WITH @update IN entities RETURN NEW",
+                    &serde_json::json!({
+                        "key": entity_key,
+                        "update": update,
+                    }),
+                )
+                .await
+            {
+                Ok(_) => {
+                    debug!(entity_key = %entity_key, "Embedding generated and stored for entity");
+                }
+                Err(e) => {
+                    warn!(error = %e, "Failed to store embedding for entity {}", entity_key);
+                }
+            }
+        }
+        Err(e) => {
+            warn!(error = %e, "Embedding generation failed for entity {}", entity_key);
+        }
     }
 
     // Create mentions edge if requested
@@ -881,6 +963,7 @@ async fn handle_query_request(
     arango: &ArangoClient,
     nats: &async_nats::Client,
     scope_svc: &ScopeService,
+    embedding: &EmbeddingService,
     msg: async_nats::Message,
 ) -> Result<()> {
     let (envelope, req): (EventEnvelope, BrainQueryRequest) = parse_envelope(&msg)?;
@@ -915,7 +998,8 @@ async fn handle_query_request(
 
     let result = match req.query_type.as_str() {
         "aql" => handle_aql_query(arango, &req, &envelope, resolved_scopes.as_ref()).await,
-        "vector_search" => handle_vector_search(&req).await,
+        "vector_search" => handle_vector_search(arango, embedding, &req).await,
+        "hybrid_search" => handle_hybrid_search(arango, embedding, &req).await,
         "graph_traverse" => handle_graph_traverse(arango, &req, &envelope).await,
         "get_facts" => handle_get_facts(arango, &req, &envelope).await,
         "get_context" => handle_get_context(arango, &req, &envelope).await,
@@ -1021,18 +1105,175 @@ async fn handle_aql_query(
     Ok(resp.get("result").cloned().unwrap_or(serde_json::json!([])))
 }
 
-/// Placeholder for vector search — returns empty results.
-/// Real vector search requires embedding generation and ArangoDB vector indexes.
-async fn handle_vector_search(req: &BrainQueryRequest) -> Result<Value> {
-    debug!(
-        collection = req.collection.as_deref().unwrap_or("content"),
-        limit = req.limit.unwrap_or(10),
-        "vector_search: placeholder — returning empty results"
+/// Perform vector similarity search in ArangoDB.
+async fn handle_vector_search(
+    arango: &ArangoClient,
+    embedding: &EmbeddingService,
+    req: &BrainQueryRequest,
+) -> Result<Value> {
+    let collection = req.collection.as_deref().unwrap_or("content");
+    let limit = req.limit.unwrap_or(10) as u32;
+
+    debug!(collection = %collection, limit = limit, "handling vector_search");
+
+    // Get or generate the query embedding
+    let query_embedding = if let Some(vec) = &req.embedding {
+        // Use provided embedding directly
+        vec.clone()
+    } else if let Some(query_text) = &req.query_text {
+        // Generate embedding from query text
+        match embedding.embed(query_text).await {
+            Ok(vec) => vec,
+            Err(e) => {
+                warn!(error = %e, "failed to generate embedding for query text");
+                return Ok(serde_json::json!([]));
+            }
+        }
+    } else {
+        warn!("vector_search requires either 'embedding' or 'query_text' field");
+        return Ok(serde_json::json!([]));
+    };
+
+    // Execute AQL vector search with cosine similarity
+    let aql = format!(
+        r#"FOR doc IN {collection}
+            LET distance = COSINE_SIMILARITY(doc.embedding, @query_embedding)
+            FILTER distance != null
+            SORT distance DESC
+            LIMIT @limit
+            RETURN MERGE(doc, {{ _similarity: distance }})"#,
+        collection = collection
     );
 
-    // TODO: Implement real vector search once embedding pipeline is ready.
-    // This would use ArangoDB vector indexes or a dedicated vector store.
-    Ok(serde_json::json!([]))
+    let bind_vars = serde_json::json!({
+        "query_embedding": query_embedding,
+        "limit": limit,
+    });
+
+    match arango.execute_aql(&aql, &bind_vars).await {
+        Ok(resp) => {
+            let results = resp.get("result").cloned().unwrap_or(serde_json::json!([]));
+            debug!(
+                count = if let Some(arr) = results.as_array() {
+                    arr.len()
+                } else {
+                    0
+                },
+                "vector search completed"
+            );
+            Ok(results)
+        }
+        Err(e) => {
+            warn!(error = %e, "vector search query failed");
+            Ok(serde_json::json!([]))
+        }
+    }
+}
+
+/// Hybrid search: combines vector similarity search with graph traversal.
+///
+/// This performs:
+/// 1. Vector search to find semantically similar content/entities
+/// 2. For top results, traverse the graph to find connected entities and facts
+/// 3. Merge and deduplicate results, returning both direct matches and graph neighbors
+async fn handle_hybrid_search(
+    arango: &ArangoClient,
+    embedding: &EmbeddingService,
+    req: &BrainQueryRequest,
+) -> Result<Value> {
+    let collection = req.collection.as_deref().unwrap_or("content");
+    let vector_limit = req.limit.unwrap_or(5);
+    let graph_depth = req.depth.unwrap_or(2);
+
+    debug!(collection = %collection, vector_limit = vector_limit, "handling hybrid_search");
+
+    // Get or generate the query embedding
+    let query_embedding = if let Some(vec) = &req.embedding {
+        // Use provided embedding directly
+        vec.clone()
+    } else if let Some(query_text) = &req.query_text {
+        // Generate embedding from query text
+        match embedding.embed(query_text).await {
+            Ok(vec) => vec,
+            Err(e) => {
+                warn!(error = %e, "failed to generate embedding for query text");
+                return Ok(serde_json::json!([]));
+            }
+        }
+    } else {
+        warn!("hybrid_search requires either 'embedding' or 'query_text' field");
+        return Ok(serde_json::json!([]));
+    };
+
+    // Step 1: Vector search
+    let vector_aql = format!(
+        r#"FOR doc IN {collection}
+            LET distance = COSINE_SIMILARITY(doc.embedding, @query_embedding)
+            FILTER distance != null
+            SORT distance DESC
+            LIMIT @limit
+            RETURN {{ doc, distance, source: "vector_match" }}"#,
+        collection = collection
+    );
+
+    let vector_vars = serde_json::json!({
+        "query_embedding": query_embedding,
+        "limit": vector_limit,
+    });
+
+    let mut all_results: Vec<Value> = Vec::new();
+    let mut seen_keys: std::collections::HashSet<String> = std::collections::HashSet::new();
+
+    // Execute vector search
+    if let Ok(resp) = arango.execute_aql(&vector_aql, &vector_vars).await {
+        if let Some(vector_results) = resp.get("result").and_then(|v| v.as_array()) {
+            for item in vector_results {
+                if let Some(doc) = item.get("doc") {
+                    if let Some(key) = doc.get("_key").and_then(|k| k.as_str()) {
+                        seen_keys.insert(key.to_string());
+                        all_results.push(item.clone());
+
+                        // Step 2: Graph traversal from this document
+                        let traverse_aql = format!(
+                            r#"FOR v, e, p IN 1..@depth ANY @start_vertex
+                                GRAPH "brain"
+                                RETURN {{ vertex: v, edge: e, depth: LENGTH(p.vertices) - 1, source: "graph_neighbor" }}"#
+                        );
+
+                        let traverse_vars = serde_json::json!({
+                            "start_vertex": format!("{}/{}", collection, key),
+                            "depth": graph_depth,
+                        });
+
+                        if let Ok(traverse_resp) = arango.execute_aql(&traverse_aql, &traverse_vars).await {
+                            if let Some(neighbors) = traverse_resp.get("result").and_then(|v| v.as_array()) {
+                                for neighbor in neighbors {
+                                    if let Some(vertex) = neighbor.get("vertex") {
+                                        if let Some(neighbor_key) = vertex.get("_key").and_then(|k| k.as_str()) {
+                                            if !seen_keys.contains(neighbor_key) {
+                                                seen_keys.insert(neighbor_key.to_string());
+                                                all_results.push(neighbor.clone());
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    } else {
+        warn!("hybrid_search vector phase failed");
+    }
+
+    debug!(
+        total_results = all_results.len(),
+        vector_matches = vector_limit as usize,
+        "hybrid search completed"
+    );
+
+    Ok(serde_json::json!(all_results))
 }
 
 /// Execute a graph traversal query.

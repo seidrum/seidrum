@@ -102,6 +102,7 @@ pub fn unified_to_gemini_tools(tools: &[ToolSchema]) -> Vec<GeminiToolDeclaratio
 }
 
 /// Convert a Gemini response to unified LlmResponse format.
+#[allow(dead_code)]
 pub fn gemini_to_unified_response(
     response: &GeminiResponse,
     model: &str,

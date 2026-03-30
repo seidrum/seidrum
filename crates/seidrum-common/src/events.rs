@@ -384,6 +384,70 @@ pub struct TaskCompleted {
 }
 
 // ---------------------------------------------------------------------------
+// Feedback Events
+// ---------------------------------------------------------------------------
+
+/// Type of feedback the user is providing.
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
+#[serde(rename_all = "snake_case")]
+pub enum FeedbackType {
+    /// User explicitly corrects the agent ("no, I meant...")
+    Correction,
+    /// User confirms something non-obvious ("yes, exactly")
+    Confirmation,
+    /// User expresses a preference ("I prefer shorter responses")
+    Preference,
+    /// User provides a rating or evaluation
+    Rating,
+}
+
+/// Feedback extracted from user interaction.
+/// Subject: `agent.feedback`
+#[derive(Serialize, Deserialize, Debug, Clone)]
+pub struct AgentFeedback {
+    pub agent_id: String,
+    pub conversation_id: Option<String>,
+    pub message_id: Option<String>,
+    pub feedback_type: FeedbackType,
+    /// What the user said that constitutes feedback
+    pub content: String,
+    /// The agent's prior response that prompted this feedback
+    pub prior_context: Option<String>,
+    /// Structured preference if extractable (e.g., "response_length": "short")
+    pub preference_key: Option<String>,
+    pub preference_value: Option<String>,
+    /// Confidence that this is actually feedback (0.0-1.0)
+    pub confidence: f64,
+    pub timestamp: DateTime<Utc>,
+}
+
+/// User preferences aggregated from feedback.
+/// Subject: `agent.preferences.query` (request/reply)
+#[derive(Serialize, Deserialize, Debug, Clone)]
+pub struct PreferencesQueryRequest {
+    pub agent_id: String,
+    pub scope: Option<String>,
+    /// Optional filter by preference category
+    pub category: Option<String>,
+}
+
+/// Response with active preferences.
+#[derive(Serialize, Deserialize, Debug, Clone)]
+pub struct PreferencesQueryResponse {
+    pub preferences: Vec<UserPreference>,
+}
+
+/// A single user preference derived from feedback.
+#[derive(Serialize, Deserialize, Debug, Clone)]
+pub struct UserPreference {
+    pub key: String,
+    pub value: String,
+    pub confidence: f64,
+    pub source_feedback_count: u32,
+    pub last_updated: DateTime<Utc>,
+}
+
+// ---------------------------------------------------------------------------
 // Plugin Events
 // ---------------------------------------------------------------------------
 
@@ -1362,5 +1426,84 @@ mod tests {
         let json = r#"{"role":"user","content":"hello","timestamp":"2026-03-24T10:00:00Z"}"#;
         let msg: ConversationMessage = serde_json::from_str(json).unwrap();
         assert!(msg.active_skills.is_empty());
+    }
+
+    #[test]
+    fn roundtrip_agent_feedback() {
+        let feedback = AgentFeedback {
+            agent_id: "personal-assistant".to_string(),
+            conversation_id: Some("conv_456".to_string()),
+            message_id: Some("msg_789".to_string()),
+            feedback_type: FeedbackType::Correction,
+            content: "no, I meant Python not JavaScript".to_string(),
+            prior_context: Some("I suggested using JavaScript for that task".to_string()),
+            preference_key: Some("language".to_string()),
+            preference_value: Some("python".to_string()),
+            confidence: 0.95,
+            timestamp: Utc::now(),
+        };
+
+        let json = serde_json::to_string(&feedback).unwrap();
+        let deserialized: AgentFeedback = serde_json::from_str(&json).unwrap();
+
+        assert_eq!(feedback.agent_id, deserialized.agent_id);
+        assert_eq!(feedback.feedback_type, deserialized.feedback_type);
+        assert_eq!(feedback.content, deserialized.content);
+        assert_eq!(feedback.confidence, deserialized.confidence);
+        assert_eq!(feedback.preference_key, deserialized.preference_key);
+    }
+
+    #[test]
+    fn roundtrip_preferences_query_request() {
+        let req = PreferencesQueryRequest {
+            agent_id: "personal-assistant".to_string(),
+            scope: Some("work".to_string()),
+            category: Some("communication_style".to_string()),
+        };
+
+        let json = serde_json::to_string(&req).unwrap();
+        let deserialized: PreferencesQueryRequest = serde_json::from_str(&json).unwrap();
+
+        assert_eq!(req.agent_id, deserialized.agent_id);
+        assert_eq!(req.scope, deserialized.scope);
+        assert_eq!(req.category, deserialized.category);
+    }
+
+    #[test]
+    fn roundtrip_user_preference() {
+        let pref = UserPreference {
+            key: "response_length".to_string(),
+            value: "concise".to_string(),
+            confidence: 0.88,
+            source_feedback_count: 5,
+            last_updated: Utc::now(),
+        };
+
+        let json = serde_json::to_string(&pref).unwrap();
+        let deserialized: UserPreference = serde_json::from_str(&json).unwrap();
+
+        assert_eq!(pref.key, deserialized.key);
+        assert_eq!(pref.value, deserialized.value);
+        assert_eq!(pref.confidence, deserialized.confidence);
+        assert_eq!(pref.source_feedback_count, deserialized.source_feedback_count);
+    }
+
+    #[test]
+    fn feedback_type_serialization() {
+        let correction = FeedbackType::Correction;
+        let json = serde_json::to_string(&correction).unwrap();
+        assert_eq!(json, "\"correction\"");
+
+        let confirmation = FeedbackType::Confirmation;
+        let json = serde_json::to_string(&confirmation).unwrap();
+        assert_eq!(json, "\"confirmation\"");
+
+        let preference = FeedbackType::Preference;
+        let json = serde_json::to_string(&preference).unwrap();
+        assert_eq!(json, "\"preference\"");
+
+        let rating = FeedbackType::Rating;
+        let json = serde_json::to_string(&rating).unwrap();
+        assert_eq!(json, "\"rating\"");
     }
 }

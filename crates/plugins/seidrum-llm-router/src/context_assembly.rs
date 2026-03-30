@@ -30,6 +30,7 @@ pub struct SimpleMessage {
 // ---------------------------------------------------------------------------
 
 /// Count tokens for a string using cl100k_base (GPT-4 / Claude compatible).
+/// This is public so other modules can use it for routing decisions.
 pub fn count_tokens(text: &str) -> usize {
     let bpe = cl100k_base().expect("failed to load cl100k_base tokenizer");
     bpe.encode_with_special_tokens(text).len()

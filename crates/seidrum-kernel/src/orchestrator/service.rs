@@ -47,6 +47,7 @@ pub struct WorkflowEngine {
 
 /// Kept for backward compatibility with V1 agent pipeline validation.
 #[derive(Debug, Clone)]
+#[allow(dead_code)]
 struct LegacyLoadedAgent {
     config: AgentConfig,
     #[allow(dead_code)]
@@ -524,18 +525,21 @@ impl WorkflowEngine {
     // -----------------------------------------------------------------------
 
     /// Get an agent definition by ID (V2 format).
+    #[allow(dead_code)]
     pub async fn get_agent(&self, agent_id: &str) -> Option<AgentDefinition> {
         let agents = self.agents.read().await;
         agents.get(agent_id).cloned()
     }
 
     /// Get all loaded agent definitions.
+    #[allow(dead_code)]
     pub async fn list_agents(&self) -> Vec<AgentDefinition> {
         let agents = self.agents.read().await;
         agents.values().cloned().collect()
     }
 
     /// Get all loaded workflow configs.
+    #[allow(dead_code)]
     pub async fn list_workflows(&self) -> Vec<WorkflowConfig> {
         let workflows = self.workflows.read().await;
         workflows.iter().map(|lw| lw.config.clone()).collect()
@@ -820,7 +824,7 @@ mod tests {
         let result = engine.load_agents(&agents_dir).await;
         assert!(result.is_ok());
         let count = result.unwrap();
-        assert_eq!(count, 2, "Should load 2 V2 agent files");
+        assert_eq!(count, 4, "Should load 4 V2 agent files");
     }
 
     #[tokio::test]

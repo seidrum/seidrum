@@ -1,6 +1,7 @@
 //! Message splitting for Telegram's 4096-character message limit.
 
 /// Default maximum length for a Telegram message chunk.
+#[allow(dead_code)]
 pub const DEFAULT_MAX_LEN: usize = 4000;
 
 /// Split a message into chunks that fit within Telegram's message size limit.

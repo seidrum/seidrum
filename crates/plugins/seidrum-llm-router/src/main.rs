@@ -1,4 +1,5 @@
 mod context_assembly;
+mod routing;
 mod tools;
 
 use std::collections::HashMap;
@@ -8,7 +9,7 @@ use anyhow::Result;
 use chrono::Utc;
 use clap::Parser;
 use serde::{Deserialize, Serialize};
-use tracing::{error, info, warn};
+use tracing::{debug, error, info, warn};
 
 use seidrum_common::events::{
     LlmCallConfig, LlmResponse, TokenUsage, UnifiedLlmRequest, UnifiedMessage,
@@ -54,6 +55,14 @@ struct Cli {
     /// Timeout in seconds for the LLM provider request
     #[arg(long, env = "LLM_PROVIDER_TIMEOUT", default_value = "120")]
     provider_timeout: u64,
+
+    /// Routing strategy: "fixed", "fallback", or "intelligent"
+    #[arg(long, env = "LLM_ROUTING_STRATEGY", default_value = "fallback")]
+    routing_strategy: String,
+
+    /// Comma-separated list of fallback providers
+    #[arg(long, env = "LLM_FALLBACK_PROVIDERS", default_value = "google,openai,anthropic")]
+    fallback_providers: String,
 }
 
 // ---------------------------------------------------------------------------
@@ -171,9 +180,12 @@ async fn main() -> Result<()> {
         }
     };
 
+    // Parse routing configuration
+    let routing_config = build_routing_config(&cli.routing_strategy, &cli.fallback_providers)?;
+    info!(routing_strategy = %cli.routing_strategy, "Routing configuration loaded");
+
     // Shared state
     let nats_pub = nats.clone();
-    let provider = cli.provider.clone();
     let max_tokens = cli.max_tokens;
     let max_context_tokens = cli.max_context_tokens;
     let max_dynamic_tools = cli.max_dynamic_tools;
@@ -181,8 +193,8 @@ async fn main() -> Result<()> {
 
     // Spawn two tasks: one per subscription
     let nats1 = nats_pub.clone();
-    let provider1 = provider.clone();
     let prompt_template1 = prompt_template.clone();
+    let routing_config1 = routing_config.clone();
 
     let handle_context = tokio::spawn(async move {
         let mut sub = sub_context;
@@ -192,13 +204,13 @@ async fn main() -> Result<()> {
             if let Err(e) = handle_message(
                 &msg.payload,
                 &msg.subject,
-                &provider1,
                 max_tokens,
                 max_context_tokens,
                 max_dynamic_tools,
                 provider_timeout,
                 &prompt_template1,
                 &nats1,
+                &routing_config1,
             )
             .await
             {
@@ -213,13 +225,13 @@ async fn main() -> Result<()> {
             if let Err(e) = handle_message(
                 &msg.payload,
                 &msg.subject,
-                &provider,
                 max_tokens,
                 max_context_tokens,
                 max_dynamic_tools,
                 provider_timeout,
                 &prompt_template,
                 &nats_pub,
+                &routing_config,
             )
             .await
             {
@@ -250,13 +262,13 @@ async fn futures_next(sub: &mut async_nats::Subscriber) -> Option<async_nats::Me
 async fn handle_message(
     payload: &[u8],
     subject: &str,
-    provider: &str,
     max_tokens: u32,
     max_context_tokens: usize,
     max_dynamic_tools: u32,
     provider_timeout: u64,
     prompt_template: &str,
     nats: &async_nats::Client,
+    routing_config: &routing::RoutingStrategy,
 ) -> Result<()> {
     info!(subject = %subject, "Received event");
 
@@ -356,6 +368,30 @@ async fn handle_message(
         "Tools collected for LLM request"
     );
 
+    // Build RequestProfile for intelligent routing
+    let estimated_tokens = if let Some(ref sys_prompt) = system_prompt {
+        context_assembly::count_tokens(sys_prompt)
+            + messages
+                .iter()
+                .map(|m| context_assembly::count_tokens(&m.content.as_ref().unwrap_or(&String::new())) + 4)
+                .sum::<usize>()
+    } else {
+        messages
+            .iter()
+            .map(|m| context_assembly::count_tokens(&m.content.as_ref().unwrap_or(&String::new())) + 4)
+            .sum::<usize>()
+    };
+
+    let request_profile = routing::RequestProfile {
+        tool_count: tool_schemas.len(),
+        message_count: messages.len(),
+        estimated_tokens,
+        has_system_prompt: system_prompt.is_some(),
+        scope: scope.clone(),
+        routing_strategy: "best-first".to_string(),
+        model_preferences: vec![],
+    };
+
     // Build UnifiedLlmRequest
     let unified_request = UnifiedLlmRequest {
         agent_id: agent_id.clone(),
@@ -373,101 +409,104 @@ async fn handle_message(
         scope: scope.clone(),
     };
 
-    // Send to provider via NATS request/reply
-    let provider_subject = format!("llm.provider.{}", provider);
     let request_bytes = serde_json::to_vec(&unified_request)?;
 
+    // Get list of providers to try (in order)
+    let providers_to_try = get_providers_to_try(&request_profile, routing_config);
+
     info!(
-        provider = %provider,
-        subject = %provider_subject,
-        "Dispatching to LLM provider"
+        providers = ?providers_to_try.iter().map(|p| p.name()).collect::<Vec<_>>(),
+        estimated_tokens,
+        "Routing to providers"
     );
 
-    let start = Instant::now();
+    let mut last_error: Option<String> = None;
+    let mut llm_response: Option<LlmResponse> = None;
+    let mut selected_provider: Option<routing::Provider> = None;
 
-    let provider_response = tokio::time::timeout(
-        std::time::Duration::from_secs(provider_timeout),
-        nats.request(provider_subject.clone(), request_bytes.into()),
-    )
-    .await;
+    // Try each provider in order
+    for provider in &providers_to_try {
+        let subject = provider.nats_subject();
 
-    let duration_ms = start.elapsed().as_millis() as u64;
+        debug!(
+            provider = %provider.name(),
+            subject = %subject,
+            "Attempting provider"
+        );
 
-    let llm_response: LlmResponse = match provider_response {
-        Ok(Ok(resp_msg)) => match serde_json::from_slice::<LlmResponse>(&resp_msg.payload) {
-            Ok(resp) => {
-                info!(
-                    provider = %provider,
-                    model = %resp.model_used,
-                    duration_ms,
-                    tokens = resp.tokens.total_tokens,
-                    "LLM provider response received"
-                );
-                resp
-            }
-            Err(e) => {
-                error!(error = %e, "Failed to parse LLM provider response");
-                LlmResponse {
-                    agent_id: agent_id.clone(),
-                    content: Some(format!("Error: failed to parse provider response: {}", e)),
-                    tool_calls: None,
-                    model_used: "unknown".to_string(),
-                    provider: provider.to_string(),
-                    tokens: TokenUsage {
-                        prompt_tokens: 0,
-                        completion_tokens: 0,
-                        total_tokens: 0,
-                        estimated_cost_usd: 0.0,
-                    },
-                    duration_ms,
-                    finish_reason: "error".to_string(),
-                    tool_rounds: 0,
+        let start = Instant::now();
+
+        let provider_response = tokio::time::timeout(
+            std::time::Duration::from_secs(provider_timeout),
+            nats.request(subject.clone(), request_bytes.clone().into()),
+        )
+        .await;
+
+        let duration_ms = start.elapsed().as_millis() as u64;
+
+        match provider_response {
+            Ok(Ok(resp_msg)) => {
+                match serde_json::from_slice::<LlmResponse>(&resp_msg.payload) {
+                    Ok(resp) => {
+                        info!(
+                            provider = %provider.name(),
+                            model = %resp.model_used,
+                            duration_ms,
+                            tokens = resp.tokens.total_tokens,
+                            "LLM provider response received"
+                        );
+                        selected_provider = Some(provider.clone());
+                        llm_response = Some(resp);
+                        break;
+                    }
+                    Err(e) => {
+                        let err_msg = format!(
+                            "Provider {} failed to parse response: {}",
+                            provider.name(),
+                            e
+                        );
+                        warn!(error = %e, provider = %provider.name(), "Failed to parse response");
+                        last_error = Some(err_msg);
+                    }
                 }
             }
-        },
-        Ok(Err(e)) => {
-            error!(error = %e, provider = %provider, "NATS request to LLM provider failed");
-            LlmResponse {
-                agent_id: agent_id.clone(),
-                content: Some(format!("Error: LLM provider request failed: {}", e)),
-                tool_calls: None,
-                model_used: "unknown".to_string(),
-                provider: provider.to_string(),
-                tokens: TokenUsage {
-                    prompt_tokens: 0,
-                    completion_tokens: 0,
-                    total_tokens: 0,
-                    estimated_cost_usd: 0.0,
-                },
-                duration_ms,
-                finish_reason: "error".to_string(),
-                tool_rounds: 0,
+            Ok(Err(e)) => {
+                let err_msg = format!("Provider {} request failed: {}", provider.name(), e);
+                warn!(error = %e, provider = %provider.name(), "NATS request failed");
+                last_error = Some(err_msg);
+            }
+            Err(_) => {
+                let err_msg = format!("Provider {} request timed out", provider.name());
+                warn!(provider = %provider.name(), timeout_secs = provider_timeout, "Request timed out");
+                last_error = Some(err_msg);
             }
         }
-        Err(_) => {
-            error!(
-                provider = %provider,
-                timeout_secs = provider_timeout,
-                "LLM provider request timed out"
-            );
-            LlmResponse {
-                agent_id: agent_id.clone(),
-                content: Some("Error: LLM provider request timed out".to_string()),
-                tool_calls: None,
-                model_used: "unknown".to_string(),
-                provider: provider.to_string(),
-                tokens: TokenUsage {
-                    prompt_tokens: 0,
-                    completion_tokens: 0,
-                    total_tokens: 0,
-                    estimated_cost_usd: 0.0,
-                },
-                duration_ms,
-                finish_reason: "timeout".to_string(),
-                tool_rounds: 0,
-            }
+    }
+
+    // If no provider succeeded, return error response
+    let llm_response = llm_response.unwrap_or_else(|| {
+        let provider_name = selected_provider.as_ref().map(|p| p.name()).unwrap_or("unknown");
+        let error_msg = last_error.unwrap_or_else(|| "All providers failed".to_string());
+
+        error!("All provider attempts failed: {}", error_msg);
+
+        LlmResponse {
+            agent_id: agent_id.clone(),
+            content: Some(format!("Error: {}", error_msg)),
+            tool_calls: None,
+            model_used: "unknown".to_string(),
+            provider: provider_name.to_string(),
+            tokens: TokenUsage {
+                prompt_tokens: 0,
+                completion_tokens: 0,
+                total_tokens: 0,
+                estimated_cost_usd: 0.0,
+            },
+            duration_ms: 0,
+            finish_reason: "error".to_string(),
+            tool_rounds: 0,
         }
-    };
+    });
 
     // Publish llm.response event (same format as before for downstream compatibility)
     let out_envelope = EventEnvelope {
@@ -487,6 +526,82 @@ async fn handle_message(
     info!(event_id = %out_envelope.id, "Published llm.response");
 
     Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// Routing helpers
+// ---------------------------------------------------------------------------
+
+/// Parse routing configuration from CLI arguments.
+fn build_routing_config(
+    strategy: &str,
+    fallback_str: &str,
+) -> Result<routing::RoutingStrategy> {
+    match strategy {
+        "fixed" => Ok(routing::RoutingStrategy::Fixed(routing::Provider::Google)),
+        "fallback" => {
+            let providers: Result<Vec<routing::Provider>> = fallback_str
+                .split(',')
+                .map(|s| parse_provider(s.trim()))
+                .collect();
+            Ok(routing::RoutingStrategy::Fallback(providers?))
+        }
+        "intelligent" => Ok(routing::RoutingStrategy::Intelligent(
+            routing::IntelligentRoutingConfig::default(),
+        )),
+        other => Err(anyhow::anyhow!(
+            "Unknown routing strategy: {}. Use 'fixed', 'fallback', or 'intelligent'",
+            other
+        )),
+    }
+}
+
+/// Parse a provider name string into a Provider enum.
+fn parse_provider(name: &str) -> Result<routing::Provider> {
+    match name.to_lowercase().as_str() {
+        "google" | "gemini" => Ok(routing::Provider::Google),
+        "openai" | "gpt" => Ok(routing::Provider::OpenAI),
+        "anthropic" | "claude" => Ok(routing::Provider::Anthropic),
+        "ollama" | "local" => Ok(routing::Provider::Ollama),
+        other => Err(anyhow::anyhow!(
+            "Unknown provider: {}. Use 'google', 'openai', 'anthropic', or 'ollama'",
+            other
+        )),
+    }
+}
+
+/// Get the list of providers to try in order based on routing strategy.
+fn get_providers_to_try(
+    profile: &routing::RequestProfile,
+    config: &routing::RoutingStrategy,
+) -> Vec<routing::Provider> {
+    match config {
+        routing::RoutingStrategy::Fixed(p) => vec![p.clone()],
+        routing::RoutingStrategy::Fallback(providers) => providers.clone(),
+        routing::RoutingStrategy::Intelligent(ic) => {
+            let primary = routing::select_provider(profile, config);
+            let mut list = vec![primary.clone()];
+
+            // Add fallback provider if different
+            if ic.fallback != primary {
+                list.push(ic.fallback.clone());
+            }
+
+            // Add any other providers not already in the list for deep fallback
+            for other in &[
+                routing::Provider::Google,
+                routing::Provider::OpenAI,
+                routing::Provider::Anthropic,
+                routing::Provider::Ollama,
+            ] {
+                if !list.contains(other) {
+                    list.push(other.clone());
+                }
+            }
+
+            list
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------

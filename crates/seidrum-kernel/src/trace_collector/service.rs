@@ -1,0 +1,240 @@
+use std::collections::HashMap;
+use std::sync::Arc;
+
+use anyhow::{Context, Result};
+use chrono::{DateTime, Utc};
+use futures::StreamExt;
+use serde::{Deserialize, Serialize};
+use tokio::sync::RwLock;
+use tracing::info;
+
+/// A single event within a trace.
+#[derive(Serialize, Deserialize, Debug, Clone)]
+pub struct TraceSpan {
+    pub event_id: String,
+    pub subject: String,
+    pub source: String,
+    pub event_type: String,
+    pub timestamp: DateTime<Utc>,
+    /// Time in ms since the trace started
+    pub offset_ms: i64,
+    /// Payload preview (first 500 chars of serialized payload)
+    pub payload_preview: String,
+}
+
+/// A complete trace: all events sharing a correlation_id.
+#[derive(Serialize, Deserialize, Debug, Clone)]
+pub struct Trace {
+    pub correlation_id: String,
+    pub started_at: DateTime<Utc>,
+    pub last_event_at: DateTime<Utc>,
+    pub duration_ms: i64,
+    pub span_count: usize,
+    pub spans: Vec<TraceSpan>,
+}
+
+/// Request to get a specific trace.
+#[derive(Serialize, Deserialize, Debug, Clone)]
+pub struct TraceGetRequest {
+    pub correlation_id: String,
+}
+
+/// Request to list recent traces.
+#[derive(Serialize, Deserialize, Debug, Clone)]
+pub struct TraceListRequest {
+    pub limit: Option<usize>,
+    pub since: Option<DateTime<Utc>>,
+}
+
+/// Response with trace list (summaries without full spans).
+#[derive(Serialize, Deserialize, Debug, Clone)]
+pub struct TraceListResponse {
+    pub traces: Vec<TraceSummary>,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone)]
+pub struct TraceSummary {
+    pub correlation_id: String,
+    pub started_at: DateTime<Utc>,
+    pub duration_ms: i64,
+    pub span_count: usize,
+    /// First event subject (usually the trigger)
+    pub trigger_subject: String,
+    /// Last event subject
+    pub last_subject: String,
+}
+
+pub struct TraceCollectorService {
+    nats: async_nats::Client,
+    /// correlation_id -> Trace
+    traces: Arc<RwLock<HashMap<String, Trace>>>,
+    max_traces: usize,
+}
+
+impl TraceCollectorService {
+    pub fn new(nats: async_nats::Client, max_traces: usize) -> Self {
+        Self {
+            nats,
+            traces: Arc::new(RwLock::new(HashMap::new())),
+            max_traces,
+        }
+    }
+
+    pub async fn spawn(self) -> Result<tokio::task::JoinHandle<()>> {
+        // Subscribe to all subjects
+        let mut all_events = self
+            .nats
+            .subscribe(">".to_string())
+            .await
+            .context("failed to subscribe to all subjects")?;
+
+        // Subscribe to trace query subjects
+        let mut trace_get_sub = self
+            .nats
+            .subscribe("trace.get".to_string())
+            .await
+            .context("failed to subscribe to trace.get")?;
+        let mut trace_list_sub = self
+            .nats
+            .subscribe("trace.list".to_string())
+            .await
+            .context("failed to subscribe to trace.list")?;
+
+        let traces = self.traces.clone();
+        let nats = self.nats.clone();
+        let max_traces = self.max_traces;
+
+        let handle = tokio::spawn(async move {
+            info!(max_traces, "Trace collector service started");
+
+            loop {
+                tokio::select! {
+                    Some(msg) = all_events.next() => {
+                        // Skip trace.* subjects to avoid recursion
+                        let subject = msg.subject.to_string();
+                        if subject.starts_with("trace.") || subject.starts_with("_INBOX") {
+                            continue;
+                        }
+
+                        // Try to parse as EventEnvelope
+                        if let Ok(envelope) = serde_json::from_slice::<serde_json::Value>(&msg.payload) {
+                            if let Some(correlation_id) = envelope.get("correlation_id").and_then(|v| v.as_str()) {
+                                let event_id = envelope.get("id").and_then(|v| v.as_str()).unwrap_or("unknown").to_string();
+                                let source = envelope.get("source").and_then(|v| v.as_str()).unwrap_or("unknown").to_string();
+                                let event_type = envelope.get("event_type").and_then(|v| v.as_str()).unwrap_or("unknown").to_string();
+                                let timestamp = envelope.get("timestamp")
+                                    .and_then(|v| v.as_str())
+                                    .and_then(|s| s.parse::<DateTime<Utc>>().ok())
+                                    .unwrap_or_else(Utc::now);
+
+                                let payload_preview = envelope.get("payload")
+                                    .map(|p| {
+                                        let s = p.to_string();
+                                        if s.len() > 500 { format!("{}...", &s[..500]) } else { s }
+                                    })
+                                    .unwrap_or_default();
+
+                                let mut store = traces.write().await;
+
+                                let trace = store.entry(correlation_id.to_string()).or_insert_with(|| {
+                                    Trace {
+                                        correlation_id: correlation_id.to_string(),
+                                        started_at: timestamp,
+                                        last_event_at: timestamp,
+                                        duration_ms: 0,
+                                        span_count: 0,
+                                        spans: Vec::new(),
+                                    }
+                                });
+
+                                let offset_ms = (timestamp - trace.started_at).num_milliseconds();
+
+                                trace.spans.push(TraceSpan {
+                                    event_id,
+                                    subject: subject.clone(),
+                                    source,
+                                    event_type,
+                                    timestamp,
+                                    offset_ms,
+                                    payload_preview,
+                                });
+
+                                trace.last_event_at = timestamp;
+                                trace.duration_ms = (timestamp - trace.started_at).num_milliseconds();
+                                trace.span_count = trace.spans.len();
+
+                                // Evict oldest traces if over limit
+                                if store.len() > max_traces {
+                                    // Find the oldest trace
+                                    if let Some(oldest_id) = store
+                                        .iter()
+                                        .min_by_key(|(_, t)| t.last_event_at)
+                                        .map(|(id, _)| id.clone())
+                                    {
+                                        store.remove(&oldest_id);
+                                    }
+                                }
+                            }
+                        }
+                    }
+
+                    Some(msg) = trace_get_sub.next() => {
+                        let reply = match &msg.reply {
+                            Some(r) => r.clone(),
+                            None => continue,
+                        };
+
+                        if let Ok(req) = serde_json::from_slice::<TraceGetRequest>(&msg.payload) {
+                            let store = traces.read().await;
+                            let response = store.get(&req.correlation_id).cloned();
+                            if let Ok(bytes) = serde_json::to_vec(&response) {
+                                let _ = nats.publish(reply.clone(), bytes.into()).await;
+                            }
+                        }
+                    }
+
+                    Some(msg) = trace_list_sub.next() => {
+                        let reply = match &msg.reply {
+                            Some(r) => r.clone(),
+                            None => continue,
+                        };
+
+                        let req: TraceListRequest = serde_json::from_slice(&msg.payload)
+                            .unwrap_or(TraceListRequest { limit: Some(50), since: None });
+
+                        let store = traces.read().await;
+                        let limit = req.limit.unwrap_or(50);
+
+                        let mut summaries: Vec<TraceSummary> = store.values()
+                            .filter(|t| {
+                                if let Some(since) = req.since {
+                                    t.started_at >= since
+                                } else {
+                                    true
+                                }
+                            })
+                            .map(|t| TraceSummary {
+                                correlation_id: t.correlation_id.clone(),
+                                started_at: t.started_at,
+                                duration_ms: t.duration_ms,
+                                span_count: t.span_count,
+                                trigger_subject: t.spans.first().map(|s| s.subject.clone()).unwrap_or_default(),
+                                last_subject: t.spans.last().map(|s| s.subject.clone()).unwrap_or_default(),
+                            })
+                            .collect();
+
+                        summaries.sort_by(|a, b| b.started_at.cmp(&a.started_at));
+                        summaries.truncate(limit);
+
+                        let response = TraceListResponse { traces: summaries };
+                        if let Ok(bytes) = serde_json::to_vec(&response) {
+                            let _ = nats.publish(reply.clone(), bytes.into()).await;
+                        }
+                    }
+                }
+            }
+        });
+
+        Ok(handle)
+    }
+}

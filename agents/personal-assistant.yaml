@@ -1,14 +1,20 @@
 agent:
   id: personal-assistant
-  description: General-purpose personal assistant
+  description: General-purpose personal assistant with proactive capabilities
   prompt: ./prompts/assistant.md
   tools:
     - execute-code
     - search-calendar
     - send-email
+    - brain-query
+    - delegate-task
+    - schedule-wake
+    - send-notification
+    - subscribe-events
   scope: scope_root
   additional_scopes:
     - scope_job_search
     - scope_projects
   subscribe:
     - task.completed.*
+    - agent.feedback

@@ -32,6 +32,7 @@ pub struct ResolvedScopes {
     /// All scope keys the agent is allowed to read from.
     pub allowed: HashSet<String>,
     /// The primary scope key.
+    #[allow(dead_code)]
     pub primary: String,
 }
 
@@ -203,6 +204,7 @@ FOR __scope_doc IN __scope_candidates
 
     /// Convenience: resolve scopes for an agent and inject a filter into
     /// an AQL query in one step.
+    #[allow(dead_code)]
     pub async fn enforce_scope_on_aql(
         &self,
         primary_scope: &str,
@@ -233,6 +235,7 @@ FOR __scope_doc IN __scope_candidates
     ///
     /// Callers can then add `FILTER doc._id IN __scoped_ids OR doc._id NOT IN (FOR s IN scoped_to RETURN s._from)`
     /// to their query.
+    #[allow(dead_code)]
     pub fn scope_filter_fragment(allowed_scopes: &HashSet<String>) -> (String, Value) {
         let scope_ids: Vec<String> = allowed_scopes
             .iter()

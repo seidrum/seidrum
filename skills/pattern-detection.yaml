@@ -1,0 +1,16 @@
+skill:
+  id: pattern-detection
+  name: Pattern Detection
+  description: Detect recurring themes in recently stored content and extracted entities
+  trigger:
+    event_pattern: "content.stored"
+    min_frequency: 3
+    window_seconds: 3600
+  steps:
+    - query: "FOR c IN content FILTER c.ingested_at >= DATE_SUBTRACT(DATE_NOW(), 1, 'hour') SORT c.ingested_at DESC LIMIT 20 RETURN { type: c.type, channel: c.channel, text: LEFT(c.raw_text, 200) }"
+      label: "Recent content"
+    - query: "FOR e IN entities FILTER e.created_at >= DATE_SUBTRACT(DATE_NOW(), 1, 'hour') COLLECT type = e.type WITH COUNT INTO count SORT count DESC RETURN { type, count }"
+      label: "Entity frequency"
+  output:
+    format: insight
+    channel: internal

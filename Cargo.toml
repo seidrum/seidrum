@@ -19,8 +19,12 @@ members = [
     "crates/plugins/seidrum-calendar",
     "crates/plugins/seidrum-tool-dispatcher",
     "crates/plugins/seidrum-llm-google",
+    "crates/plugins/seidrum-llm-openai",
+    "crates/plugins/seidrum-llm-anthropic",
+    "crates/plugins/seidrum-llm-ollama",
     "crates/plugins/seidrum-claude-code",
     "crates/plugins/seidrum-api-gateway",
+    "crates/plugins/seidrum-feedback-extractor",
     "crates/seidrum-daemon",
     "crates/seidrum-e2e",
 ]

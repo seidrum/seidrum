@@ -4,33 +4,1459 @@
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width, initial-scale=1">
     <title>Seidrum Dashboard</title>
-    <link rel="stylesheet" href="/dashboard/style.css">
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
+    <script crossorigin src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
+    <script crossorigin src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
+    <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+    <script src="https://unpkg.com/recharts@2.10.0/dist/Recharts.js"></script>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+
+        body {
+            font-family: 'Inter', sans-serif;
+            background-color: #0f1117;
+            color: #c9d1d9;
+            height: 100vh;
+            overflow: hidden;
+        }
+
+        #root {
+            height: 100%;
+        }
+
+        .app-container {
+            display: grid;
+            grid-template-columns: 250px 1fr;
+            height: 100vh;
+            gap: 0;
+        }
+
+        .sidebar {
+            background-color: #0d1117;
+            border-right: 1px solid #30363d;
+            display: flex;
+            flex-direction: column;
+            overflow-y: auto;
+            padding: 24px 0;
+        }
+
+        .sidebar-header {
+            padding: 0 20px 20px 20px;
+            border-bottom: 1px solid #30363d;
+            margin-bottom: 20px;
+        }
+
+        .sidebar-header h1 {
+            font-size: 20px;
+            font-weight: 700;
+            color: #6366f1;
+            letter-spacing: -0.5px;
+        }
+
+        .sidebar-nav {
+            list-style: none;
+            flex: 1;
+        }
+
+        .sidebar-nav li {
+            margin: 0;
+        }
+
+        .sidebar-nav button {
+            display: block;
+            width: 100%;
+            padding: 12px 20px;
+            background: none;
+            border: none;
+            color: #c9d1d9;
+            text-align: left;
+            cursor: pointer;
+            font-size: 14px;
+            font-weight: 500;
+            transition: all 0.2s ease;
+            position: relative;
+        }
+
+        .sidebar-nav button:hover {
+            background-color: #161b22;
+            color: #f0883e;
+        }
+
+        .sidebar-nav button.active {
+            color: #6366f1;
+            background-color: #0d1117;
+        }
+
+        .sidebar-nav button.active::before {
+            content: '';
+            position: absolute;
+            left: 0;
+            top: 0;
+            bottom: 0;
+            width: 3px;
+            background-color: #6366f1;
+        }
+
+        .main-content {
+            display: flex;
+            flex-direction: column;
+            overflow: hidden;
+        }
+
+        .top-bar {
+            background-color: #161b22;
+            border-bottom: 1px solid #30363d;
+            padding: 16px 24px;
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+        }
+
+        .top-bar h2 {
+            font-size: 18px;
+            font-weight: 600;
+            color: #f0883e;
+        }
+
+        .page-container {
+            flex: 1;
+            overflow-y: auto;
+            padding: 24px;
+        }
+
+        /* Cards and components */
+        .card {
+            background-color: #1a1d27;
+            border: 1px solid #30363d;
+            border-radius: 8px;
+            padding: 20px;
+            margin-bottom: 16px;
+            transition: all 0.2s ease;
+        }
+
+        .card:hover {
+            border-color: #484f58;
+            background-color: #1e2129;
+        }
+
+        .card-header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            margin-bottom: 12px;
+        }
+
+        .card-title {
+            font-size: 15px;
+            font-weight: 600;
+            color: #f0883e;
+        }
+
+        .grid-2 {
+            display: grid;
+            grid-template-columns: 1fr 1fr;
+            gap: 16px;
+        }
+
+        .grid-3 {
+            display: grid;
+            grid-template-columns: repeat(3, 1fr);
+            gap: 16px;
+        }
+
+        .grid-4 {
+            display: grid;
+            grid-template-columns: repeat(4, 1fr);
+            gap: 16px;
+        }
+
+        /* Status indicators */
+        .status-badge {
+            display: inline-flex;
+            align-items: center;
+            gap: 6px;
+            padding: 4px 8px;
+            background-color: #21262d;
+            border-radius: 4px;
+            font-size: 12px;
+            font-weight: 500;
+        }
+
+        .status-dot {
+            display: inline-block;
+            width: 8px;
+            height: 8px;
+            border-radius: 50%;
+            animation: pulse 2s infinite;
+        }
+
+        .status-dot.healthy {
+            background-color: #3fb950;
+        }
+
+        .status-dot.unhealthy {
+            background-color: #f85149;
+        }
+
+        .status-dot.warning {
+            background-color: #f0883e;
+        }
+
+        @keyframes pulse {
+            0%, 100% {
+                opacity: 1;
+            }
+            50% {
+                opacity: 0.5;
+            }
+        }
+
+        /* Stat card */
+        .stat-card {
+            background-color: #1a1d27;
+            border: 1px solid #30363d;
+            border-radius: 8px;
+            padding: 16px;
+            text-align: center;
+        }
+
+        .stat-value {
+            font-size: 32px;
+            font-weight: 700;
+            color: #6366f1;
+            margin-bottom: 4px;
+            font-family: 'JetBrains Mono', monospace;
+        }
+
+        .stat-label {
+            font-size: 12px;
+            color: #8b949e;
+            text-transform: uppercase;
+            letter-spacing: 0.5px;
+        }
+
+        /* Buttons */
+        .button {
+            padding: 8px 16px;
+            border: none;
+            border-radius: 6px;
+            font-size: 13px;
+            font-weight: 500;
+            cursor: pointer;
+            transition: all 0.2s ease;
+        }
+
+        .button.primary {
+            background-color: #6366f1;
+            color: #ffffff;
+        }
+
+        .button.primary:hover {
+            background-color: #4f46e5;
+        }
+
+        .button.secondary {
+            background-color: #30363d;
+            color: #c9d1d9;
+            border: 1px solid #484f58;
+        }
+
+        .button.secondary:hover {
+            background-color: #484f58;
+        }
+
+        .button.sm {
+            padding: 4px 12px;
+            font-size: 12px;
+        }
+
+        /* Forms */
+        .form-group {
+            margin-bottom: 16px;
+        }
+
+        .form-label {
+            display: block;
+            font-size: 12px;
+            font-weight: 600;
+            color: #8b949e;
+            text-transform: uppercase;
+            letter-spacing: 0.5px;
+            margin-bottom: 6px;
+        }
+
+        .form-input {
+            width: 100%;
+            padding: 8px 12px;
+            background-color: #0d1117;
+            border: 1px solid #30363d;
+            border-radius: 6px;
+            color: #c9d1d9;
+            font-family: 'JetBrains Mono', monospace;
+            font-size: 13px;
+            transition: all 0.2s ease;
+        }
+
+        .form-input:focus {
+            outline: none;
+            border-color: #6366f1;
+            box-shadow: 0 0 0 3px rgba(99, 102, 241, 0.1);
+        }
+
+        /* Event flow */
+        .event-card {
+            background-color: #1a1d27;
+            border: 1px solid #30363d;
+            border-radius: 6px;
+            padding: 12px;
+            margin-bottom: 12px;
+            font-family: 'JetBrains Mono', monospace;
+            font-size: 12px;
+            transition: all 0.2s ease;
+            cursor: pointer;
+        }
+
+        .event-card:hover {
+            border-color: #484f58;
+            background-color: #1e2129;
+        }
+
+        .event-card.active {
+            border-color: #6366f1;
+            background-color: #1e2129;
+        }
+
+        .event-subject {
+            color: #6366f1;
+            font-weight: 600;
+            margin-bottom: 6px;
+        }
+
+        .event-detail {
+            color: #8b949e;
+            margin-bottom: 4px;
+        }
+
+        .event-detail span {
+            color: #58a6ff;
+        }
+
+        /* Timeline */
+        .timeline {
+            position: relative;
+            padding: 20px 0;
+        }
+
+        .timeline-item {
+            display: flex;
+            margin-bottom: 24px;
+            position: relative;
+        }
+
+        .timeline-marker {
+            width: 12px;
+            height: 12px;
+            background-color: #6366f1;
+            border-radius: 50%;
+            margin-top: 4px;
+            margin-right: 16px;
+            flex-shrink: 0;
+            border: 2px solid #0f1117;
+        }
+
+        .timeline-content {
+            flex: 1;
+        }
+
+        .timeline-content-title {
+            font-weight: 600;
+            color: #f0883e;
+            font-size: 13px;
+            margin-bottom: 4px;
+        }
+
+        .timeline-content-time {
+            font-size: 11px;
+            color: #8b949e;
+            font-family: 'JetBrains Mono', monospace;
+            margin-bottom: 8px;
+        }
+
+        .timeline-content-text {
+            font-size: 12px;
+            color: #c9d1d9;
+            line-height: 1.5;
+        }
+
+        /* Chat bubbles */
+        .chat-container {
+            display: flex;
+            flex-direction: column;
+            gap: 12px;
+        }
+
+        .chat-message {
+            display: flex;
+            gap: 12px;
+            align-items: flex-end;
+        }
+
+        .chat-message.user {
+            flex-direction: row-reverse;
+        }
+
+        .chat-bubble {
+            max-width: 70%;
+            padding: 12px 16px;
+            border-radius: 12px;
+            font-size: 13px;
+            line-height: 1.5;
+        }
+
+        .chat-bubble.agent {
+            background-color: #1a1d27;
+            border: 1px solid #30363d;
+            color: #c9d1d9;
+        }
+
+        .chat-bubble.user {
+            background-color: #6366f1;
+            color: #ffffff;
+        }
+
+        .chat-time {
+            font-size: 11px;
+            color: #8b949e;
+            font-family: 'JetBrains Mono', monospace;
+        }
+
+        /* Plugin grid */
+        .plugin-card {
+            background-color: #1a1d27;
+            border: 1px solid #30363d;
+            border-radius: 8px;
+            padding: 16px;
+            display: flex;
+            flex-direction: column;
+            transition: all 0.2s ease;
+        }
+
+        .plugin-card:hover {
+            border-color: #484f58;
+            background-color: #1e2129;
+        }
+
+        .plugin-header {
+            display: flex;
+            justify-content: space-between;
+            align-items: start;
+            margin-bottom: 12px;
+        }
+
+        .plugin-name {
+            font-weight: 600;
+            color: #f0883e;
+            font-size: 14px;
+        }
+
+        .plugin-version {
+            font-size: 11px;
+            color: #8b949e;
+            font-family: 'JetBrains Mono', monospace;
+        }
+
+        .plugin-info {
+            font-size: 12px;
+            color: #8b949e;
+            margin: 8px 0;
+        }
+
+        .plugin-info strong {
+            color: #c9d1d9;
+        }
+
+        /* Expandable */
+        .expandable-content {
+            max-height: 0;
+            overflow: hidden;
+            transition: max-height 0.3s ease;
+        }
+
+        .expandable-content.open {
+            max-height: 2000px;
+        }
+
+        /* Tables */
+        .table-container {
+            overflow-x: auto;
+        }
+
+        table {
+            width: 100%;
+            border-collapse: collapse;
+            font-family: 'JetBrains Mono', monospace;
+            font-size: 12px;
+        }
+
+        thead {
+            background-color: #0d1117;
+            border-bottom: 1px solid #30363d;
+        }
+
+        th {
+            padding: 12px;
+            text-align: left;
+            font-weight: 600;
+            color: #8b949e;
+            text-transform: uppercase;
+            letter-spacing: 0.5px;
+            font-size: 11px;
+        }
+
+        td {
+            padding: 12px;
+            border-bottom: 1px solid #30363d;
+            color: #c9d1d9;
+        }
+
+        tbody tr:hover {
+            background-color: #1a1d27;
+        }
+
+        /* Scrollbar styling */
+        ::-webkit-scrollbar {
+            width: 8px;
+            height: 8px;
+        }
+
+        ::-webkit-scrollbar-track {
+            background: #0f1117;
+        }
+
+        ::-webkit-scrollbar-thumb {
+            background: #30363d;
+            border-radius: 4px;
+        }
+
+        ::-webkit-scrollbar-thumb:hover {
+            background: #484f58;
+        }
+
+        /* Responsive */
+        @media (max-width: 1200px) {
+            .grid-4 {
+                grid-template-columns: repeat(2, 1fr);
+            }
+        }
+
+        @media (max-width: 768px) {
+            .app-container {
+                grid-template-columns: 1fr;
+            }
+
+            .sidebar {
+                position: fixed;
+                left: -250px;
+                top: 0;
+                height: 100vh;
+                z-index: 1000;
+                transition: left 0.3s ease;
+            }
+
+            .sidebar.open {
+                left: 0;
+            }
+
+            .grid-2,
+            .grid-3,
+            .grid-4 {
+                grid-template-columns: 1fr;
+            }
+
+            .chat-bubble {
+                max-width: 100%;
+            }
+
+            .top-bar {
+                padding: 12px 16px;
+            }
+
+            .page-container {
+                padding: 16px;
+            }
+        }
+
+        /* Loading and empty states */
+        .loading {
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            padding: 40px;
+            color: #8b949e;
+        }
+
+        .empty-state {
+            text-align: center;
+            padding: 40px 20px;
+            color: #8b949e;
+        }
+
+        .empty-state-icon {
+            font-size: 48px;
+            margin-bottom: 16px;
+        }
+
+        /* Event stream controls */
+        .event-controls {
+            display: flex;
+            gap: 12px;
+            margin-bottom: 16px;
+            flex-wrap: wrap;
+        }
+
+        .event-controls .form-input {
+            flex: 1;
+            min-width: 200px;
+        }
+
+        /* Expandable button */
+        .expand-button {
+            background: none;
+            border: none;
+            color: #6366f1;
+            cursor: pointer;
+            font-size: 12px;
+            font-weight: 500;
+            padding: 0;
+            transition: all 0.2s ease;
+        }
+
+        .expand-button:hover {
+            color: #4f46e5;
+        }
+
+        /* Trace timeline chart */
+        .trace-timeline {
+            display: flex;
+            align-items: center;
+            height: 40px;
+            background-color: #0d1117;
+            border-radius: 4px;
+            padding: 0 8px;
+            gap: 4px;
+            overflow-x: auto;
+        }
+
+        .trace-span {
+            height: 24px;
+            border-radius: 2px;
+            flex-shrink: 0;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            font-size: 10px;
+            color: #ffffff;
+            font-weight: 500;
+            padding: 0 4px;
+            white-space: nowrap;
+            cursor: pointer;
+            transition: all 0.2s ease;
+        }
+
+        .trace-span:hover {
+            opacity: 0.8;
+        }
+
+        /* No events placeholder */
+        .no-events {
+            text-align: center;
+            padding: 60px 20px;
+            color: #8b949e;
+        }
+
+        .no-events-icon {
+            font-size: 64px;
+            margin-bottom: 20px;
+            opacity: 0.5;
+        }
+
+        /* Badge colors for different sources */
+        .source-badge {
+            display: inline-block;
+            padding: 3px 8px;
+            border-radius: 3px;
+            font-size: 11px;
+            font-weight: 500;
+            background-color: #21262d;
+            color: #8b949e;
+        }
+    </style>
 </head>
 <body>
-    <div id="app">
-        <nav id="sidebar">
-            <h1>Seidrum</h1>
-            <ul>
-                <li><a href="#" onclick="showPage('overview')">Overview</a></li>
-                <li><a href="#" onclick="showPage('plugins')">Plugins</a></li>
-                <li><a href="#" onclick="showPage('capabilities')">Capabilities</a></li>
-                <li><a href="#" onclick="showPage('skills')">Skills</a></li>
-                <li><a href="#" onclick="showPage('conversations')">Conversations</a></li>
-                <li><a href="#" onclick="showPage('storage')">Storage</a></li>
-                <li><a href="#" onclick="showPage('events')">Events</a></li>
-            </ul>
-        </nav>
-        <main id="content">
-            <div id="login-prompt" style="display:none">
-                <h2>API Key Required</h2>
-                <form onsubmit="handleLogin(event)">
-                    <input type="password" id="api-key-input" placeholder="Enter API key" autofocus>
-                    <button type="submit">Connect</button>
-                </form>
-            </div>
-            <div id="page-content"></div>
-        </main>
-    </div>
-    <script src="/dashboard/app.js"></script>
+    <div id="root"></div>
+
+    <script type="text/babel">
+        const { useState, useEffect, useRef, useCallback } = React;
+
+        // ============ API CLIENT ============
+        const API = {
+            async get(path) {
+                const response = await fetch(`/api/v1${path}`);
+                if (!response.ok) throw new Error(`HTTP ${response.status}`);
+                return response.json();
+            },
+            async put(path, data) {
+                const response = await fetch(`/api/v1${path}`, {
+                    method: 'PUT',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify(data),
+                });
+                if (!response.ok) throw new Error(`HTTP ${response.status}`);
+                return response.json();
+            },
+            connectWebSocket(path, onMessage, onError) {
+                const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
+                const url = `${protocol}//${window.location.host}${path}`;
+                const ws = new WebSocket(url);
+                ws.onmessage = (event) => onMessage(JSON.parse(event.data));
+                ws.onerror = onError;
+                ws.onopen = () => console.log(`Connected to ${path}`);
+                return ws;
+            }
+        };
+
+        // ============ MAIN APP ============
+        function Dashboard() {
+            const [currentPage, setCurrentPage] = useState('overview');
+
+            return (
+                <div className="app-container">
+                    <Sidebar currentPage={currentPage} setCurrentPage={setCurrentPage} />
+                    <div className="main-content">
+                        <TopBar page={currentPage} />
+                        <div className="page-container">
+                            {currentPage === 'overview' && <OverviewPage />}
+                            {currentPage === 'event-flow' && <EventFlowPage />}
+                            {currentPage === 'traces' && <TracesPage />}
+                            {currentPage === 'plugins' && <PluginsPage />}
+                            {currentPage === 'conversations' && <ConversationsPage />}
+                            {currentPage === 'knowledge-graph' && <KnowledgeGraphPage />}
+                            {currentPage === 'skills' && <SkillsPage />}
+                        </div>
+                    </div>
+                </div>
+            );
+        }
+
+        // ============ SIDEBAR ============
+        function Sidebar({ currentPage, setCurrentPage }) {
+            const navItems = [
+                { id: 'overview', label: 'Dashboard' },
+                { id: 'event-flow', label: 'Event Flow' },
+                { id: 'knowledge-graph', label: 'Knowledge Graph' },
+                { id: 'conversations', label: 'Conversations' },
+                { id: 'plugins', label: 'Plugins' },
+                { id: 'skills', label: 'Skills' },
+                { id: 'traces', label: 'Traces' },
+            ];
+
+            return (
+                <nav className="sidebar">
+                    <div className="sidebar-header">
+                        <h1>Seidrum</h1>
+                    </div>
+                    <ul className="sidebar-nav">
+                        {navItems.map((item) => (
+                            <li key={item.id}>
+                                <button
+                                    className={currentPage === item.id ? 'active' : ''}
+                                    onClick={() => setCurrentPage(item.id)}
+                                >
+                                    {item.label}
+                                </button>
+                            </li>
+                        ))}
+                    </ul>
+                </nav>
+            );
+        }
+
+        // ============ TOP BAR ============
+        function TopBar({ page }) {
+            const pageNames = {
+                overview: 'Dashboard',
+                'event-flow': 'Event Flow',
+                traces: 'Traces',
+                plugins: 'Plugins',
+                conversations: 'Conversations',
+                'knowledge-graph': 'Knowledge Graph',
+                skills: 'Skills',
+            };
+            return (
+                <div className="top-bar">
+                    <h2>{pageNames[page]}</h2>
+                </div>
+            );
+        }
+
+        // ============ OVERVIEW PAGE ============
+        function OverviewPage() {
+            const [overview, setOverview] = useState(null);
+            const [plugins, setPlugins] = useState([]);
+            const [recentEvents, setRecentEvents] = useState([]);
+            const [loading, setLoading] = useState(true);
+            const wsRef = useRef(null);
+
+            useEffect(() => {
+                async function loadData() {
+                    try {
+                        const [overviewData, pluginsData] = await Promise.all([
+                            API.get('/dashboard/overview'),
+                            API.get('/plugins'),
+                        ]);
+                        setOverview(overviewData);
+                        setPlugins(pluginsData);
+                    } catch (err) {
+                        console.error('Failed to load overview:', err);
+                    } finally {
+                        setLoading(false);
+                    }
+                }
+                loadData();
+
+                wsRef.current = API.connectWebSocket('/ws/events', (event) => {
+                    setRecentEvents((prev) => [event, ...prev].slice(0, 10));
+                });
+
+                return () => {
+                    if (wsRef.current) wsRef.current.close();
+                };
+            }, []);
+
+            if (loading) return <div className="loading">Loading...</div>;
+
+            const healthyPlugins = plugins.filter((p) => p.healthy).length;
+
+            return (
+                <div>
+                    <div className="grid-4">
+                        <div className="stat-card">
+                            <div className="stat-value">{overview?.system_status?.nats_connected ? '✓' : '✗'}</div>
+                            <div className="stat-label">NATS Connected</div>
+                        </div>
+                        <div className="stat-card">
+                            <div className="stat-value">{overview?.system_status?.arangodb_connected ? '✓' : '✗'}</div>
+                            <div className="stat-label">ArangoDB Connected</div>
+                        </div>
+                        <div className="stat-card">
+                            <div className="stat-value">{overview?.system_status?.uptime_seconds || 0}</div>
+                            <div className="stat-label">Uptime (s)</div>
+                        </div>
+                        <div className="stat-card">
+                            <div className="stat-value">{healthyPlugins}</div>
+                            <div className="stat-label">Active Plugins</div>
+                        </div>
+                    </div>
+
+                    <div className="card" style={{ marginTop: '20px' }}>
+                        <div className="card-header">
+                            <div className="card-title">Plugins Health</div>
+                        </div>
+                        <div style={{ display: 'flex', flexDirection: 'column', gap: '12px' }}>
+                            {plugins.map((plugin) => (
+                                <div
+                                    key={plugin.id}
+                                    style={{
+                                        display: 'flex',
+                                        justifyContent: 'space-between',
+                                        alignItems: 'center',
+                                        padding: '8px 0',
+                                        borderBottom: '1px solid #30363d',
+                                    }}
+                                >
+                                    <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+                                        <span
+                                            className={`status-dot ${plugin.healthy ? 'healthy' : 'unhealthy'}`}
+                                        ></span>
+                                        <span style={{ fontWeight: 500 }}>{plugin.id}</span>
+                                    </div>
+                                    <span style={{ fontSize: '12px', color: '#8b949e' }}>
+                                        {plugin.events_processed || 0} events
+                                    </span>
+                                </div>
+                            ))}
+                        </div>
+                    </div>
+
+                    <div className="card">
+                        <div className="card-header">
+                            <div className="card-title">Recent Activity</div>
+                        </div>
+                        {recentEvents.length === 0 ? (
+                            <div className="empty-state">No events yet</div>
+                        ) : (
+                            <div style={{ display: 'flex', flexDirection: 'column', gap: '8px' }}>
+                                {recentEvents.map((event, idx) => (
+                                    <div
+                                        key={idx}
+                                        style={{
+                                            padding: '8px',
+                                            background: '#0d1117',
+                                            borderRadius: '4px',
+                                            fontFamily: "'JetBrains Mono', monospace",
+                                            fontSize: '11px',
+                                            color: '#8b949e',
+                                        }}
+                                    >
+                                        <div style={{ color: '#6366f1', fontWeight: 600, marginBottom: '4px' }}>
+                                            {event.subject}
+                                        </div>
+                                        <div>
+                                            {new Date(event.timestamp).toLocaleTimeString()}
+                                            {event.correlation_id && ` | ID: ${event.correlation_id.slice(0, 8)}`}
+                                        </div>
+                                    </div>
+                                ))}
+                            </div>
+                        )}
+                    </div>
+                </div>
+            );
+        }
+
+        // ============ EVENT FLOW PAGE ============
+        function EventFlowPage() {
+            const [events, setEvents] = useState([]);
+            const [paused, setPaused] = useState(false);
+            const [filter, setFilter] = useState('');
+            const [selectedCorrelationId, setSelectedCorrelationId] = useState(null);
+            const containerRef = useRef(null);
+            const wsRef = useRef(null);
+
+            useEffect(() => {
+                wsRef.current = API.connectWebSocket('/ws/events', (event) => {
+                    if (!paused) {
+                        setEvents((prev) => [event, ...prev].slice(0, 100));
+                    }
+                });
+
+                return () => {
+                    if (wsRef.current) wsRef.current.close();
+                };
+            }, [paused]);
+
+            useEffect(() => {
+                if (containerRef.current && !paused) {
+                    containerRef.current.scrollTop = 0;
+                }
+            }, [events, paused]);
+
+            const filteredEvents = events.filter((event) => {
+                const matchesFilter = !filter || event.subject.includes(filter);
+                const matchesCorrelation = !selectedCorrelationId || event.correlation_id === selectedCorrelationId;
+                return matchesFilter && matchesCorrelation;
+            });
+
+            return (
+                <div>
+                    <div className="event-controls">
+                        <input
+                            type="text"
+                            className="form-input"
+                            placeholder="Filter by subject (e.g., 'channel.*', 'llm.*')"
+                            value={filter}
+                            onChange={(e) => setFilter(e.target.value)}
+                        />
+                        <button className="button secondary sm" onClick={() => setPaused(!paused)}>
+                            {paused ? 'Resume' : 'Pause'}
+                        </button>
+                        <button
+                            className="button secondary sm"
+                            onClick={() => setSelectedCorrelationId(null)}
+                            disabled={!selectedCorrelationId}
+                        >
+                            Clear Filter
+                        </button>
+                    </div>
+
+                    {selectedCorrelationId && (
+                        <div className="card">
+                            <div style={{ color: '#6366f1', fontFamily: "'JetBrains Mono', monospace", fontSize: '12px' }}>
+                                Filtered to correlation_id: {selectedCorrelationId.slice(0, 12)}...
+                            </div>
+                        </div>
+                    )}
+
+                    <div
+                        ref={containerRef}
+                        style={{
+                            height: 'calc(100% - 100px)',
+                            overflowY: 'auto',
+                        }}
+                    >
+                        {filteredEvents.length === 0 ? (
+                            <div className="no-events">
+                                <div className="no-events-icon">∅</div>
+                                <div>No events matching filter</div>
+                            </div>
+                        ) : (
+                            filteredEvents.map((event, idx) => (
+                                <div
+                                    key={idx}
+                                    className="event-card"
+                                    onClick={() => setSelectedCorrelationId(event.correlation_id)}
+                                >
+                                    <div className="event-subject">{event.subject}</div>
+                                    <div className="event-detail">
+                                        Source: <span>{event.source}</span>
+                                    </div>
+                                    <div className="event-detail">
+                                        Time: <span>{new Date(event.timestamp).toLocaleTimeString()}</span>
+                                    </div>
+                                    {event.correlation_id && (
+                                        <div className="event-detail">
+                                            Correlation: <span>{event.correlation_id.slice(0, 16)}...</span>
+                                        </div>
+                                    )}
+                                </div>
+                            ))
+                        )}
+                    </div>
+                </div>
+            );
+        }
+
+        // ============ TRACES PAGE ============
+        function TracesPage() {
+            const [traces, setTraces] = useState([]);
+            const [expandedId, setExpandedId] = useState(null);
+            const [loading, setLoading] = useState(true);
+
+            useEffect(() => {
+                async function loadTraces() {
+                    try {
+                        const data = await API.get('/traces');
+                        setTraces(data);
+                    } catch (err) {
+                        console.error('Failed to load traces:', err);
+                    } finally {
+                        setLoading(false);
+                    }
+                }
+                loadTraces();
+            }, []);
+
+            if (loading) return <div className="loading">Loading traces...</div>;
+
+            return (
+                <div>
+                    {traces.length === 0 ? (
+                        <div className="empty-state">
+                            <div className="empty-state-icon">⊘</div>
+                            <div>No traces available</div>
+                        </div>
+                    ) : (
+                        traces.map((trace) => (
+                            <div key={trace.id} className="card">
+                                <div
+                                    style={{
+                                        display: 'flex',
+                                        justifyContent: 'space-between',
+                                        alignItems: 'center',
+                                        cursor: 'pointer',
+                                    }}
+                                    onClick={() => setExpandedId(expandedId === trace.id ? null : trace.id)}
+                                >
+                                    <div>
+                                        <div className="card-title">{trace.trigger_subject}</div>
+                                        <div style={{ fontSize: '12px', color: '#8b949e', marginTop: '4px' }}>
+                                            {trace.span_count} spans • {trace.duration_ms}ms • Started{' '}
+                                            {new Date(trace.started_at).toLocaleTimeString()}
+                                        </div>
+                                    </div>
+                                    <button className="expand-button">{expandedId === trace.id ? '▼' : '▶'}</button>
+                                </div>
+
+                                {expandedId === trace.id && (
+                                    <div className="expandable-content open">
+                                        <div style={{ marginTop: '16px', paddingTop: '16px', borderTop: '1px solid #30363d' }}>
+                                            <TraceTimeline spans={trace.spans || []} />
+                                        </div>
+                                    </div>
+                                )}
+                            </div>
+                        ))
+                    )}
+                </div>
+            );
+        }
+
+        function TraceTimeline({ spans }) {
+            if (!spans || spans.length === 0) {
+                return <div className="empty-state">No spans in trace</div>;
+            }
+
+            const colors = ['#6366f1', '#f0883e', '#3fb950', '#58a6ff', '#f85149'];
+
+            return (
+                <div>
+                    {spans.map((span, idx) => (
+                        <div key={idx} className="timeline-item">
+                            <div
+                                className="timeline-marker"
+                                style={{ backgroundColor: colors[idx % colors.length] }}
+                            ></div>
+                            <div className="timeline-content">
+                                <div className="timeline-content-title">{span.name}</div>
+                                <div className="timeline-content-time">
+                                    {span.start_ms}ms - {span.end_ms}ms ({span.end_ms - span.start_ms}ms)
+                                </div>
+                                {span.source && (
+                                    <div className="timeline-content-text">Source: {span.source}</div>
+                                )}
+                            </div>
+                        </div>
+                    ))}
+                </div>
+            );
+        }
+
+        // ============ PLUGINS PAGE ============
+        function PluginsPage() {
+            const [plugins, setPlugins] = useState([]);
+            const [expandedId, setExpandedId] = useState(null);
+            const [loading, setLoading] = useState(true);
+
+            useEffect(() => {
+                async function loadPlugins() {
+                    try {
+                        const data = await API.get('/plugins');
+                        setPlugins(data);
+                    } catch (err) {
+                        console.error('Failed to load plugins:', err);
+                    } finally {
+                        setLoading(false);
+                    }
+                }
+                loadPlugins();
+            }, []);
+
+            if (loading) return <div className="loading">Loading plugins...</div>;
+
+            return (
+                <div className="grid-3">
+                    {plugins.map((plugin) => (
+                        <div key={plugin.id} className="plugin-card">
+                            <div className="plugin-header">
+                                <div>
+                                    <div className="plugin-name">{plugin.id}</div>
+                                    <div className="plugin-version">v{plugin.version || 'unknown'}</div>
+                                </div>
+                                <span className={`status-dot ${plugin.healthy ? 'healthy' : 'unhealthy'}`}></span>
+                            </div>
+
+                            <div className="plugin-info">
+                                Status: <strong>{plugin.healthy ? 'Healthy' : 'Unhealthy'}</strong>
+                            </div>
+                            <div className="plugin-info">
+                                Events: <strong>{plugin.events_processed || 0}</strong>
+                            </div>
+
+                            <button
+                                className="expand-button"
+                                style={{ marginTop: '8px' }}
+                                onClick={() => setExpandedId(expandedId === plugin.id ? null : plugin.id)}
+                            >
+                                {expandedId === plugin.id ? '▼ Details' : '▶ Details'}
+                            </button>
+
+                            {expandedId === plugin.id && (
+                                <div className="expandable-content open">
+                                    <div style={{ marginTop: '12px', paddingTop: '12px', borderTop: '1px solid #30363d' }}>
+                                        {plugin.consumes && plugin.consumes.length > 0 && (
+                                            <div style={{ marginBottom: '12px' }}>
+                                                <div style={{ fontSize: '11px', color: '#8b949e', marginBottom: '4px' }}>
+                                                    CONSUMES
+                                                </div>
+                                                {plugin.consumes.map((subject, idx) => (
+                                                    <div
+                                                        key={idx}
+                                                        style={{
+                                                            fontSize: '12px',
+                                                            color: '#58a6ff',
+                                                            fontFamily: "'JetBrains Mono', monospace",
+                                                            marginBottom: '4px',
+                                                        }}
+                                                    >
+                                                        {subject}
+                                                    </div>
+                                                ))}
+                                            </div>
+                                        )}
+                                        {plugin.produces && plugin.produces.length > 0 && (
+                                            <div>
+                                                <div style={{ fontSize: '11px', color: '#8b949e', marginBottom: '4px' }}>
+                                                    PRODUCES
+                                                </div>
+                                                {plugin.produces.map((subject, idx) => (
+                                                    <div
+                                                        key={idx}
+                                                        style={{
+                                                            fontSize: '12px',
+                                                            color: '#3fb950',
+                                                            fontFamily: "'JetBrains Mono', monospace",
+                                                            marginBottom: '4px',
+                                                        }}
+                                                    >
+                                                        {subject}
+                                                    </div>
+                                                ))}
+                                            </div>
+                                        )}
+                                    </div>
+                                </div>
+                            )}
+                        </div>
+                    ))}
+                </div>
+            );
+        }
+
+        // ============ CONVERSATIONS PAGE ============
+        function ConversationsPage() {
+            const [conversations, setConversations] = useState([]);
+            const [expandedId, setExpandedId] = useState(null);
+            const [loading, setLoading] = useState(true);
+
+            useEffect(() => {
+                async function loadConversations() {
+                    try {
+                        const data = await API.get('/conversations');
+                        setConversations(data);
+                    } catch (err) {
+                        console.error('Failed to load conversations:', err);
+                    } finally {
+                        setLoading(false);
+                    }
+                }
+                loadConversations();
+            }, []);
+
+            if (loading) return <div className="loading">Loading conversations...</div>;
+
+            return (
+                <div>
+                    {conversations.length === 0 ? (
+                        <div className="empty-state">
+                            <div className="empty-state-icon">⊘</div>
+                            <div>No conversations yet</div>
+                        </div>
+                    ) : (
+                        conversations.map((conversation) => (
+                            <div key={conversation.id} className="card">
+                                <div
+                                    style={{
+                                        display: 'flex',
+                                        justifyContent: 'space-between',
+                                        alignItems: 'center',
+                                        cursor: 'pointer',
+                                    }}
+                                    onClick={() => setExpandedId(expandedId === conversation.id ? null : conversation.id)}
+                                >
+                                    <div>
+                                        <div className="card-title">{conversation.id}</div>
+                                        <div style={{ fontSize: '12px', color: '#8b949e', marginTop: '4px' }}>
+                                            {conversation.messages ? conversation.messages.length : 0} messages
+                                        </div>
+                                    </div>
+                                    <button className="expand-button">
+                                        {expandedId === conversation.id ? '▼' : '▶'}
+                                    </button>
+                                </div>
+
+                                {expandedId === conversation.id && (
+                                    <div className="expandable-content open">
+                                        <div
+                                            style={{
+                                                marginTop: '16px',
+                                                paddingTop: '16px',
+                                                borderTop: '1px solid #30363d',
+                                            }}
+                                        >
+                                            <ConversationMessages
+                                                messages={conversation.messages || []}
+                                            />
+                                        </div>
+                                    </div>
+                                )}
+                            </div>
+                        ))
+                    )}
+                </div>
+            );
+        }
+
+        function ConversationMessages({ messages }) {
+            if (!messages || messages.length === 0) {
+                return <div className="empty-state">No messages</div>;
+            }
+
+            return (
+                <div className="chat-container">
+                    {messages.map((message, idx) => {
+                        const isUser = message.role === 'user';
+                        return (
+                            <div key={idx} className={`chat-message ${isUser ? 'user' : ''}`}>
+                                <div>
+                                    <div className={`chat-bubble ${isUser ? 'user' : 'agent'}`}>
+                                        {message.content}
+                                    </div>
+                                    <div className="chat-time">
+                                        {message.timestamp ? new Date(message.timestamp).toLocaleTimeString() : ''}
+                                    </div>
+                                </div>
+                            </div>
+                        );
+                    })}
+                </div>
+            );
+        }
+
+        // ============ KNOWLEDGE GRAPH PAGE ============
+        function KnowledgeGraphPage() {
+            const [entities, setEntities] = useState([]);
+            const [loading, setLoading] = useState(true);
+            const [searchQuery, setSearchQuery] = useState('');
+
+            useEffect(() => {
+                async function loadEntities() {
+                    try {
+                        const data = await API.get('/knowledge-graph/entities');
+                        setEntities(data);
+                    } catch (err) {
+                        console.error('Failed to load entities:', err);
+                        setEntities([]);
+                    } finally {
+                        setLoading(false);
+                    }
+                }
+                loadEntities();
+            }, []);
+
+            const filtered = entities.filter((e) =>
+                e.name.toLowerCase().includes(searchQuery.toLowerCase())
+            );
+
+            if (loading) return <div className="loading">Loading knowledge graph...</div>;
+
+            return (
+                <div>
+                    <input
+                        type="text"
+                        className="form-input"
+                        placeholder="Search entities..."
+                        value={searchQuery}
+                        onChange={(e) => setSearchQuery(e.target.value)}
+                        style={{ marginBottom: '16px' }}
+                    />
+
+                    {filtered.length === 0 ? (
+                        <div className="empty-state">
+                            <div className="empty-state-icon">◯</div>
+                            <div>No entities found</div>
+                        </div>
+                    ) : (
+                        filtered.map((entity) => (
+                            <div key={entity.id} className="card">
+                                <div className="card-title">{entity.name}</div>
+                                <div style={{ fontSize: '12px', color: '#8b949e', margin: '8px 0' }}>
+                                    Type: {entity.type}
+                                </div>
+                                {entity.facts && entity.facts.length > 0 && (
+                                    <div style={{ marginTop: '12px' }}>
+                                        <div style={{ fontSize: '11px', color: '#8b949e', marginBottom: '8px' }}>
+                                            FACTS
+                                        </div>
+                                        {entity.facts.map((fact, idx) => (
+                                            <div
+                                                key={idx}
+                                                style={{
+                                                    fontSize: '12px',
+                                                    color: '#c9d1d9',
+                                                    marginBottom: '4px',
+                                                    padding: '4px 8px',
+                                                    background: '#0d1117',
+                                                    borderRadius: '4px',
+                                                }}
+                                            >
+                                                <strong>{fact.key}:</strong> {fact.value}
+                                            </div>
+                                        ))}
+                                    </div>
+                                )}
+                            </div>
+                        ))
+                    )}
+                </div>
+            );
+        }
+
+        // ============ SKILLS PAGE ============
+        function SkillsPage() {
+            const [skills, setSkills] = useState([]);
+            const [loading, setLoading] = useState(true);
+
+            useEffect(() => {
+                async function loadSkills() {
+                    try {
+                        const data = await API.get('/skills');
+                        setSkills(data);
+                    } catch (err) {
+                        console.error('Failed to load skills:', err);
+                        setSkills([]);
+                    } finally {
+                        setLoading(false);
+                    }
+                }
+                loadSkills();
+            }, []);
+
+            if (loading) return <div className="loading">Loading skills...</div>;
+
+            return (
+                <div className="grid-2">
+                    {skills.length === 0 ? (
+                        <div className="empty-state">
+                            <div className="empty-state-icon">⊘</div>
+                            <div>No skills available</div>
+                        </div>
+                    ) : (
+                        skills.map((skill) => (
+                            <div key={skill.id} className="card">
+                                <div className="card-title">{skill.name}</div>
+                                {skill.description && (
+                                    <div style={{ fontSize: '13px', color: '#c9d1d9', margin: '8px 0' }}>
+                                        {skill.description}
+                                    </div>
+                                )}
+                                {skill.trigger_conditions && (
+                                    <div style={{ fontSize: '12px', color: '#8b949e', marginTop: '12px' }}>
+                                        <strong>Triggers:</strong> {skill.trigger_conditions}
+                                    </div>
+                                )}
+                            </div>
+                        ))
+                    )}
+                </div>
+            );
+        }
+
+        // ============ RENDER ============
+        ReactDOM.createRoot(document.getElementById('root')).render(<Dashboard />);
+    </script>
 </body>
 </html>
