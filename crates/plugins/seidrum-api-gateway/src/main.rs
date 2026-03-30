@@ -25,7 +25,7 @@ use seidrum_common::events::PluginRegister;
 use seidrum_common::nats_utils::NatsClient;
 use tower_http::cors::CorsLayer;
 use tower_http::trace::TraceLayer;
-use tracing::info;
+use tracing::{info, warn};
 
 use auth::AuthHandler;
 use audit::AuditLog;
@@ -270,7 +270,7 @@ async fn auth_rate_limit_middleware(
         .unwrap_or("")
         .to_string();
 
-    // Extract API key from query parameters if present
+    // Extract API key from query parameters if present (deprecated — prefer Authorization header)
     let api_key_param = req
         .uri()
         .query()
@@ -280,6 +280,13 @@ async fn auth_rate_limit_middleware(
                 .and_then(|p| p.strip_prefix("api_key="))
                 .map(|k| k.to_string())
         });
+
+    if api_key_param.is_some() {
+        warn!(
+            path = %path,
+            "API key passed via query parameter — this is deprecated and will be removed. Use the Authorization header instead."
+        );
+    }
 
     // Authenticate
     let auth_result = state.auth_handler.authenticate(&auth_header, api_key_param);
@@ -345,15 +352,26 @@ async fn auth_rate_limit_middleware(
 }
 
 /// WebSocket handler for real-time event streaming with optional filtering.
+/// Requires authentication via api_key query parameter.
 async fn ws_events_handler(
     State(state): State<AppState>,
     Query(query): Query<event_stream::EventStreamQuery>,
     ws: WebSocketUpgrade,
 ) -> impl IntoResponse {
+    // Authenticate the request via api_key query parameter or Authorization header
+    let api_key = query.api_key.clone();
+    let auth_header = format!("ApiKey {}", api_key.unwrap_or_default());
+    let auth_result = state.auth_handler.authenticate(&auth_header, None);
+
+    if auth_result.is_none() {
+        return StatusCode::UNAUTHORIZED.into_response();
+    }
+
     let nats = state.nats.clone();
     ws.on_upgrade(move |socket| {
         event_stream::handle_event_stream(socket, nats, query.filter, query.correlation_id)
     })
+    .into_response()
 }
 
 /// Handle JWT token generation from API key.
@@ -398,29 +416,29 @@ async fn auth_token_handler(
                     .await;
 
                 let ttl = state.auth_handler.jwt_service.as_ref().unwrap().token_ttl_secs;
-                return (
+                (
                     StatusCode::OK,
                     axum::Json(auth::TokenResponse {
                         token,
                         expires_in: ttl,
                     }),
                 )
-                    .into_response();
+                    .into_response()
             }
             Err(e) => {
-                return (
+                (
                     StatusCode::INTERNAL_SERVER_ERROR,
                     axum::Json(serde_json::json!({"error": format!("token generation failed: {}", e)})),
                 )
-                    .into_response();
+                    .into_response()
             }
         }
     } else {
-        return (
+        (
             StatusCode::BAD_REQUEST,
             axum::Json(serde_json::json!({"error": "JWT service not configured"})),
         )
-            .into_response();
+            .into_response()
     }
 }
 

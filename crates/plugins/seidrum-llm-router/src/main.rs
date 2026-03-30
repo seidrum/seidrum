@@ -355,8 +355,9 @@ async fn handle_message(
     let mut tool_schemas = tools::meta_tools();
     let registry_tools =
         tools::query_tool_registry(nats, &user_text_for_tools, max_dynamic_tools).await;
-    // Deduplicate: only add registry tools whose names don't collide with meta tools
-    let meta_names: Vec<String> = tool_schemas.iter().map(|t| t.name.clone()).collect();
+    // Deduplicate: only add registry tools whose names don't collide with meta tools (O(n))
+    let meta_names: std::collections::HashSet<String> =
+        tool_schemas.iter().map(|t| t.name.clone()).collect();
     for t in registry_tools {
         if !meta_names.contains(&t.name) {
             tool_schemas.push(t);

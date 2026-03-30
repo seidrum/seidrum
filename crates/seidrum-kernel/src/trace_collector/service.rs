@@ -69,14 +69,17 @@ pub struct TraceCollectorService {
     /// correlation_id -> Trace
     traces: Arc<RwLock<HashMap<String, Trace>>>,
     max_traces: usize,
+    /// Maximum number of spans per trace to prevent unbounded growth
+    max_spans_per_trace: usize,
 }
 
 impl TraceCollectorService {
     pub fn new(nats: async_nats::Client, max_traces: usize) -> Self {
         Self {
             nats,
-            traces: Arc::new(RwLock::new(HashMap::new())),
+            traces: Arc::new(RwLock::new(HashMap::with_capacity(max_traces))),
             max_traces,
+            max_spans_per_trace: 500,
         }
     }
 
@@ -103,6 +106,24 @@ impl TraceCollectorService {
         let traces = self.traces.clone();
         let nats = self.nats.clone();
         let max_traces = self.max_traces;
+        let max_spans_per_trace = self.max_spans_per_trace;
+
+        // Spawn periodic compaction task to evict stale traces
+        let compaction_traces = self.traces.clone();
+        tokio::spawn(async move {
+            let mut interval = tokio::time::interval(std::time::Duration::from_secs(60));
+            loop {
+                interval.tick().await;
+                let mut store = compaction_traces.write().await;
+                let cutoff = Utc::now() - chrono::Duration::minutes(30);
+                let before = store.len();
+                store.retain(|_, t| t.last_event_at > cutoff);
+                let evicted = before - store.len();
+                if evicted > 0 {
+                    info!(evicted, remaining = store.len(), "Trace compaction: evicted stale traces");
+                }
+            }
+        });
 
         let handle = tokio::spawn(async move {
             info!(max_traces, "Trace collector service started");
@@ -148,6 +169,15 @@ impl TraceCollectorService {
                                 });
 
                                 let offset_ms = (timestamp - trace.started_at).num_milliseconds();
+
+                                // Cap spans per trace to prevent unbounded memory growth
+                                if trace.spans.len() >= max_spans_per_trace {
+                                    // Update timing but don't add more spans
+                                    trace.last_event_at = timestamp;
+                                    trace.duration_ms = (timestamp - trace.started_at).num_milliseconds();
+                                    trace.span_count += 1; // Track real count even if spans are dropped
+                                    continue;
+                                }
 
                                 trace.spans.push(TraceSpan {
                                     event_id,

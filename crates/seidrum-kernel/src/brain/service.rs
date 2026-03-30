@@ -14,9 +14,10 @@ use seidrum_common::events::{
     ConversationAppendRequest, ConversationAppendResponse, ConversationCreateRequest,
     ConversationCreateResponse, ConversationFindRequest, ConversationGetRequest,
     ConversationListRequest, ConversationListResponse, ConversationSummary, EntityUpsertRequest,
-    EntityUpserted, EventEnvelope, FactUpsertRequest, FactUpserted, ScopeAssignRequest,
-    ScopeAssigned, SkillGetRequest, SkillListRequest, SkillListResponse, SkillSaveRequest,
-    SkillSaveResponse, SkillSearchRequest, SkillSearchResponse, SkillSearchResult,
+    EntityUpserted, EventEnvelope, FactUpsertRequest, FactUpserted, PreferencesQueryRequest,
+    PreferencesQueryResponse, ScopeAssignRequest, ScopeAssigned, SkillGetRequest,
+    SkillListRequest, SkillListResponse, SkillSaveRequest, SkillSaveResponse, SkillSearchRequest,
+    SkillSearchResponse, SkillSearchResult, UserPreference,
 };
 use serde_json::Value;
 use tracing::{debug, error, info, warn};
@@ -132,8 +133,13 @@ impl BrainService {
             .subscribe("brain.skill.delete")
             .await
             .context("subscribe brain.skill.delete")?;
+        let mut preferences_query = self
+            .nats
+            .subscribe("agent.preferences.query")
+            .await
+            .context("subscribe agent.preferences.query")?;
 
-        info!("Brain service started — listening on brain.* subjects");
+        info!("Brain service started — listening on brain.* and agent.preferences.query subjects");
 
         loop {
             tokio::select! {
@@ -282,6 +288,15 @@ impl BrainService {
                     tokio::spawn(async move {
                         if let Err(e) = handle_skill_delete(&arango, &nats, msg).await {
                             error!(error = %e, "brain.skill.delete handler failed");
+                        }
+                    });
+                }
+                Some(msg) = preferences_query.next() => {
+                    let arango = self.arango.clone();
+                    let nats = self.nats.clone();
+                    tokio::spawn(async move {
+                        if let Err(e) = handle_preferences_query(&arango, &nats, msg).await {
+                            error!(error = %e, "agent.preferences.query handler failed");
                         }
                     });
                 }
@@ -998,8 +1013,8 @@ async fn handle_query_request(
 
     let result = match req.query_type.as_str() {
         "aql" => handle_aql_query(arango, &req, &envelope, resolved_scopes.as_ref()).await,
-        "vector_search" => handle_vector_search(arango, embedding, &req).await,
-        "hybrid_search" => handle_hybrid_search(arango, embedding, &req).await,
+        "vector_search" => handle_vector_search(arango, embedding, &req, scope_svc, &envelope).await,
+        "hybrid_search" => handle_hybrid_search(arango, embedding, &req, scope_svc, &envelope).await,
         "graph_traverse" => handle_graph_traverse(arango, &req, &envelope).await,
         "get_facts" => handle_get_facts(arango, &req, &envelope).await,
         "get_context" => handle_get_context(arango, &req, &envelope).await,
@@ -1105,23 +1120,23 @@ async fn handle_aql_query(
     Ok(resp.get("result").cloned().unwrap_or(serde_json::json!([])))
 }
 
-/// Perform vector similarity search in ArangoDB.
+/// Perform vector similarity search in ArangoDB with scope enforcement.
 async fn handle_vector_search(
     arango: &ArangoClient,
     embedding: &EmbeddingService,
     req: &BrainQueryRequest,
+    scope_svc: &ScopeService,
+    envelope: &EventEnvelope,
 ) -> Result<Value> {
     let collection = req.collection.as_deref().unwrap_or("content");
-    let limit = req.limit.unwrap_or(10) as u32;
+    let limit = req.limit.unwrap_or(10);
 
     debug!(collection = %collection, limit = limit, "handling vector_search");
 
     // Get or generate the query embedding
     let query_embedding = if let Some(vec) = &req.embedding {
-        // Use provided embedding directly
         vec.clone()
     } else if let Some(query_text) = &req.query_text {
-        // Generate embedding from query text
         match embedding.embed(query_text).await {
             Ok(vec) => vec,
             Err(e) => {
@@ -1134,21 +1149,66 @@ async fn handle_vector_search(
         return Ok(serde_json::json!([]));
     };
 
-    // Execute AQL vector search with cosine similarity
-    let aql = format!(
-        r#"FOR doc IN {collection}
-            LET distance = COSINE_SIMILARITY(doc.embedding, @query_embedding)
-            FILTER distance != null
-            SORT distance DESC
-            LIMIT @limit
-            RETURN MERGE(doc, {{ _similarity: distance }})"#,
-        collection = collection
-    );
+    // Resolve scope for filtering
+    let scope_filter = if let Some(scope) = envelope.scope.as_deref() {
+        match scope_svc.resolve_scopes(scope, &[]).await {
+            Ok(resolved) => {
+                debug!(
+                    primary = scope,
+                    count = resolved.allowed.len(),
+                    "vector_search scope enforcement: resolved scopes"
+                );
+                Some(resolved.allowed)
+            }
+            Err(e) => {
+                warn!(error = %e, "failed to resolve scopes for vector_search");
+                None
+            }
+        }
+    } else {
+        None
+    };
 
-    let bind_vars = serde_json::json!({
-        "query_embedding": query_embedding,
-        "limit": limit,
-    });
+    // Build AQL with optional scope filtering via scoped_to edges
+    let aql = if scope_filter.is_some() {
+        format!(
+            r#"FOR doc IN {collection}
+                LET distance = COSINE_SIMILARITY(doc.embedding, @query_embedding)
+                FILTER distance != null
+                LET doc_scopes = (
+                    FOR s IN 1..1 OUTBOUND doc._id scoped_to
+                        RETURN s._key
+                )
+                FILTER LENGTH(doc_scopes) == 0 OR LENGTH(INTERSECTION(doc_scopes, @allowed_scopes)) > 0
+                SORT distance DESC
+                LIMIT @limit
+                RETURN MERGE(doc, {{ _similarity: distance }})"#,
+            collection = collection
+        )
+    } else {
+        format!(
+            r#"FOR doc IN {collection}
+                LET distance = COSINE_SIMILARITY(doc.embedding, @query_embedding)
+                FILTER distance != null
+                SORT distance DESC
+                LIMIT @limit
+                RETURN MERGE(doc, {{ _similarity: distance }})"#,
+            collection = collection
+        )
+    };
+
+    let bind_vars = if let Some(ref scopes) = scope_filter {
+        serde_json::json!({
+            "query_embedding": query_embedding,
+            "limit": limit,
+            "allowed_scopes": scopes,
+        })
+    } else {
+        serde_json::json!({
+            "query_embedding": query_embedding,
+            "limit": limit,
+        })
+    };
 
     match arango.execute_aql(&aql, &bind_vars).await {
         Ok(resp) => {
@@ -1173,13 +1233,15 @@ async fn handle_vector_search(
 /// Hybrid search: combines vector similarity search with graph traversal.
 ///
 /// This performs:
-/// 1. Vector search to find semantically similar content/entities
+/// 1. Vector search to find semantically similar content/entities (scope-filtered)
 /// 2. For top results, traverse the graph to find connected entities and facts
 /// 3. Merge and deduplicate results, returning both direct matches and graph neighbors
 async fn handle_hybrid_search(
     arango: &ArangoClient,
     embedding: &EmbeddingService,
     req: &BrainQueryRequest,
+    scope_svc: &ScopeService,
+    envelope: &EventEnvelope,
 ) -> Result<Value> {
     let collection = req.collection.as_deref().unwrap_or("content");
     let vector_limit = req.limit.unwrap_or(5);
@@ -1205,21 +1267,75 @@ async fn handle_hybrid_search(
         return Ok(serde_json::json!([]));
     };
 
-    // Step 1: Vector search
-    let vector_aql = format!(
-        r#"FOR doc IN {collection}
-            LET distance = COSINE_SIMILARITY(doc.embedding, @query_embedding)
-            FILTER distance != null
-            SORT distance DESC
-            LIMIT @limit
-            RETURN {{ doc, distance, source: "vector_match" }}"#,
-        collection = collection
-    );
+    // Resolve scope for filtering
+    let scope_filter = if let Some(scope) = envelope.scope.as_deref() {
+        match scope_svc.resolve_scopes(scope, &[]).await {
+            Ok(resolved) => {
+                debug!(
+                    primary = scope,
+                    count = resolved.allowed.len(),
+                    "hybrid_search scope enforcement: resolved scopes"
+                );
+                Some(resolved.allowed)
+            }
+            Err(e) => {
+                warn!(error = %e, "failed to resolve scopes for hybrid_search");
+                None
+            }
+        }
+    } else {
+        None
+    };
 
-    let vector_vars = serde_json::json!({
-        "query_embedding": query_embedding,
-        "limit": vector_limit,
-    });
+    // Step 1: Vector search with scope enforcement
+    // Collection name is validated against an allowlist to prevent injection
+    let valid_collections = ["content", "entities", "facts", "tasks", "skills"];
+    let safe_collection = if valid_collections.contains(&collection) {
+        collection
+    } else {
+        warn!(collection = %collection, "invalid collection for hybrid_search, defaulting to 'content'");
+        "content"
+    };
+
+    let vector_aql = if scope_filter.is_some() {
+        format!(
+            r#"FOR doc IN {safe_collection}
+                LET distance = COSINE_SIMILARITY(doc.embedding, @query_embedding)
+                FILTER distance != null
+                LET doc_scopes = (
+                    FOR s IN 1..1 OUTBOUND doc._id scoped_to
+                        RETURN s._key
+                )
+                FILTER LENGTH(doc_scopes) == 0 OR LENGTH(INTERSECTION(doc_scopes, @allowed_scopes)) > 0
+                SORT distance DESC
+                LIMIT @limit
+                RETURN {{ doc, distance, source: "vector_match" }}"#,
+            safe_collection = safe_collection
+        )
+    } else {
+        format!(
+            r#"FOR doc IN {safe_collection}
+                LET distance = COSINE_SIMILARITY(doc.embedding, @query_embedding)
+                FILTER distance != null
+                SORT distance DESC
+                LIMIT @limit
+                RETURN {{ doc, distance, source: "vector_match" }}"#,
+            safe_collection = safe_collection
+        )
+    };
+
+    let vector_vars = if let Some(ref scopes) = scope_filter {
+        serde_json::json!({
+            "query_embedding": query_embedding,
+            "limit": vector_limit,
+            "allowed_scopes": scopes,
+        })
+    } else {
+        serde_json::json!({
+            "query_embedding": query_embedding,
+            "limit": vector_limit,
+        })
+    };
 
     let mut all_results: Vec<Value> = Vec::new();
     let mut seen_keys: std::collections::HashSet<String> = std::collections::HashSet::new();
@@ -1233,19 +1349,17 @@ async fn handle_hybrid_search(
                         seen_keys.insert(key.to_string());
                         all_results.push(item.clone());
 
-                        // Step 2: Graph traversal from this document
-                        let traverse_aql = format!(
-                            r#"FOR v, e, p IN 1..@depth ANY @start_vertex
+                        // Step 2: Graph traversal from this document (parameterized)
+                        let traverse_aql = r#"FOR v, e, p IN 1..@depth ANY @start_vertex
                                 GRAPH "brain"
-                                RETURN {{ vertex: v, edge: e, depth: LENGTH(p.vertices) - 1, source: "graph_neighbor" }}"#
-                        );
+                                RETURN { vertex: v, edge: e, depth: LENGTH(p.vertices) - 1, source: "graph_neighbor" }"#;
 
                         let traverse_vars = serde_json::json!({
-                            "start_vertex": format!("{}/{}", collection, key),
+                            "start_vertex": format!("{}/{}", safe_collection, key),
                             "depth": graph_depth,
                         });
 
-                        if let Ok(traverse_resp) = arango.execute_aql(&traverse_aql, &traverse_vars).await {
+                        if let Ok(traverse_resp) = arango.execute_aql(traverse_aql, &traverse_vars).await {
                             if let Some(neighbors) = traverse_resp.get("result").and_then(|v| v.as_array()) {
                                 for neighbor in neighbors {
                                     if let Some(vertex) = neighbor.get("vertex") {
@@ -1992,6 +2106,122 @@ async fn handle_skill_delete(
             }
         };
         let _ = nats.publish(reply, serde_json::to_vec(&resp)?.into()).await;
+    }
+
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// Preferences query handler
+// ---------------------------------------------------------------------------
+
+/// Handle `agent.preferences.query` — query preference facts for an agent.
+///
+/// Preferences are stored as facts with predicates prefixed by `user_prefers_`.
+/// This handler queries the facts collection and returns matching preferences
+/// as `PreferencesQueryResponse` via NATS request/reply.
+async fn handle_preferences_query(
+    arango: &ArangoClient,
+    nats: &async_nats::Client,
+    msg: async_nats::Message,
+) -> Result<()> {
+    // Parse the inner payload from the EventEnvelope
+    let envelope: serde_json::Value =
+        serde_json::from_slice(&msg.payload).context("parse preferences query envelope")?;
+    let payload = envelope
+        .get("payload")
+        .cloned()
+        .unwrap_or(serde_json::json!({}));
+    let req: PreferencesQueryRequest =
+        serde_json::from_value(payload).context("parse PreferencesQueryRequest")?;
+
+    debug!(agent_id = %req.agent_id, "handling agent.preferences.query");
+
+    // Query facts where subject matches the agent_id and predicate starts with "user_prefers_"
+    let aql = r#"
+        FOR fact IN facts
+            FILTER fact.subject == @agent_id
+               AND STARTS_WITH(fact.predicate, "user_prefers_")
+               AND fact.valid_to == null
+               AND fact.superseded_by == null
+               AND fact.confidence >= @min_confidence
+            SORT fact.confidence DESC
+            LIMIT 50
+            RETURN fact
+    "#;
+
+    let min_confidence = 0.3; // Low threshold to include weak preferences
+    let bind_vars = serde_json::json!({
+        "agent_id": req.agent_id,
+        "min_confidence": min_confidence,
+    });
+
+    let preferences = match arango.execute_aql(aql, &bind_vars).await {
+        Ok(resp) => {
+            let facts = resp
+                .get("result")
+                .and_then(|v| v.as_array())
+                .cloned()
+                .unwrap_or_default();
+
+            facts
+                .iter()
+                .filter_map(|fact| {
+                    let predicate = fact.get("predicate")?.as_str()?;
+                    let key = predicate.strip_prefix("user_prefers_")?.to_string();
+                    let value = fact
+                        .get("value")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("")
+                        .to_string();
+                    let confidence = fact
+                        .get("confidence")
+                        .and_then(|v| v.as_f64())
+                        .unwrap_or(0.5);
+                    let reinforcement_count = fact
+                        .get("reinforcement_count")
+                        .and_then(|v| v.as_u64())
+                        .unwrap_or(0) as u32;
+                    let last_updated = fact
+                        .get("last_reinforced")
+                        .and_then(|v| v.as_str())
+                        .and_then(|s| s.parse::<chrono::DateTime<Utc>>().ok())
+                        .unwrap_or_else(Utc::now);
+
+                    // Apply category filter if provided
+                    if let Some(ref category) = req.category {
+                        if !key.starts_with(category.as_str()) {
+                            return None;
+                        }
+                    }
+
+                    Some(UserPreference {
+                        key,
+                        value,
+                        confidence,
+                        source_feedback_count: reinforcement_count,
+                        last_updated,
+                    })
+                })
+                .collect::<Vec<_>>()
+        }
+        Err(e) => {
+            warn!(error = %e, agent_id = %req.agent_id, "failed to query preferences");
+            Vec::new()
+        }
+    };
+
+    debug!(
+        agent_id = %req.agent_id,
+        count = preferences.len(),
+        "preferences query completed"
+    );
+
+    let response = PreferencesQueryResponse { preferences };
+
+    if let Some(reply) = msg.reply {
+        let resp_bytes = serde_json::to_vec(&response)?;
+        let _ = nats.publish(reply, resp_bytes.into()).await;
     }
 
     Ok(())

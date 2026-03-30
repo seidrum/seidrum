@@ -93,8 +93,11 @@ async fn main() -> Result<()> {
     let mut sub = nats.subscribe("llm.provider.openai").await?;
     info!("Subscribed to llm.provider.openai (request/reply)");
 
-    // Build HTTP client
-    let http = reqwest::Client::new();
+    // Build HTTP client with timeouts
+    let http = reqwest::Client::builder()
+        .connect_timeout(std::time::Duration::from_secs(10))
+        .timeout(std::time::Duration::from_secs(120))
+        .build()?;
 
     while let Some(msg) = sub.next().await {
         let reply = match &msg.reply {
@@ -251,7 +254,8 @@ async fn handle_provider_request(
                     .and_then(|m| m.as_str())
                     .unwrap_or("Unknown error")
                     .to_string(),
-                Err(_) => String::from_utf8_lossy(&body_bytes).to_string(),
+                // Don't log raw body — it may contain sensitive headers or tokens
+                Err(_) => format!("Non-JSON error response (status {})", status),
             };
             anyhow::bail!("OpenAI API error ({}): {}", status, err_msg);
         }

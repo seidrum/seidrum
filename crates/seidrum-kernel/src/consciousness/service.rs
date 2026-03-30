@@ -1173,6 +1173,7 @@ async fn query_user_preferences(
 }
 
 /// Store a user preference as a fact in the knowledge graph (Phase 2.3).
+/// Retries up to 2 times on transient failures.
 async fn store_preference_fact(
     nats: &async_nats::Client,
     agent_id: &str,
@@ -1180,10 +1181,6 @@ async fn store_preference_fact(
     preference_value: &str,
     confidence: f64,
 ) -> Result<()> {
-    // Store as a fact: agent entity has a preference
-    // subject = agent_id
-    // predicate = user_prefers_{key}
-    // value = preference_value
     let predicate = format!("user_prefers_{}", preference_key);
 
     let fact_request = FactUpsertRequest {
@@ -1206,39 +1203,71 @@ async fn store_preference_fact(
 
     let fact_bytes = serde_json::to_vec(&fact_envelope)?;
 
-    match tokio::time::timeout(
-        Duration::from_secs(5),
-        nats.request("brain.fact.upsert", fact_bytes.into()),
-    )
-    .await
-    {
-        Ok(Ok(_resp)) => {
+    // Retry up to 2 times on failure
+    let max_retries = 2u32;
+    let mut last_error = String::new();
+
+    for attempt in 0..=max_retries {
+        if attempt > 0 {
+            // Exponential backoff: 500ms, 1000ms
+            tokio::time::sleep(Duration::from_millis(500 * u64::from(attempt))).await;
             debug!(
                 agent_id = %agent_id,
                 key = %preference_key,
-                value = %preference_value,
-                "Stored preference fact"
+                attempt,
+                "Retrying preference fact upsert"
             );
-            Ok(())
         }
-        Ok(Err(e)) => {
-            warn!(
-                agent_id = %agent_id,
-                key = %preference_key,
-                error = %e,
-                "Failed to store preference fact"
-            );
-            Err(anyhow::anyhow!("Preference fact upsert failed: {}", e))
-        }
-        Err(_) => {
-            warn!(
-                agent_id = %agent_id,
-                key = %preference_key,
-                "Preference fact upsert timed out (5s)"
-            );
-            Err(anyhow::anyhow!("Preference fact upsert timed out"))
+
+        match tokio::time::timeout(
+            Duration::from_secs(5),
+            nats.request("brain.fact.upsert", fact_bytes.clone().into()),
+        )
+        .await
+        {
+            Ok(Ok(_resp)) => {
+                debug!(
+                    agent_id = %agent_id,
+                    key = %preference_key,
+                    value = %preference_value,
+                    attempt,
+                    "Stored preference fact"
+                );
+                return Ok(());
+            }
+            Ok(Err(e)) => {
+                last_error = format!("NATS request failed: {}", e);
+                warn!(
+                    agent_id = %agent_id,
+                    key = %preference_key,
+                    attempt,
+                    error = %e,
+                    "Failed to store preference fact"
+                );
+            }
+            Err(_) => {
+                last_error = "Timed out (5s)".to_string();
+                warn!(
+                    agent_id = %agent_id,
+                    key = %preference_key,
+                    attempt,
+                    "Preference fact upsert timed out (5s)"
+                );
+            }
         }
     }
+
+    error!(
+        agent_id = %agent_id,
+        key = %preference_key,
+        retries = max_retries,
+        "All preference fact upsert attempts failed"
+    );
+    Err(anyhow::anyhow!(
+        "Preference fact upsert failed after {} retries: {}",
+        max_retries,
+        last_error
+    ))
 }
 
 /// Load an agent's identity prompt from its prompt file path.

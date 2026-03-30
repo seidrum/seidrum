@@ -75,6 +75,8 @@ pub struct EventStreamQuery {
     pub filter: Option<String>,
     /// Optional correlation_id to follow a specific trace
     pub correlation_id: Option<String>,
+    /// API key for authentication (required for WebSocket upgrade)
+    pub api_key: Option<String>,
 }
 
 #[derive(Serialize)]
