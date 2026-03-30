@@ -84,46 +84,34 @@ There is no architectural distinction between a Telegram adapter, an LLM provide
 ### Prerequisites
 
 - [Rust](https://rustup.rs/) (stable)
-- [NATS Server](https://nats.io/) with JetStream enabled
-- [ArangoDB](https://arangodb.com/) 3.12+
-- (Optional) [Docker Compose](https://docs.docker.com/compose/) for infrastructure
+- [Docker](https://docker.com/get-started) (for ArangoDB)
 
 ### Quick start
 
 ```bash
-# Clone
 git clone https://github.com/seidrum/seidrum.git
 cd seidrum
+cargo build --workspace --release
 
-# Start infrastructure
-docker compose up -d nats arangodb
+# Interactive setup — downloads NATS, pulls ArangoDB, configures API keys
+seidrum setup
 
-# Configure
-cp .env.example .env
-# Edit .env with your API keys and tokens
-
-# Build
-cargo build --workspace
-
-# Initialize the brain database
-seidrum init
-
-# Start everything (kernel + all enabled plugins)
-seidrum daemon start
+# Start everything (NATS + ArangoDB + kernel + plugins)
+seidrum start
 ```
+
+Dashboard: http://localhost:8080/dashboard
+
+See [docs/GETTING_STARTED.md](docs/GETTING_STARTED.md) for detailed instructions.
 
 ### Using the `seidrum` CLI
 
 ```bash
-# Daemon management
-seidrum daemon start          # Start kernel + enabled plugins (foreground)
-seidrum daemon stop           # Graceful shutdown
-seidrum daemon restart        # Stop then start
-seidrum daemon status         # Show all processes with PID, uptime, restarts
-
-# Install as system service (systemd on Linux, launchd on macOS)
-seidrum daemon install        # Install, enable, and start the service
-seidrum daemon uninstall      # Stop and remove the service
+# Getting started
+seidrum setup                 # First-run wizard: downloads NATS, configures everything
+seidrum start                 # Start infrastructure + kernel + all enabled plugins
+seidrum stop                  # Stop everything
+seidrum status                # Show infrastructure + process status
 
 # Plugin management
 seidrum plugin list           # Show all plugins with enabled/disabled state
@@ -131,11 +119,10 @@ seidrum plugin enable telegram
 seidrum plugin disable email
 seidrum plugin start claude-code
 seidrum plugin stop claude-code
-seidrum plugin restart telegram
 
-# Database and config
-seidrum init                  # Initialize ArangoDB collections
-seidrum validate              # Validate platform and agent configuration
+# Install as system service (systemd on Linux, launchd on macOS)
+seidrum service install       # Install, enable, and start the service
+seidrum service uninstall     # Stop and remove the service
 ```
 
 ### Docker Compose (full stack)
@@ -236,7 +223,7 @@ Agents in Seidrum are not request-response handlers -- they are persistent, auto
 
 **Conversations** are first-class objects stored in the brain. Agents maintain structured conversation threads across platforms, preserving tool calls, media attachments, and inner monologue for continuity across sessions.
 
-**Skills** provide behavioral RAG -- reusable instructions and procedures retrieved by semantic similarity at inference time. Skills come from YAML files (`skills/` directory), user instructions, agent self-learning, or packaged distributions installed via `seidrum skill install`. See [Agent Consciousness](docs/AGENT_CONSCIOUSNESS.md) and [Agent Skills](docs/AGENT_SKILLS.md) for details.
+**Skills** provide behavioral RAG -- reusable instructions and procedures retrieved by semantic similarity at inference time. Skills come from YAML files (`skills/` directory), user instructions, or agent self-learning. See [Agent Consciousness](docs/AGENT_CONSCIOUSNESS.md) and [Agent Skills](docs/AGENT_SKILLS.md) for details.
 
 Plugins can also be written in **any language** using the API gateway. The gateway exposes a WebSocket and REST API that bridges to NATS:
 

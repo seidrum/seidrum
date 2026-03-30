@@ -65,8 +65,8 @@ After=network.target
 
 [Service]
 Type=simple
-ExecStart={bin} daemon start --config-dir {config}
-ExecStop={bin} daemon stop --config-dir {config}
+ExecStart={bin} start --config-dir {config}
+ExecStop={bin} stop --config-dir {config}
 Restart=on-failure
 RestartSec=5
 WorkingDirectory={workdir}
@@ -188,7 +188,6 @@ fn install_launchd(
     <key>ProgramArguments</key>
     <array>
         <string>{bin}</string>
-        <string>daemon</string>
         <string>start</string>
         <string>--config-dir</string>
         <string>{config}</string>

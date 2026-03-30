@@ -127,14 +127,7 @@ This skill is now available to all agents via embedding search.
 
 ## Packaged Skills
 
-Skills can be distributed as installable packages:
-
-```bash
-seidrum skill install code-review
-seidrum skill install seidrum-community/deploy-monitor
-seidrum skill list
-seidrum skill remove deploy-monitor
-```
+Skills can be distributed as installable packages. To install a skill, copy its YAML file to the `skills/` directory and restart the kernel. The kernel loads and embeds all skills on startup.
 
 A package is a directory or archive containing one or more skill YAML files. On install:
 1. Copy YAML files to `skills/` directory

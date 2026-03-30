@@ -19,3 +19,10 @@ anyhow = "1"
 chrono = { version = "0.4", features = ["serde"] }
 tabled = "0.17"
 libc = "0.2"
+reqwest = { version = "0.12", features = ["stream"] }
+dialoguer = "0.11"
+zip = "2"
+rand = "0.8"
+indicatif = "0.17"
+futures-util = "0.3"
+tokio-util = { version = "0.7", features = ["io"] }

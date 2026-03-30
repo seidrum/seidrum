@@ -180,7 +180,7 @@ pub async fn start(paths: &SeidrumPaths) -> Result<()> {
         if let Ok(pid) = pid_str.trim().parse::<i32>() {
             if is_process_alive(pid) {
                 anyhow::bail!(
-                    "Daemon is already running (PID {}). Use 'seidrum daemon stop' first.",
+                    "Daemon is already running (PID {}). Use 'seidrum stop' first.",
                     pid
                 );
             }
