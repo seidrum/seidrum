@@ -643,6 +643,7 @@ async fn handle_content_store(
         channel: req.channel,
         embedding_generated,
         timestamp: req.timestamp,
+        user_id: req.user_id.clone(),
     };
 
     publish_response(
@@ -1352,7 +1353,7 @@ async fn handle_vector_search(
                     FOR s IN 1..1 OUTBOUND doc._id scoped_to
                         RETURN s._key
                 )
-                FILTER LENGTH(doc_scopes) == 0 OR LENGTH(INTERSECTION(doc_scopes, @allowed_scopes)) > 0
+                FILTER LENGTH(INTERSECTION(doc_scopes, @allowed_scopes)) > 0
                 SORT distance DESC
                 LIMIT @limit
                 RETURN MERGE(doc, {{ _similarity: distance }})"#,
@@ -1479,7 +1480,7 @@ async fn handle_hybrid_search(
                     FOR s IN 1..1 OUTBOUND doc._id scoped_to
                         RETURN s._key
                 )
-                FILTER LENGTH(doc_scopes) == 0 OR LENGTH(INTERSECTION(doc_scopes, @allowed_scopes)) > 0
+                FILTER LENGTH(INTERSECTION(doc_scopes, @allowed_scopes)) > 0
                 SORT distance DESC
                 LIMIT @limit
                 RETURN {{ doc, distance, source: "vector_match" }}"#,
@@ -1762,7 +1763,9 @@ async fn handle_conversation_create(
         let resp = ConversationCreateResponse {
             conversation_id: conv_id,
         };
-        let _ = nats.publish(reply, serde_json::to_vec(&resp)?.into()).await;
+        if let Err(e) = nats.publish(reply, serde_json::to_vec(&resp)?.into()).await {
+            warn!(error = %e, "Failed to publish reply");
+        }
     }
 
     Ok(())
@@ -1810,7 +1813,9 @@ async fn handle_conversation_append(
             success: count > 0,
             message_count: count,
         };
-        let _ = nats.publish(reply, serde_json::to_vec(&resp)?.into()).await;
+        if let Err(e) = nats.publish(reply, serde_json::to_vec(&resp)?.into()).await {
+            warn!(error = %e, "Failed to publish reply");
+        }
     }
 
     Ok(())
@@ -1832,24 +1837,57 @@ async fn handle_conversation_get(
     if let Some(reply) = msg.reply {
         let resp = match doc {
             Some(mut d) => {
-                // Trim messages if max_messages is set
-                if req.max_messages > 0 {
-                    if let Some(messages) = d.get("messages").and_then(|v| v.as_array()) {
-                        let len = messages.len();
-                        let skip = len.saturating_sub(req.max_messages as usize);
-                        let trimmed: Vec<_> = messages.iter().skip(skip).cloned().collect();
-                        d["messages"] = serde_json::Value::Array(trimmed);
+                // Enforce user ownership: if user_id is provided, reject cross-user reads
+                if let Some(ref expected_uid) = req.user_id {
+                    let doc_uid = d.get("user_id").and_then(|v| v.as_str()).unwrap_or("");
+                    if doc_uid != expected_uid {
+                        warn!(
+                            conversation_id = %req.conversation_id,
+                            expected_user = %expected_uid,
+                            actual_user = %doc_uid,
+                            "Cross-user conversation access denied"
+                        );
+                        serde_json::json!(null)
+                    } else {
+                        // Trim messages if max_messages is set
+                        if req.max_messages > 0 {
+                            if let Some(messages) = d.get("messages").and_then(|v| v.as_array()) {
+                                let len = messages.len();
+                                let skip = len.saturating_sub(req.max_messages as usize);
+                                let trimmed: Vec<_> = messages.iter().skip(skip).cloned().collect();
+                                d["messages"] = serde_json::Value::Array(trimmed);
+                            }
+                        }
+                        // Map _key to id
+                        if let Some(key) = d.get("_key").and_then(|v| v.as_str()) {
+                            d["id"] = serde_json::Value::String(key.to_string());
+                        }
+                        d
                     }
+                } else {
+                    // No user_id provided — warn and return (internal calls only)
+                    warn!(conversation_id = %req.conversation_id, "ConversationGetRequest missing user_id — cross-user isolation not enforced");
+                    // Trim messages if max_messages is set
+                    if req.max_messages > 0 {
+                        if let Some(messages) = d.get("messages").and_then(|v| v.as_array()) {
+                            let len = messages.len();
+                            let skip = len.saturating_sub(req.max_messages as usize);
+                            let trimmed: Vec<_> = messages.iter().skip(skip).cloned().collect();
+                            d["messages"] = serde_json::Value::Array(trimmed);
+                        }
+                    }
+                    // Map _key to id
+                    if let Some(key) = d.get("_key").and_then(|v| v.as_str()) {
+                        d["id"] = serde_json::Value::String(key.to_string());
+                    }
+                    d
                 }
-                // Map _key to id
-                if let Some(key) = d.get("_key").and_then(|v| v.as_str()) {
-                    d["id"] = serde_json::Value::String(key.to_string());
-                }
-                d
             }
             None => serde_json::json!(null),
         };
-        let _ = nats.publish(reply, serde_json::to_vec(&resp)?.into()).await;
+        if let Err(e) = nats.publish(reply, serde_json::to_vec(&resp)?.into()).await {
+            warn!(error = %e, "Failed to publish reply");
+        }
     }
 
     Ok(())
@@ -1908,10 +1946,19 @@ async fn handle_conversation_find(
         .cloned()
         .unwrap_or(serde_json::json!(null));
 
+    if let Some(user_id) = &req.user_id {
+        debug!(%user_id, "Conversation find scoped to user");
+    } else {
+        warn!(agent_id = %req.agent_id, "ConversationFindRequest missing user_id — cross-user isolation not enforced");
+    }
+
     if let Some(reply) = msg.reply {
-        let _ = nats
+        if let Err(e) = nats
             .publish(reply, serde_json::to_vec(&result)?.into())
-            .await;
+            .await
+        {
+            warn!(error = %e, "Failed to publish reply");
+        }
     }
 
     Ok(())
@@ -2096,7 +2143,9 @@ async fn handle_skill_save(
     if req.description.trim().is_empty() || req.snippet.trim().is_empty() {
         if let Some(reply) = msg.reply {
             let resp = serde_json::json!({"error": "description and snippet are required"});
-            let _ = nats.publish(reply, serde_json::to_vec(&resp)?.into()).await;
+            if let Err(e) = nats.publish(reply, serde_json::to_vec(&resp)?.into()).await {
+                warn!(error = %e, "Failed to publish reply");
+            }
         }
         return Ok(());
     }
@@ -2112,7 +2161,9 @@ async fn handle_skill_save(
     {
         if let Some(reply) = msg.reply {
             let resp = serde_json::json!({"error": "Invalid skill ID: must be 1-254 alphanumeric, dash, or underscore"});
-            let _ = nats.publish(reply, serde_json::to_vec(&resp)?.into()).await;
+            if let Err(e) = nats.publish(reply, serde_json::to_vec(&resp)?.into()).await {
+                warn!(error = %e, "Failed to publish reply");
+            }
         }
         return Ok(());
     }
@@ -2157,7 +2208,9 @@ async fn handle_skill_save(
 
     if let Some(reply) = msg.reply {
         let resp = SkillSaveResponse { skill_id, is_new };
-        let _ = nats.publish(reply, serde_json::to_vec(&resp)?.into()).await;
+        if let Err(e) = nats.publish(reply, serde_json::to_vec(&resp)?.into()).await {
+            warn!(error = %e, "Failed to publish reply");
+        }
     }
 
     Ok(())
@@ -2175,7 +2228,9 @@ async fn handle_skill_get(
 
     if let Some(reply) = msg.reply {
         let resp = doc.unwrap_or(serde_json::json!(null));
-        let _ = nats.publish(reply, serde_json::to_vec(&resp)?.into()).await;
+        if let Err(e) = nats.publish(reply, serde_json::to_vec(&resp)?.into()).await {
+            warn!(error = %e, "Failed to publish reply");
+        }
     }
 
     Ok(())
@@ -2273,7 +2328,9 @@ async fn handle_skill_delete(
                 serde_json::json!({ "success": false, "error": e.to_string() })
             }
         };
-        let _ = nats.publish(reply, serde_json::to_vec(&resp)?.into()).await;
+        if let Err(e) = nats.publish(reply, serde_json::to_vec(&resp)?.into()).await {
+            warn!(error = %e, "Failed to publish reply");
+        }
     }
 
     Ok(())
@@ -2389,7 +2446,9 @@ async fn handle_preferences_query(
 
     if let Some(reply) = msg.reply {
         let resp_bytes = serde_json::to_vec(&response)?;
-        let _ = nats.publish(reply, resp_bytes.into()).await;
+        if let Err(e) = nats.publish(reply, resp_bytes.into()).await {
+            warn!(error = %e, "Failed to publish reply");
+        }
     }
 
     Ok(())
@@ -2446,7 +2505,9 @@ async fn handle_user_create(
         };
         if let Some(reply) = msg.reply {
             let resp_bytes = serde_json::to_vec(&response)?;
-            let _ = nats.publish(reply, resp_bytes.into()).await;
+            if let Err(e) = nats.publish(reply, resp_bytes.into()).await {
+                warn!(error = %e, "Failed to publish reply");
+            }
         }
         return Ok(());
     }
@@ -2481,10 +2542,24 @@ async fn handle_user_create(
         "updated_at": now,
     });
 
-    arango
-        .insert_document("users", &doc)
-        .await
-        .context("failed to insert user")?;
+    if let Err(e) = arango.insert_document("users", &doc).await {
+        // Handle unique constraint violations (duplicate username/email) gracefully
+        warn!(error = %e, username = %req.username, "User insert failed (likely unique constraint)");
+        let response = UserCreateResponse {
+            user_id: String::new(),
+            username: req.username,
+            role: req.role,
+            created: false,
+            error: Some("username or email already exists".to_string()),
+        };
+        if let Some(reply) = msg.reply {
+            let resp_bytes = serde_json::to_vec(&response)?;
+            if let Err(e) = nats.publish(reply, resp_bytes.into()).await {
+                warn!(error = %e, "Failed to publish reply");
+            }
+        }
+        return Ok(());
+    }
 
     let response = UserCreateResponse {
         user_id: user_id.clone(),
@@ -2496,7 +2571,9 @@ async fn handle_user_create(
 
     if let Some(reply) = msg.reply {
         let resp_bytes = serde_json::to_vec(&response)?;
-        let _ = nats.publish(reply, resp_bytes.into()).await;
+        if let Err(e) = nats.publish(reply, resp_bytes.into()).await {
+            warn!(error = %e, "Failed to publish reply");
+        }
     }
 
     info!(user_id, "user created");
@@ -2513,11 +2590,14 @@ async fn handle_user_get(
         serde_json::from_slice(&msg.payload).context("failed to parse UserGetRequest")?;
 
     let result = if let Some(user_id) = &req.user_id {
-        arango.get_document("users", user_id).await?
+        // Get by ID and verify not deleted
+        let doc = arango.get_document("users", user_id).await?;
+        doc.filter(|d| d.get("status").and_then(|v| v.as_str()) != Some("deleted"))
     } else if let Some(username) = &req.username {
         let query = r#"
             FOR u IN users
                 FILTER u.username == @username
+                FILTER u.status != "deleted"
                 LIMIT 1
                 RETURN u
         "#;
@@ -2549,7 +2629,9 @@ async fn handle_user_get(
 
     if let Some(reply) = msg.reply {
         let resp_bytes = serde_json::to_vec(&response)?;
-        let _ = nats.publish(reply, resp_bytes.into()).await;
+        if let Err(e) = nats.publish(reply, resp_bytes.into()).await {
+            warn!(error = %e, "Failed to publish reply");
+        }
     }
 
     Ok(())
@@ -2568,17 +2650,16 @@ async fn handle_user_list(
     let offset = req.offset.unwrap_or(0);
 
     let query = if let Some(_role) = &req.role_filter {
-        format!(
-            r#"
-            LET total = LENGTH(FOR u IN users FILTER u.role == @role RETURN 1)
-            LET users = (FOR u IN users FILTER u.role == @role SORT u.created_at DESC LIMIT @offset, @limit RETURN u)
-            RETURN {{ total: total, users: users }}
+        r#"
+            LET total = LENGTH(FOR u IN users FILTER u.role == @role AND u.status != "deleted" RETURN 1)
+            LET users = (FOR u IN users FILTER u.role == @role AND u.status != "deleted" SORT u.created_at DESC LIMIT @offset, @limit RETURN u)
+            RETURN { total: total, users: users }
         "#
-        )
+        .to_string()
     } else {
         r#"
-            LET total = LENGTH(FOR u IN users RETURN 1)
-            LET users = (FOR u IN users SORT u.created_at DESC LIMIT @offset, @limit RETURN u)
+            LET total = LENGTH(FOR u IN users FILTER u.status != "deleted" RETURN 1)
+            LET users = (FOR u IN users FILTER u.status != "deleted" SORT u.created_at DESC LIMIT @offset, @limit RETURN u)
             RETURN { total: total, users: users }
         "#
         .to_string()
@@ -2618,7 +2699,9 @@ async fn handle_user_list(
 
     if let Some(reply) = msg.reply {
         let resp_bytes = serde_json::to_vec(&response)?;
-        let _ = nats.publish(reply, resp_bytes.into()).await;
+        if let Err(e) = nats.publish(reply, resp_bytes.into()).await {
+            warn!(error = %e, "Failed to publish reply");
+        }
     }
 
     Ok(())
@@ -2688,7 +2771,9 @@ async fn handle_user_update(
 
     if let Some(reply) = msg.reply {
         let resp_bytes = serde_json::to_vec(&response)?;
-        let _ = nats.publish(reply, resp_bytes.into()).await;
+        if let Err(e) = nats.publish(reply, resp_bytes.into()).await {
+            warn!(error = %e, "Failed to publish reply");
+        }
     }
 
     Ok(())
@@ -2704,7 +2789,10 @@ async fn handle_user_delete(
         serde_json::from_slice(&msg.payload).context("failed to parse UserDeleteRequest")?;
     debug!(user_id = %req.user_id, "handling brain.user.delete");
 
-    // Soft-delete by setting status to "deleted"
+    // Soft-delete by setting status to "deleted".
+    // Note: this does not cascade — the user's content, entities, conversations, and API keys
+    // remain in the DB and are still readable by admins. Cascade soft-delete (tombstoning all
+    // user-owned data) is a planned improvement tracked in a follow-up issue.
     let query = r#"
         UPDATE { _key: @user_id } WITH { status: "deleted", updated_at: @now } IN users
         RETURN NEW
@@ -2732,7 +2820,9 @@ async fn handle_user_delete(
 
     if let Some(reply) = msg.reply {
         let resp_bytes = serde_json::to_vec(&response)?;
-        let _ = nats.publish(reply, resp_bytes.into()).await;
+        if let Err(e) = nats.publish(reply, resp_bytes.into()).await {
+            warn!(error = %e, "Failed to publish reply");
+        }
     }
 
     info!(user_id = %req.user_id, "user deleted (soft)");
@@ -2900,7 +2990,9 @@ async fn handle_audit_query(
 
     if let Some(reply) = msg.reply {
         let resp_bytes = serde_json::to_vec(&response)?;
-        let _ = nats.publish(reply, resp_bytes.into()).await;
+        if let Err(e) = nats.publish(reply, resp_bytes.into()).await {
+            warn!(error = %e, "Failed to publish reply");
+        }
     }
 
     Ok(())
@@ -2954,7 +3046,9 @@ async fn handle_apikey_create(
 
     if let Some(reply) = msg.reply {
         let resp_bytes = serde_json::to_vec(&response)?;
-        let _ = nats.publish(reply, resp_bytes.into()).await;
+        if let Err(e) = nats.publish(reply, resp_bytes.into()).await {
+            warn!(error = %e, "Failed to publish reply");
+        }
     }
 
     Ok(())
@@ -2989,7 +3083,9 @@ async fn handle_apikey_list(
 
     if let Some(reply) = msg.reply {
         let resp_bytes = serde_json::to_vec(&response)?;
-        let _ = nats.publish(reply, resp_bytes.into()).await;
+        if let Err(e) = nats.publish(reply, resp_bytes.into()).await {
+            warn!(error = %e, "Failed to publish reply");
+        }
     }
 
     Ok(())
@@ -3030,7 +3126,9 @@ async fn handle_apikey_revoke(
 
     if let Some(reply) = msg.reply {
         let resp_bytes = serde_json::to_vec(&response)?;
-        let _ = nats.publish(reply, resp_bytes.into()).await;
+        if let Err(e) = nats.publish(reply, resp_bytes.into()).await {
+            warn!(error = %e, "Failed to publish reply");
+        }
     }
 
     Ok(())
@@ -3060,7 +3158,7 @@ async fn handle_apikey_validate(
         .get("result")
         .and_then(|v| v.as_array())
         .and_then(|a| a.first())
-        .and_then(|v| parse_apikey_record(v));
+        .and_then(parse_apikey_record);
 
     // Check expiration
     let valid = key_record
@@ -3090,7 +3188,9 @@ async fn handle_apikey_validate(
 
     if let Some(reply) = msg.reply {
         let resp_bytes = serde_json::to_vec(&response)?;
-        let _ = nats.publish(reply, resp_bytes.into()).await;
+        if let Err(e) = nats.publish(reply, resp_bytes.into()).await {
+            warn!(error = %e, "Failed to publish reply");
+        }
     }
 
     Ok(())

@@ -443,12 +443,38 @@ async fn handle_subscribe(
     }
 }
 
+/// Subjects that external plugins are allowed to publish to.
+/// Blocks sensitive kernel-internal and user-management subjects.
+fn is_subject_allowed(subject: &str) -> bool {
+    // Block exact sensitive subjects
+    const BLOCKED_PREFIXES: &[&str] = &[
+        "brain.user.",
+        "brain.apikey.",
+        "plugin.register",
+        "plugin.deregister",
+        "storage.",
+        "capability.register",
+        "trace.",
+    ];
+    for prefix in BLOCKED_PREFIXES {
+        if subject.starts_with(prefix) || subject == *prefix {
+            return false;
+        }
+    }
+    true
+}
+
 async fn handle_publish(
     plugin_id: &str,
     subject: &str,
     payload: &serde_json::Value,
     nats: &NatsClient,
 ) {
+    if !is_subject_allowed(subject) {
+        warn!(%plugin_id, %subject, "Plugin attempted to publish to blocked subject — rejected");
+        return;
+    }
+    info!(%plugin_id, %subject, "Plugin published event");
     if let Err(e) = nats.publish_envelope(subject, None, None, payload).await {
         warn!(error = %e, %plugin_id, %subject, "Failed to publish event");
     }

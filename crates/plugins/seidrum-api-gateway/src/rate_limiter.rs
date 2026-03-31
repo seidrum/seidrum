@@ -17,9 +17,6 @@ use tracing::{debug, info, warn};
 struct TokenBucket {
     tokens: f64,
     last_refill: u64,
-    /// Per-user RPM override (None = use default for role)
-    #[allow(dead_code)]
-    custom_rpm: Option<u32>,
 }
 
 /// Rate limiter configuration.
@@ -105,7 +102,6 @@ impl RateLimiter {
             .or_insert_with(|| TokenBucket {
                 tokens: rpm as f64,
                 last_refill: now,
-                custom_rpm: None,
             });
 
         // Refill tokens based on elapsed time
@@ -220,7 +216,6 @@ impl RateLimiter {
                                         TokenBucket {
                                             tokens: bucket.tokens,
                                             last_refill: bucket.last_refill,
-                                            custom_rpm: None,
                                         },
                                     );
                                 }

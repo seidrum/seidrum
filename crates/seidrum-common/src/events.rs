@@ -146,6 +146,9 @@ pub struct ContentStored {
     pub channel: String,
     pub embedding_generated: bool,
     pub timestamp: DateTime<Utc>,
+    /// Owner user ID propagated from the store request for downstream user scoping.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub user_id: Option<String>,
 }
 
 /// Create or update an entity.
@@ -689,6 +692,9 @@ pub struct UnifiedLlmRequest {
     pub model_preferences: Vec<String>,
     pub correlation_id: Option<String>,
     pub scope: Option<String>,
+    /// User ID for multi-tenant context propagation through the LLM pipeline.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub user_id: Option<String>,
 }
 
 /// Configuration for an LLM call.
@@ -846,6 +852,10 @@ pub struct ConversationGetRequest {
     /// Maximum number of recent messages to return (0 = all).
     #[serde(default)]
     pub max_messages: u32,
+    /// User ID for ownership verification — when present, the response is null if
+    /// the conversation's user_id does not match, preventing cross-user reads.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub user_id: Option<String>,
 }
 
 /// Full conversation document.
@@ -1598,6 +1608,7 @@ mod tests {
             model_preferences: vec!["gemini-2.5-pro".to_string()],
             correlation_id: Some("corr-789".to_string()),
             scope: Some("personal".to_string()),
+            user_id: None,
         };
 
         let json = serde_json::to_string(&event).unwrap();

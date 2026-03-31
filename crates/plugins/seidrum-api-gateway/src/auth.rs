@@ -108,14 +108,17 @@ impl AuthHandler {
     }
 }
 
-/// Hash a password using Argon2id.
+/// Hash a password using Argon2id with OWASP-recommended parameters.
+/// m=65536 (64 MiB), t=3 iterations, p=4 parallelism — matches OWASP recommendation #2.
 pub fn hash_password(password: &str) -> Result<String, argon2::password_hash::Error> {
     use argon2::password_hash::rand_core::OsRng;
     use argon2::password_hash::SaltString;
-    use argon2::{Argon2, PasswordHasher};
+    use argon2::{Algorithm, Argon2, Params, PasswordHasher, Version};
 
     let salt = SaltString::generate(&mut OsRng);
-    let argon2 = Argon2::default();
+    let params = Params::new(65536, 3, 4, None)
+        .map_err(|_| argon2::password_hash::Error::ParamNameInvalid)?;
+    let argon2 = Argon2::new(Algorithm::Argon2id, Version::V0x13, params);
     let hash = argon2.hash_password(password.as_bytes(), &salt)?;
     Ok(hash.to_string())
 }

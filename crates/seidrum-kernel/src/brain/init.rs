@@ -265,7 +265,7 @@ async fn create_indexes(client: &ArangoClient) -> Result<()> {
         .await
         .context("users.username index")?;
     client
-        .create_persistent_index("users", &["email"], false, true)
+        .create_persistent_index("users", &["email"], true, true)
         .await
         .context("users.email index")?;
     client

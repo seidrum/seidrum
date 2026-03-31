@@ -70,6 +70,7 @@ async fn test_conversation_lifecycle() {
     let get_req = ConversationGetRequest {
         conversation_id: conv_id.clone(),
         max_messages: 0,
+        user_id: None,
     };
     let get_resp: serde_json::Value =
         common::nats_request(&nats, "brain.conversation.get", &get_req).await;
@@ -147,6 +148,7 @@ async fn test_conversation_get_with_max_messages() {
     let get_req = ConversationGetRequest {
         conversation_id: conv_id.clone(),
         max_messages: 2,
+        user_id: None,
     };
     let get_resp: serde_json::Value =
         common::nats_request(&nats, "brain.conversation.get", &get_req).await;

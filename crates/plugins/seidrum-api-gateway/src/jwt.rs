@@ -1,14 +1,18 @@
 //! JWT token generation and validation using the `jsonwebtoken` crate.
-//! Supports token revocation via an in-memory JTI blacklist.
+//! Supports token revocation via an in-memory JTI blacklist with persistence.
 
 use anyhow::Result;
-use jsonwebtoken::{decode, encode, DecodingKey, EncodingKey, Header, Validation};
+use jsonwebtoken::{decode, encode, Algorithm, DecodingKey, EncodingKey, Header, Validation};
+use seidrum_common::events::{
+    StorageGetRequest, StorageGetResponse, StorageSetRequest, StorageSetResponse,
+};
+use seidrum_common::nats_utils::NatsClient;
 use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
 use std::sync::Arc;
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use tokio::sync::RwLock;
-use tracing::debug;
+use tracing::{debug, info, warn};
 
 /// JWT claims payload.
 #[derive(Serialize, Deserialize, Debug, Clone)]
@@ -82,6 +86,7 @@ impl JwtService {
         validation.validate_exp = true;
         validation.leeway = 0;
         validation.required_spec_claims.clear();
+        validation.algorithms = vec![Algorithm::HS256];
 
         let token_data = decode::<Claims>(token, &self.decoding_key, &validation)
             .map_err(|e| anyhow::anyhow!("JWT validation failed: {}", e))?;
@@ -107,6 +112,70 @@ impl JwtService {
     /// Check if a token (by JTI) has been revoked.
     pub async fn is_revoked(&self, jti: &str) -> bool {
         self.revoked.read().await.contains(jti)
+    }
+
+    /// Save revocation list to plugin storage via NATS for persistence across restarts.
+    pub async fn save_revocations(&self, nats: &NatsClient) {
+        let revoked = self.revoked.read().await;
+        let jti_list: Vec<String> = revoked.iter().cloned().collect();
+        drop(revoked);
+
+        let req = StorageSetRequest {
+            plugin_id: "api-gateway".to_string(),
+            namespace: "jwt_revocations".to_string(),
+            key: "revoked_jtis".to_string(),
+            value: serde_json::to_value(&jti_list).unwrap_or_default(),
+        };
+
+        match tokio::time::timeout(
+            Duration::from_secs(5),
+            nats.request::<_, StorageSetResponse>("storage.set", &req),
+        )
+        .await
+        {
+            Ok(Ok(_)) => debug!(count = jti_list.len(), "JWT revocation list saved"),
+            Ok(Err(e)) => warn!(error = %e, "Failed to save JWT revocation list"),
+            Err(_) => warn!("Timeout saving JWT revocation list"),
+        }
+    }
+
+    /// Restore revocation list from plugin storage via NATS.
+    pub async fn restore_revocations(&self, nats: &NatsClient) {
+        let req = StorageGetRequest {
+            plugin_id: "api-gateway".to_string(),
+            namespace: "jwt_revocations".to_string(),
+            key: "revoked_jtis".to_string(),
+        };
+
+        match tokio::time::timeout(
+            Duration::from_secs(5),
+            nats.request::<_, StorageGetResponse>("storage.get", &req),
+        )
+        .await
+        {
+            Ok(Ok(resp)) => {
+                if let Some(value) = resp.value {
+                    match serde_json::from_value::<Vec<String>>(value) {
+                        Ok(jti_list) => {
+                            let count = jti_list.len();
+                            let mut revoked = self.revoked.write().await;
+                            revoked.extend(jti_list);
+                            info!(
+                                restored = count,
+                                "JWT revocation list restored from storage"
+                            );
+                        }
+                        Err(e) => warn!(error = %e, "Failed to parse JWT revocation list"),
+                    }
+                }
+            }
+            Ok(Err(e)) => {
+                debug!(error = %e, "No JWT revocation list to restore (first run or storage unavailable)");
+            }
+            Err(_) => {
+                debug!("Timeout restoring JWT revocation list (storage may not be ready)");
+            }
+        }
     }
 
     /// Clean up expired revocation entries.

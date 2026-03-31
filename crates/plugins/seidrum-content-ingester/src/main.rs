@@ -219,7 +219,7 @@ async fn main() -> Result<()> {
             metadata.insert(k.clone(), v.clone());
         }
 
-        // Build ContentStoreRequest
+        // Build ContentStoreRequest — propagate user_id for multi-tenant isolation
         let store_req = ContentStoreRequest {
             content_type: "message".to_string(),
             channel: channel.clone(),
@@ -228,7 +228,7 @@ async fn main() -> Result<()> {
             timestamp: envelope.timestamp,
             metadata,
             generate_embedding: true,
-            user_id: None,
+            user_id: Some(inbound.user_id.clone()),
         };
 
         let store_envelope = EventEnvelope::new(

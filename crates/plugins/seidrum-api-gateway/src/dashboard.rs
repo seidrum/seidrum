@@ -450,6 +450,7 @@ pub async fn get_conversation_dashboard(
     let req = ConversationGetRequest {
         conversation_id,
         max_messages: 100,
+        user_id: None,
     };
 
     match tokio::time::timeout(

@@ -14,6 +14,7 @@ use std::time::{Duration, Instant};
 use anyhow::{Context, Result};
 use axum::extract::ws::WebSocketUpgrade;
 use axum::extract::{Path, Query, Request, State};
+use axum::http::HeaderValue;
 use axum::http::{header, StatusCode, Uri};
 use axum::middleware::{self, Next};
 use axum::response::IntoResponse;
@@ -130,6 +131,11 @@ async fn main() -> Result<()> {
     // Restore rate limiter state from plugin storage (persistence across restarts)
     rate_limiter.restore_state(&nats).await;
 
+    // Restore JWT revocation list from plugin storage (persistence across restarts)
+    if let Some(jwt_service) = &auth_handler.jwt_service {
+        jwt_service.restore_revocations(&nats).await;
+    }
+
     let state = AppState {
         nats: nats.clone(),
         connections: ConnectionManager::new(),
@@ -161,6 +167,19 @@ async fn main() -> Result<()> {
             cleanup_limiter.save_state(&cleanup_nats).await;
         }
     });
+
+    // Spawn JWT revocation list cleanup and persistence (every 15 minutes)
+    if let Some(jwt_service) = state.auth_handler.jwt_service.clone() {
+        let jwt_nats = nats.clone();
+        tokio::spawn(async move {
+            let mut interval = tokio::time::interval(std::time::Duration::from_secs(900));
+            loop {
+                interval.tick().await;
+                jwt_service.cleanup_revocations(10_000).await;
+                jwt_service.save_revocations(&jwt_nats).await;
+            }
+        });
+    }
 
     // Build axum router
     // Authenticated REST + dashboard API routes
@@ -239,7 +258,7 @@ async fn main() -> Result<()> {
             "/",
             get(|| async { axum::response::Redirect::temporary("/dashboard/") }),
         )
-        .layer(CorsLayer::permissive())
+        .layer(build_cors_layer())
         .layer(TraceLayer::new_for_http())
         .with_state(state);
 
@@ -252,6 +271,61 @@ async fn main() -> Result<()> {
     axum::serve(listener, app).await?;
 
     Ok(())
+}
+
+/// Build a CORS layer from the `CORS_ALLOWED_ORIGINS` env var (comma-separated).
+/// Defaults to `http://localhost:3000` if not set.
+fn build_cors_layer() -> CorsLayer {
+    let origins_str = std::env::var("CORS_ALLOWED_ORIGINS")
+        .unwrap_or_else(|_| "http://localhost:3000".to_string());
+
+    let parsed: Vec<HeaderValue> = origins_str
+        .split(',')
+        .filter_map(|s| {
+            let s = s.trim();
+            if s.is_empty() {
+                None
+            } else {
+                s.parse::<HeaderValue>().ok()
+            }
+        })
+        .collect();
+
+    if parsed.is_empty() {
+        // Fallback — misconfigured env var
+        warn!("CORS_ALLOWED_ORIGINS produced no valid origins; defaulting to localhost:3000");
+        CorsLayer::new()
+            .allow_origin(
+                "http://localhost:3000"
+                    .parse::<HeaderValue>()
+                    .expect("valid origin"),
+            )
+            .allow_methods([
+                axum::http::Method::GET,
+                axum::http::Method::POST,
+                axum::http::Method::PUT,
+                axum::http::Method::DELETE,
+                axum::http::Method::OPTIONS,
+            ])
+            .allow_headers([
+                axum::http::header::AUTHORIZATION,
+                axum::http::header::CONTENT_TYPE,
+            ])
+    } else {
+        CorsLayer::new()
+            .allow_origin(parsed)
+            .allow_methods([
+                axum::http::Method::GET,
+                axum::http::Method::POST,
+                axum::http::Method::PUT,
+                axum::http::Method::DELETE,
+                axum::http::Method::OPTIONS,
+            ])
+            .allow_headers([
+                axum::http::header::AUTHORIZATION,
+                axum::http::header::CONTENT_TYPE,
+            ])
+    }
 }
 
 /// WebSocket upgrade handler with API key authentication.
@@ -591,10 +665,10 @@ async fn register_handler(
     axum::Json(req): axum::Json<auth::RegisterRequest>,
 ) -> impl IntoResponse {
     // Validate password strength
-    if req.password.len() < 8 {
+    if req.password.len() < 12 {
         return (
             StatusCode::BAD_REQUEST,
-            axum::Json(serde_json::json!({"error": "password must be at least 8 characters"})),
+            axum::Json(serde_json::json!({"error": "password must be at least 12 characters"})),
         )
             .into_response();
     }
@@ -879,10 +953,10 @@ async fn update_my_profile(State(state): State<AppState>, request: Request) -> i
     };
 
     let password_hash = if let Some(password) = &update.password {
-        if password.len() < 8 {
+        if password.len() < 12 {
             return (
                 StatusCode::BAD_REQUEST,
-                axum::Json(serde_json::json!({"error": "password must be at least 8 characters"})),
+                axum::Json(serde_json::json!({"error": "password must be at least 12 characters"})),
             )
                 .into_response();
         }
@@ -1462,12 +1536,26 @@ async fn revoke_apikey_handler(
     }
 }
 
-/// Get recent audit log entries.
+/// Get recent audit log entries (admin only).
 /// GET /api/v1/audit?limit=50&since=<iso8601>
 async fn get_audit_log(
     State(state): State<AppState>,
     Query(params): Query<std::collections::HashMap<String, String>>,
+    request: Request,
 ) -> impl IntoResponse {
+    let auth = match request.extensions().get::<auth::AuthResult>() {
+        Some(a) => a.clone(),
+        None => return StatusCode::UNAUTHORIZED.into_response(),
+    };
+
+    if !auth.is_admin() {
+        return (
+            StatusCode::FORBIDDEN,
+            axum::Json(serde_json::json!({"error": "admin access required"})),
+        )
+            .into_response();
+    }
+
     let limit = params
         .get("limit")
         .and_then(|l| l.parse::<usize>().ok())
