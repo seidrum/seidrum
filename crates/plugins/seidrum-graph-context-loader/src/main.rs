@@ -155,6 +155,7 @@ async fn query_vector_search(
         max_facts: None,
         graph_depth: None,
         min_confidence: None,
+        user_id: None,
     };
     brain_query(nats, &request).await
 }
@@ -181,6 +182,7 @@ async fn query_get_context(
         max_facts: Some(max_facts),
         graph_depth: Some(graph_depth),
         min_confidence: Some(min_confidence),
+        user_id: None,
     };
     brain_query(nats, &request).await
 }
@@ -222,6 +224,7 @@ async fn query_conversation_history(
         max_facts: None,
         graph_depth: None,
         min_confidence: None,
+        user_id: None,
     };
     brain_query(nats, &request).await
 }
@@ -248,6 +251,7 @@ async fn query_active_tasks(nats: &async_nats::Client) -> Result<BrainQueryRespo
         max_facts: None,
         graph_depth: None,
         min_confidence: None,
+        user_id: None,
     };
     brain_query(nats, &request).await
 }

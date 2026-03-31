@@ -551,6 +551,7 @@ async fn handle_builtin_call(
                 agent_id: agent_id.to_string(),
                 platform: args.platform,
                 limit: args.limit.unwrap_or(20),
+                user_id: None,
             };
             builtin_capabilities::handle_list_conversations(nats, agent_id, &req).await
         }
@@ -879,6 +880,7 @@ async fn find_or_create_conversation(
         platform: platform.clone(),
         metadata_key: meta_key.clone(),
         metadata_value: meta_value.clone(),
+        user_id: None,
     };
 
     let found: serde_json::Value = match tokio::time::timeout(
@@ -925,6 +927,7 @@ async fn find_or_create_conversation(
         agent_id: agent_id.to_string(),
         scope: agent_def.scope.clone(),
         metadata,
+        user_id: None,
     };
 
     let create_resp: ConversationCreateResponse = tokio::time::timeout(

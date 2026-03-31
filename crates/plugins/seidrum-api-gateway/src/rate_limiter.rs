@@ -1,15 +1,25 @@
-//! In-memory token bucket rate limiter.
+//! Token bucket rate limiter with per-user limits and state persistence.
 
 use std::collections::HashMap;
 use std::sync::Arc;
+use std::time::Duration;
+
+use seidrum_common::events::{
+    RateLimiterBucket, RateLimiterState, StorageGetRequest, StorageGetResponse, StorageSetRequest,
+    StorageSetResponse,
+};
+use seidrum_common::nats_utils::NatsClient;
 use tokio::sync::RwLock;
-use tracing::{debug, warn};
+use tracing::{debug, info, warn};
 
 /// Token bucket entry tracking available tokens and last refill time.
 #[derive(Debug, Clone)]
 struct TokenBucket {
     tokens: f64,
     last_refill: u64,
+    /// Per-user RPM override (None = use default for role)
+    #[allow(dead_code)]
+    custom_rpm: Option<u32>,
 }
 
 /// Rate limiter configuration.
@@ -33,12 +43,18 @@ impl Default for RateLimitConfig {
     }
 }
 
-/// Simple in-memory token bucket rate limiter.
+const STORAGE_PLUGIN_ID: &str = "api-gateway";
+const STORAGE_NAMESPACE: &str = "rate_limiter";
+const STORAGE_KEY: &str = "state";
+
+/// Token bucket rate limiter with per-user limits and persistence.
 /// Tracks per-client (identified by subject) rate limits.
 #[derive(Clone)]
 pub struct RateLimiter {
     buckets: Arc<RwLock<HashMap<String, TokenBucket>>>,
     config: RateLimitConfig,
+    /// Per-user RPM overrides (user_id -> rpm)
+    user_rpm_overrides: Arc<RwLock<HashMap<String, u32>>>,
 }
 
 impl RateLimiter {
@@ -46,6 +62,28 @@ impl RateLimiter {
         Self {
             buckets: Arc::new(RwLock::new(HashMap::new())),
             config,
+            user_rpm_overrides: Arc::new(RwLock::new(HashMap::new())),
+        }
+    }
+
+    /// Set a per-user RPM override.
+    pub async fn set_user_rpm(&self, user_id: &str, rpm: u32) {
+        self.user_rpm_overrides
+            .write()
+            .await
+            .insert(user_id.to_string(), rpm);
+    }
+
+    /// Get the effective RPM for a subject, considering per-user overrides.
+    async fn effective_rpm(&self, subject: &str, is_admin: bool) -> u32 {
+        // Check per-user override first
+        if let Some(&rpm) = self.user_rpm_overrides.read().await.get(subject) {
+            return rpm;
+        }
+        if is_admin {
+            self.config.admin_rpm
+        } else {
+            self.config.regular_rpm
         }
     }
 
@@ -56,11 +94,7 @@ impl RateLimiter {
         subject: &str,
         is_admin: bool,
     ) -> (bool, u32, Option<u32>) {
-        let rpm = if is_admin {
-            self.config.admin_rpm
-        } else {
-            self.config.regular_rpm
-        };
+        let rpm = self.effective_rpm(subject, is_admin).await;
         let tokens_per_sec = rpm as f64 / 60.0;
 
         let now = unix_timestamp_secs();
@@ -71,6 +105,7 @@ impl RateLimiter {
             .or_insert_with(|| TokenBucket {
                 tokens: rpm as f64,
                 last_refill: now,
+                custom_rpm: None,
             });
 
         // Refill tokens based on elapsed time
@@ -105,6 +140,109 @@ impl RateLimiter {
                 removed = before - after,
                 "Cleaned up stale rate limit entries"
             );
+        }
+    }
+
+    /// Save rate limiter state to plugin storage via NATS for persistence across restarts.
+    pub async fn save_state(&self, nats: &NatsClient) {
+        let buckets = self.buckets.read().await;
+        let state = RateLimiterState {
+            buckets: buckets
+                .iter()
+                .map(|(k, v)| {
+                    (
+                        k.clone(),
+                        RateLimiterBucket {
+                            tokens: v.tokens,
+                            last_refill: v.last_refill,
+                        },
+                    )
+                })
+                .collect(),
+            saved_at: chrono::Utc::now(),
+        };
+        drop(buckets); // Release read lock before NATS call
+
+        let req = StorageSetRequest {
+            plugin_id: STORAGE_PLUGIN_ID.to_string(),
+            namespace: STORAGE_NAMESPACE.to_string(),
+            key: STORAGE_KEY.to_string(),
+            value: serde_json::to_value(&state).unwrap_or_default(),
+        };
+
+        match tokio::time::timeout(
+            Duration::from_secs(5),
+            nats.request::<_, StorageSetResponse>("storage.set", &req),
+        )
+        .await
+        {
+            Ok(Ok(_)) => {
+                debug!(
+                    bucket_count = state.buckets.len(),
+                    "Rate limiter state saved"
+                );
+            }
+            Ok(Err(e)) => {
+                warn!(error = %e, "Failed to save rate limiter state");
+            }
+            Err(_) => {
+                warn!("Timeout saving rate limiter state");
+            }
+        }
+    }
+
+    /// Restore rate limiter state from plugin storage via NATS.
+    pub async fn restore_state(&self, nats: &NatsClient) {
+        let req = StorageGetRequest {
+            plugin_id: STORAGE_PLUGIN_ID.to_string(),
+            namespace: STORAGE_NAMESPACE.to_string(),
+            key: STORAGE_KEY.to_string(),
+        };
+
+        match tokio::time::timeout(
+            Duration::from_secs(5),
+            nats.request::<_, StorageGetResponse>("storage.get", &req),
+        )
+        .await
+        {
+            Ok(Ok(resp)) => {
+                if let Some(value) = resp.value {
+                    match serde_json::from_value::<RateLimiterState>(value) {
+                        Ok(state) => {
+                            let now = unix_timestamp_secs();
+                            let mut buckets = self.buckets.write().await;
+
+                            for (subject, bucket) in state.buckets {
+                                // Only restore entries that are less than 10 minutes old
+                                if now.saturating_sub(bucket.last_refill) < 600 {
+                                    buckets.insert(
+                                        subject,
+                                        TokenBucket {
+                                            tokens: bucket.tokens,
+                                            last_refill: bucket.last_refill,
+                                            custom_rpm: None,
+                                        },
+                                    );
+                                }
+                            }
+
+                            info!(
+                                restored = buckets.len(),
+                                "Rate limiter state restored from storage"
+                            );
+                        }
+                        Err(e) => {
+                            warn!(error = %e, "Failed to parse rate limiter state");
+                        }
+                    }
+                }
+            }
+            Ok(Err(e)) => {
+                debug!(error = %e, "No rate limiter state to restore (first run or storage unavailable)");
+            }
+            Err(_) => {
+                debug!("Timeout restoring rate limiter state (storage may not be ready)");
+            }
         }
     }
 }
@@ -168,5 +306,28 @@ mod tests {
         let (allowed2, _, _) = limiter.check_rate_limit("user", false).await;
         assert!(allowed1);
         assert!(!allowed2);
+    }
+
+    #[tokio::test]
+    async fn test_per_user_rpm_override() {
+        let config = RateLimitConfig {
+            regular_rpm: 1,
+            admin_rpm: 10,
+            cleanup_interval_secs: 300,
+        };
+        let limiter = RateLimiter::new(config);
+
+        // Set user-specific RPM
+        limiter.set_user_rpm("special_user", 3).await;
+
+        // Should get 3 requests (custom RPM) instead of 1 (regular)
+        let (a1, _, _) = limiter.check_rate_limit("special_user", false).await;
+        let (a2, _, _) = limiter.check_rate_limit("special_user", false).await;
+        let (a3, _, _) = limiter.check_rate_limit("special_user", false).await;
+        let (a4, _, _) = limiter.check_rate_limit("special_user", false).await;
+        assert!(a1);
+        assert!(a2);
+        assert!(a3);
+        assert!(!a4);
     }
 }

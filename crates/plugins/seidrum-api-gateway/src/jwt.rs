@@ -80,6 +80,7 @@ impl JwtService {
     pub async fn validate_token(&self, token: &str) -> Result<Claims> {
         let mut validation = Validation::default();
         validation.validate_exp = true;
+        validation.leeway = 0;
         validation.required_spec_claims.clear();
 
         let token_data = decode::<Claims>(token, &self.decoding_key, &validation)

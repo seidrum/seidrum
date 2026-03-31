@@ -1,10 +1,12 @@
 //! Audit logging for API gateway events.
 
 use chrono::{DateTime, Utc};
+use seidrum_common::nats_utils::NatsClient;
 use serde::{Deserialize, Serialize};
+use std::collections::VecDeque;
 use std::sync::Arc;
 use tokio::sync::RwLock;
-use tracing::info;
+use tracing::{info, warn};
 
 /// Audit log entry recording mutations and auth events.
 #[derive(Serialize, Deserialize, Debug, Clone)]
@@ -17,28 +19,40 @@ pub struct AuditEntry {
     pub path: String,     // request path
     pub status: u16,      // response status code
     pub details: Option<String>, // additional context
+    /// User ID for multi-tenant audit trails.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub user_id: Option<String>,
 }
 
-/// In-memory audit log with bounded size.
-/// In production, these should be persisted to ArangoDB via NATS.
+/// Audit log with in-memory buffer and ArangoDB persistence via NATS.
 #[derive(Clone)]
 pub struct AuditLog {
-    entries: Arc<RwLock<Vec<AuditEntry>>>,
+    entries: Arc<RwLock<VecDeque<AuditEntry>>>,
     max_entries: usize,
+    nats: Option<NatsClient>,
 }
 
 impl AuditLog {
     pub fn new(max_entries: usize) -> Self {
         Self {
-            entries: Arc::new(RwLock::new(Vec::with_capacity(max_entries))),
+            entries: Arc::new(RwLock::new(VecDeque::with_capacity(max_entries))),
             max_entries,
+            nats: None,
+        }
+    }
+
+    /// Create an audit log that also persists entries to ArangoDB via NATS.
+    pub fn with_nats(max_entries: usize, nats: NatsClient) -> Self {
+        Self {
+            entries: Arc::new(RwLock::new(VecDeque::with_capacity(max_entries))),
+            max_entries,
+            nats: Some(nats),
         }
     }
 
     /// Log an audit entry. If the buffer is full, drops the oldest entry.
+    /// Also persists to ArangoDB via NATS if a NATS client is configured.
     pub async fn log(&self, entry: AuditEntry) {
-        let mut entries = self.entries.write().await;
-
         info!(
             action = %entry.action,
             subject = %entry.subject,
@@ -49,11 +63,25 @@ impl AuditLog {
             "Audit log entry"
         );
 
-        entries.push(entry);
+        // Persist to ArangoDB via NATS (fire-and-forget)
+        if let Some(nats) = &self.nats {
+            let store_req = serde_json::json!({
+                "entry": entry,
+            });
+            if let Err(e) = nats
+                .publish_envelope("brain.audit.store", None, None, &store_req)
+                .await
+            {
+                warn!(error = %e, "Failed to persist audit entry to brain");
+            }
+        }
+
+        let mut entries = self.entries.write().await;
+        entries.push_back(entry);
 
         // Keep only the most recent max_entries
-        if entries.len() > self.max_entries {
-            entries.remove(0);
+        while entries.len() > self.max_entries {
+            entries.pop_front();
         }
     }
 
@@ -97,6 +125,7 @@ pub struct AuditEntryBuilder {
     pub path: String,
     pub status: u16,
     pub details: Option<String>,
+    pub user_id: Option<String>,
 }
 
 impl AuditEntryBuilder {
@@ -109,6 +138,7 @@ impl AuditEntryBuilder {
             path: String::new(),
             status: 200,
             details: None,
+            user_id: None,
         }
     }
 
@@ -132,6 +162,11 @@ impl AuditEntryBuilder {
         self
     }
 
+    pub fn user_id(mut self, user_id: Option<String>) -> Self {
+        self.user_id = user_id;
+        self
+    }
+
     pub fn build(self) -> AuditEntry {
         AuditEntry {
             timestamp: Utc::now(),
@@ -142,6 +177,7 @@ impl AuditEntryBuilder {
             path: self.path,
             status: self.status,
             details: self.details,
+            user_id: self.user_id,
         }
     }
 }

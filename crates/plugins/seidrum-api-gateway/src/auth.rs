@@ -227,9 +227,7 @@ mod tests {
     #[tokio::test]
     async fn test_auth_handler_with_api_key() {
         let handler = AuthHandler::new("test-key".to_string(), None, 3600);
-        let result = handler
-            .authenticate("", Some("test-key".to_string()))
-            .await;
+        let result = handler.authenticate("", Some("test-key".to_string())).await;
         assert!(result.is_some());
         let auth = result.unwrap();
         assert_eq!(auth.role, "admin");

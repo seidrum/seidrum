@@ -23,6 +23,7 @@ async fn test_conversation_lifecycle() {
         agent_id: "personal-assistant".into(),
         scope: "scope_root".into(),
         metadata: HashMap::from([("test_id".to_string(), test_id.clone())]),
+        user_id: None,
     };
     let create_resp: ConversationCreateResponse =
         common::nats_request(&nats, "brain.conversation.create", &create_req).await;
@@ -86,6 +87,7 @@ async fn test_conversation_lifecycle() {
         agent_id: "personal-assistant".into(),
         platform: Some("e2e-test".into()),
         limit: 10,
+        user_id: None,
     };
     let list_resp: ConversationListResponse =
         common::nats_request(&nats, "brain.conversation.list", &list_req).await;
@@ -97,6 +99,7 @@ async fn test_conversation_lifecycle() {
         platform: "e2e-test".into(),
         metadata_key: "test_id".into(),
         metadata_value: test_id.clone(),
+        user_id: None,
     };
     let find_resp: serde_json::Value =
         common::nats_request(&nats, "brain.conversation.find", &find_req).await;
@@ -116,6 +119,7 @@ async fn test_conversation_get_with_max_messages() {
         agent_id: "test-agent".into(),
         scope: "scope_root".into(),
         metadata: HashMap::new(),
+        user_id: None,
     };
     let create_resp: ConversationCreateResponse =
         common::nats_request(&nats, "brain.conversation.create", &create_req).await;

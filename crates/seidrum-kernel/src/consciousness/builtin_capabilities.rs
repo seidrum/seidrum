@@ -222,6 +222,7 @@ pub async fn handle_delegate_task(
             ("from_agent".to_string(), from_agent_id.to_string()),
             ("to_agent".to_string(), args.to_agent_id.clone()),
         ]),
+        user_id: None,
     };
 
     let conv_id = match tokio::time::timeout(

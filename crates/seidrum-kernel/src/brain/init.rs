@@ -17,6 +17,9 @@ const VERTEX_COLLECTIONS: &[&str] = &[
     "plugin_storage",
     "conversations",
     "skills",
+    "users",
+    "audit_log",
+    "api_keys",
 ];
 
 /// Edge collections defined in BRAIN_SCHEMA.md.
@@ -109,8 +112,8 @@ async fn create_brain_graph(client: &ArangoClient) -> Result<()> {
         },
         {
             "collection": "scoped_to",
-            "from": ["entities", "content", "facts", "tasks"],
-            "to": ["scopes"]
+            "from": ["entities", "content", "facts", "tasks", "conversations"],
+            "to": ["scopes", "users"]
         },
         {
             "collection": "derived_from",
@@ -255,6 +258,52 @@ async fn create_indexes(client: &ArangoClient) -> Result<()> {
         .create_persistent_index("capabilities", &["name"], false, false)
         .await
         .context("tools.name index")?;
+
+    // -- users --
+    client
+        .create_persistent_index("users", &["username"], true, false)
+        .await
+        .context("users.username index")?;
+    client
+        .create_persistent_index("users", &["email"], false, true)
+        .await
+        .context("users.email index")?;
+    client
+        .create_persistent_index("users", &["role"], false, false)
+        .await
+        .context("users.role index")?;
+    client
+        .create_persistent_index("users", &["status"], false, false)
+        .await
+        .context("users.status index")?;
+
+    // -- audit_log --
+    client
+        .create_persistent_index("audit_log", &["timestamp"], false, false)
+        .await
+        .context("audit_log.timestamp index")?;
+    client
+        .create_persistent_index("audit_log", &["action"], false, false)
+        .await
+        .context("audit_log.action index")?;
+    client
+        .create_persistent_index("audit_log", &["user_id"], false, true)
+        .await
+        .context("audit_log.user_id index")?;
+    client
+        .create_persistent_index("audit_log", &["subject"], false, false)
+        .await
+        .context("audit_log.subject index")?;
+
+    // -- api_keys --
+    client
+        .create_persistent_index("api_keys", &["user_id"], false, false)
+        .await
+        .context("api_keys.user_id index")?;
+    client
+        .create_persistent_index("api_keys", &["key_hash"], true, false)
+        .await
+        .context("api_keys.key_hash index")?;
 
     // -- Vector indexes (ArangoDB 3.12+) --
     // Vector search uses MDI-prefixed indexes for efficient similarity queries.

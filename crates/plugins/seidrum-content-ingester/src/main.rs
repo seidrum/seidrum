@@ -228,6 +228,7 @@ async fn main() -> Result<()> {
             timestamp: envelope.timestamp,
             metadata,
             generate_embedding: true,
+            user_id: None,
         };
 
         let store_envelope = EventEnvelope::new(
