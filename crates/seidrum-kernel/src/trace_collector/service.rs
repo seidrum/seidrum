@@ -6,7 +6,7 @@ use chrono::{DateTime, Utc};
 use futures::StreamExt;
 use serde::{Deserialize, Serialize};
 use tokio::sync::RwLock;
-use tracing::info;
+use tracing::{info, warn};
 
 /// A single event within a trace.
 #[derive(Serialize, Deserialize, Debug, Clone)]
@@ -37,6 +37,9 @@ pub struct Trace {
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct TraceGetRequest {
     pub correlation_id: String,
+    /// Authenticated source identifier (required for access control).
+    #[serde(default)]
+    pub auth_source: Option<String>,
 }
 
 /// Request to list recent traces.
@@ -44,6 +47,9 @@ pub struct TraceGetRequest {
 pub struct TraceListRequest {
     pub limit: Option<usize>,
     pub since: Option<DateTime<Utc>>,
+    /// Authenticated source identifier (required for access control).
+    #[serde(default)]
+    pub auth_source: Option<String>,
 }
 
 /// Response with trace list (summaries without full spans).
@@ -62,6 +68,17 @@ pub struct TraceSummary {
     pub trigger_subject: String,
     /// Last event subject
     pub last_subject: String,
+}
+
+/// Trusted sources allowed to query traces.
+const TRUSTED_SOURCES: &[&str] = &["api-gateway", "kernel", "seidrum-cli", "dashboard"];
+
+/// Validate that a trace query comes from a trusted source.
+fn is_authorized(auth_source: &Option<String>) -> bool {
+    match auth_source {
+        Some(source) => TRUSTED_SOURCES.iter().any(|&s| s == source),
+        None => false,
+    }
 }
 
 pub struct TraceCollectorService {
@@ -219,6 +236,19 @@ impl TraceCollectorService {
                         };
 
                         if let Ok(req) = serde_json::from_slice::<TraceGetRequest>(&msg.payload) {
+                            // Authenticate the request
+                            if !is_authorized(&req.auth_source) {
+                                warn!(
+                                    auth_source = ?req.auth_source,
+                                    "Unauthorized trace.get request rejected"
+                                );
+                                let error = serde_json::json!({"error": "unauthorized"});
+                                if let Ok(bytes) = serde_json::to_vec(&error) {
+                                    let _ = nats.publish(reply, bytes.into()).await;
+                                }
+                                continue;
+                            }
+
                             let store = traces.read().await;
                             let response = store.get(&req.correlation_id).cloned();
                             if let Ok(bytes) = serde_json::to_vec(&response) {
@@ -234,7 +264,20 @@ impl TraceCollectorService {
                         };
 
                         let req: TraceListRequest = serde_json::from_slice(&msg.payload)
-                            .unwrap_or(TraceListRequest { limit: Some(50), since: None });
+                            .unwrap_or(TraceListRequest { limit: Some(50), since: None, auth_source: None });
+
+                        // Authenticate the request
+                        if !is_authorized(&req.auth_source) {
+                            warn!(
+                                auth_source = ?req.auth_source,
+                                "Unauthorized trace.list request rejected"
+                            );
+                            let error_resp = TraceListResponse { traces: vec![] };
+                            if let Ok(bytes) = serde_json::to_vec(&error_resp) {
+                                let _ = nats.publish(reply, bytes.into()).await;
+                            }
+                            continue;
+                        }
 
                         let store = traces.read().await;
                         let limit = req.limit.unwrap_or(50);

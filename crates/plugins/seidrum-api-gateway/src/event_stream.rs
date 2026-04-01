@@ -35,6 +35,9 @@ pub mod trace_collector {
     #[derive(Serialize, Deserialize, Debug, Clone)]
     pub struct TraceGetRequest {
         pub correlation_id: String,
+        /// Authenticated source identifier (required for access control).
+        #[serde(default)]
+        pub auth_source: Option<String>,
     }
 
     /// Request to list recent traces.
@@ -42,6 +45,9 @@ pub mod trace_collector {
     pub struct TraceListRequest {
         pub limit: Option<usize>,
         pub since: Option<DateTime<Utc>>,
+        /// Authenticated source identifier (required for access control).
+        #[serde(default)]
+        pub auth_source: Option<String>,
     }
 
     /// Response with trace list (summaries without full spans).

@@ -140,6 +140,7 @@ async fn query_vector_search(
     nats: &async_nats::Client,
     embedding: &[f64],
     limit: u32,
+    user_id: Option<String>,
 ) -> Result<BrainQueryResponse> {
     let request = BrainQueryRequest {
         query_type: "vector_search".to_string(),
@@ -155,6 +156,7 @@ async fn query_vector_search(
         max_facts: None,
         graph_depth: None,
         min_confidence: None,
+        user_id,
     };
     brain_query(nats, &request).await
 }
@@ -166,6 +168,7 @@ async fn query_get_context(
     graph_depth: u32,
     max_facts: u32,
     min_confidence: f64,
+    user_id: Option<String>,
 ) -> Result<BrainQueryResponse> {
     let request = BrainQueryRequest {
         query_type: "get_context".to_string(),
@@ -181,6 +184,7 @@ async fn query_get_context(
         max_facts: Some(max_facts),
         graph_depth: Some(graph_depth),
         min_confidence: Some(min_confidence),
+        user_id,
     };
     brain_query(nats, &request).await
 }
@@ -190,6 +194,7 @@ async fn query_conversation_history(
     nats: &async_nats::Client,
     chat_id: &str,
     limit: u32,
+    user_id: Option<String>,
 ) -> Result<BrainQueryResponse> {
     let mut bind_vars = std::collections::HashMap::new();
     bind_vars.insert(
@@ -201,16 +206,32 @@ async fn query_conversation_history(
         serde_json::Value::Number(serde_json::Number::from(limit)),
     );
 
+    // Scope conversation history to the requesting user when available
+    let aql = if user_id.is_some() {
+        "FOR c IN content \
+         FILTER c.channel_id == @chat_id \
+         FILTER c.user_id == @user_id \
+         SORT c.timestamp DESC \
+         LIMIT @limit \
+         RETURN c"
+    } else {
+        "FOR c IN content \
+         FILTER c.channel_id == @chat_id \
+         SORT c.timestamp DESC \
+         LIMIT @limit \
+         RETURN c"
+    };
+
+    if let Some(ref uid) = user_id {
+        bind_vars.insert(
+            "user_id".to_string(),
+            serde_json::Value::String(uid.clone()),
+        );
+    }
+
     let request = BrainQueryRequest {
         query_type: "aql".to_string(),
-        aql: Some(
-            "FOR c IN content \
-             FILTER c.channel_id == @chat_id \
-             SORT c.timestamp DESC \
-             LIMIT @limit \
-             RETURN c"
-                .to_string(),
-        ),
+        aql: Some(aql.to_string()),
         bind_vars: Some(bind_vars),
         embedding: None,
         collection: None,
@@ -222,22 +243,42 @@ async fn query_conversation_history(
         max_facts: None,
         graph_depth: None,
         min_confidence: None,
+        user_id,
     };
     brain_query(nats, &request).await
 }
 
-/// Request active tasks from the brain.
-async fn query_active_tasks(nats: &async_nats::Client) -> Result<BrainQueryResponse> {
+/// Request active tasks from the brain, scoped to user when available.
+async fn query_active_tasks(
+    nats: &async_nats::Client,
+    user_id: Option<String>,
+) -> Result<BrainQueryResponse> {
+    let aql = if user_id.is_some() {
+        "FOR t IN tasks \
+         FILTER t.status IN ['pending', 'in_progress'] \
+         FILTER t.user_id == @user_id \
+         SORT t.priority == 'high' ? 0 : t.priority == 'medium' ? 1 : 2 \
+         RETURN t"
+    } else {
+        "FOR t IN tasks \
+         FILTER t.status IN ['pending', 'in_progress'] \
+         SORT t.priority == 'high' ? 0 : t.priority == 'medium' ? 1 : 2 \
+         RETURN t"
+    };
+
+    let bind_vars = user_id.as_ref().map(|uid| {
+        let mut m = std::collections::HashMap::new();
+        m.insert(
+            "user_id".to_string(),
+            serde_json::Value::String(uid.clone()),
+        );
+        m
+    });
+
     let request = BrainQueryRequest {
         query_type: "aql".to_string(),
-        aql: Some(
-            "FOR t IN tasks \
-             FILTER t.status IN ['pending', 'in_progress'] \
-             SORT t.priority == 'high' ? 0 : t.priority == 'medium' ? 1 : 2 \
-             RETURN t"
-                .to_string(),
-        ),
-        bind_vars: None,
+        aql: Some(aql.to_string()),
+        bind_vars,
         embedding: None,
         collection: None,
         limit: None,
@@ -248,6 +289,7 @@ async fn query_active_tasks(nats: &async_nats::Client) -> Result<BrainQueryRespo
         max_facts: None,
         graph_depth: None,
         min_confidence: None,
+        user_id,
     };
     brain_query(nats, &request).await
 }
@@ -469,9 +511,15 @@ async fn main() -> Result<()> {
             None
         };
 
+        let user_id = if inbound.user_id.is_empty() {
+            None
+        } else {
+            Some(inbound.user_id.clone())
+        };
+
         // Step 2: Query brain for vector-similar content
         let vector_resp = if let Some(ref emb) = embedding {
-            match query_vector_search(&nats, emb, 10).await {
+            match query_vector_search(&nats, emb, 10, user_id.clone()).await {
                 Ok(resp) => {
                     info!(
                         event_id = %envelope.id,
@@ -501,6 +549,7 @@ async fn main() -> Result<()> {
             cli.graph_depth,
             cli.max_facts,
             cli.min_confidence,
+            user_id.clone(),
         )
         .await
         {
@@ -523,8 +572,8 @@ async fn main() -> Result<()> {
             }
         };
 
-        // Step 4: Query brain for active tasks
-        let tasks_resp = match query_active_tasks(&nats).await {
+        // Step 4: Query brain for active tasks (scoped to user)
+        let tasks_resp = match query_active_tasks(&nats, user_id.clone()).await {
             Ok(resp) => {
                 info!(
                     event_id = %envelope.id,
@@ -544,27 +593,33 @@ async fn main() -> Result<()> {
             }
         };
 
-        // Step 5: Query brain for recent conversation history
-        let history_resp =
-            match query_conversation_history(&nats, &inbound.chat_id, cli.history_length).await {
-                Ok(resp) => {
-                    info!(
-                        event_id = %envelope.id,
-                        count = resp.count,
-                        duration_ms = resp.duration_ms,
-                        "Conversation history query returned results"
-                    );
-                    Some(resp)
-                }
-                Err(err) => {
-                    warn!(
-                        %err,
-                        event_id = %envelope.id,
-                        "Conversation history query failed"
-                    );
-                    None
-                }
-            };
+        // Step 5: Query brain for recent conversation history (scoped to user)
+        let history_resp = match query_conversation_history(
+            &nats,
+            &inbound.chat_id,
+            cli.history_length,
+            user_id.clone(),
+        )
+        .await
+        {
+            Ok(resp) => {
+                info!(
+                    event_id = %envelope.id,
+                    count = resp.count,
+                    duration_ms = resp.duration_ms,
+                    "Conversation history query returned results"
+                );
+                Some(resp)
+            }
+            Err(err) => {
+                warn!(
+                    %err,
+                    event_id = %envelope.id,
+                    "Conversation history query failed"
+                );
+                None
+            }
+        };
 
         // Step 6: Search for relevant skills
         let skill_snippets = match tokio::time::timeout(

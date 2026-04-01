@@ -260,6 +260,7 @@ async fn process_entity(
         max_facts: None,
         graph_depth: None,
         min_confidence: None,
+        user_id: None,
     };
 
     let query_envelope = EventEnvelope::new(

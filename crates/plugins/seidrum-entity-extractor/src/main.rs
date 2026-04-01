@@ -223,14 +223,27 @@ async fn process_content(
     correlation_id: &Option<String>,
     scope: &Option<String>,
 ) -> Result<()> {
-    // Step 1: Fetch the content text from the kernel via brain.query.request
+    // Step 1: Fetch the content text from the kernel via brain.query.request.
+    // Scope the query to the owning user to prevent cross-user content reads.
+    let mut bind_vars = HashMap::from([(
+        "key".to_string(),
+        serde_json::Value::String(content_stored.content_key.clone()),
+    )]);
+
+    let aql = if let Some(uid) = &content_stored.user_id {
+        bind_vars.insert(
+            "user_id".to_string(),
+            serde_json::Value::String(uid.clone()),
+        );
+        "FOR doc IN content FILTER doc._key == @key AND doc.user_id == @user_id RETURN doc.raw_text"
+    } else {
+        "FOR doc IN content FILTER doc._key == @key RETURN doc.raw_text"
+    };
+
     let query_req = BrainQueryRequest {
         query_type: "aql".to_string(),
-        aql: Some("FOR doc IN content FILTER doc._key == @key RETURN doc.raw_text".to_string()),
-        bind_vars: Some(HashMap::from([(
-            "key".to_string(),
-            serde_json::Value::String(content_stored.content_key.clone()),
-        )])),
+        aql: Some(aql.to_string()),
+        bind_vars: Some(bind_vars),
         embedding: None,
         collection: None,
         limit: None,
@@ -241,6 +254,7 @@ async fn process_content(
         max_facts: None,
         graph_depth: None,
         min_confidence: None,
+        user_id: content_stored.user_id.clone(),
     };
 
     let query_envelope = EventEnvelope::new(

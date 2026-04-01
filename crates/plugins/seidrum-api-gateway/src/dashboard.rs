@@ -413,6 +413,7 @@ pub async fn list_conversations_dashboard(State(state): State<AppState>) -> impl
         agent_id: "".to_string(),
         platform: None,
         limit: 50,
+        user_id: None,
     };
 
     match tokio::time::timeout(
@@ -449,6 +450,7 @@ pub async fn get_conversation_dashboard(
     let req = ConversationGetRequest {
         conversation_id,
         max_messages: 100,
+        user_id: None,
     };
 
     match tokio::time::timeout(

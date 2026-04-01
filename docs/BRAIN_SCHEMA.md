@@ -187,6 +187,98 @@ Registry of all event types in the system.
 }
 ```
 
+### `users`
+
+User accounts for multi-user support. Passwords are stored as Argon2id hashes.
+
+```json
+{
+  "_key": "user_abc123def456",
+  "username": "alice",
+  "password_hash": "$argon2id$v=19$m=65536,t=3,p=4$...",
+  "email": "alice@example.com",
+  "display_name": "Alice Smith",
+  "role": "user",
+  "status": "active",
+  "scopes": ["scope_root"],
+  "created_at": "2026-03-15T10:00:00Z",
+  "updated_at": "2026-03-15T10:00:00Z"
+}
+```
+
+**Fields:**
+- `_key`: `user_` prefix + 12-char lowercase ULID
+- `username`: Unique, used for login (unique persistent index)
+- `password_hash`: Argon2id hash (m=65536, t=3, p=4)
+- `email`: Optional, unique sparse index
+- `display_name`: Optional display name
+- `role`: `"admin"` | `"user"` | `"readonly"`
+- `status`: `"active"` | `"suspended"` | `"deleted"` (soft-delete)
+- `scopes`: Array of scope keys this user can access
+- `created_at` / `updated_at`: ISO 8601 timestamps
+
+**Indexes:** `username` (unique), `email` (unique, sparse), `role`, `status`
+
+### `audit_log`
+
+Immutable audit trail for security-relevant events. Written by the kernel
+via `brain.audit.store` (fire-and-forget from the API Gateway).
+
+```json
+{
+  "_key": "audit_01JQRS...",
+  "timestamp": "2026-03-15T10:05:00Z",
+  "action": "auth.login",
+  "subject": "alice",
+  "resource": "auth_token",
+  "method": "POST",
+  "path": "/api/v1/auth/token",
+  "status": 200,
+  "details": null,
+  "user_id": "user_abc123def456"
+}
+```
+
+**Fields:**
+- `action`: Event type (e.g., `auth.login`, `auth.login_failed`, `auth.token_revoked`, `rate_limit.exceeded`, `user.registered`)
+- `subject`: Who performed the action (username or "api-key")
+- `resource`: What was affected
+- `method` / `path`: HTTP method and request path
+- `status`: HTTP response status code
+- `user_id`: Optional user ID for multi-tenant audit trails
+
+**Indexes:** `timestamp`, `action`, `user_id` (sparse), `subject`
+
+### `api_keys`
+
+User-scoped API keys for programmatic access. The actual key is never stored;
+only a hash is persisted.
+
+```json
+{
+  "_key": "apikey_01JQRS...",
+  "user_id": "user_abc123def456",
+  "name": "CI Pipeline Key",
+  "key_hash": "sha256:a1b2c3...",
+  "scopes": ["scope_root"],
+  "created_at": "2026-03-15T10:10:00Z",
+  "expires_at": "2026-06-15T10:10:00Z",
+  "last_used": "2026-03-16T08:00:00Z",
+  "revoked": false
+}
+```
+
+**Fields:**
+- `user_id`: Owning user's key
+- `name`: Human-readable label
+- `key_hash`: SHA-256 hash of the API key (unique index)
+- `scopes`: Scope boundaries inherited from the user
+- `expires_at`: Optional expiration timestamp
+- `last_used`: Last successful authentication timestamp
+- `revoked`: Whether the key has been revoked
+
+**Indexes:** `user_id`, `key_hash` (unique)
+
 ---
 
 ## Edge Collections
@@ -288,7 +380,7 @@ Registry of all event types in the system.
   "edgeDefinitions": [
     { "collection": "relates_to", "from": ["entities"], "to": ["entities"] },
     { "collection": "mentions", "from": ["content"], "to": ["entities"] },
-    { "collection": "scoped_to", "from": ["entities", "content", "facts", "tasks"], "to": ["scopes"] },
+    { "collection": "scoped_to", "from": ["entities", "content", "facts", "tasks", "conversations"], "to": ["scopes", "users"] },
     { "collection": "derived_from", "from": ["facts", "content"], "to": ["content"] },
     { "collection": "supersedes", "from": ["facts"], "to": ["facts"] },
     { "collection": "participated_in", "from": ["entities"], "to": ["content"] },
@@ -411,5 +503,9 @@ NATS event (channel.telegram.inbound)
 | edges (all)   | 1,170,000 | 340 MB    |
 | embeddings    | 555,000   | 3.3 GB    |
 | **Total**     |           | **~5.2 GB** |
+
+| users         | 1,000     | 1 MB      |
+| audit_log     | 100,000   | 50 MB     |
+| api_keys      | 5,000     | 2 MB      |
 
 Fits on a single ArangoDB instance. Runs on a 4GB VPS.

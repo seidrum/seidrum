@@ -567,31 +567,95 @@ Env:
 
 ### api-gateway
 
-WebSocket + REST API bridge that enables external plugins written in any language.
+WebSocket + REST API bridge with authentication, rate limiting, and audit
+logging. Enables external plugins written in any language and serves as the
+security boundary for all external access.
 
 **Plugin ID:** `api-gateway`
 **Kind:** Infrastructure
 **Consumes:** (dynamic — proxies for connected external plugins)
 **Produces:** (dynamic — proxies for connected external plugins)
 
+See [SECURITY.md](SECURITY.md) for comprehensive security documentation
+and [EVENT_CATALOG.md](EVENT_CATALOG.md) for the full REST API reference.
+
+**Authentication** (enforced on all `/api/v1/*` routes except `/api/v1/health`):
+- **API key:** `Authorization: ApiKey KEY` — constant-time validation via
+  `subtle` crate, grants admin role
+- **JWT Bearer:** `Authorization: Bearer <token>` — HMAC-SHA256 via
+  `jsonwebtoken` crate, carries user identity, role, and scopes
+- Token generation: `POST /api/v1/auth/token` (API key or username/password)
+- Token revocation: `POST /api/v1/auth/revoke` (in-memory JTI blacklist
+  with plugin storage persistence)
+- User registration: `POST /api/v1/auth/register` (Argon2id password
+  hashing with OWASP params: m=65536, t=3, p=4)
+
+**JWT Service** (`jwt.rs`):
+- Algorithm: HMAC-SHA256
+- Token IDs: ULID-based JTI for revocation tracking
+- Revocation: in-memory `HashSet<String>` behind `RwLock`, persisted to
+  plugin storage every 15 minutes, restored on startup
+- Cleanup: capped at 10,000 entries, oldest pruned when exceeded
+- Configurable TTL via `GATEWAY_JWT_TTL` (default: 86400s)
+
+**Rate Limiter** (`rate_limiter.rs`):
+- Token bucket algorithm with per-subject tracking
+- Role-aware: regular users get `GATEWAY_RATE_LIMIT` RPM (default: 60),
+  admins get `GATEWAY_RATE_LIMIT_ADMIN` RPM (default: 300)
+- Per-user RPM overrides supported
+- Response headers: `X-Rate-Limit-Remaining`, `Retry-After` (on 429)
+- State persisted to plugin storage every 5 minutes, restored on startup
+- Stale buckets cleaned up every 5 minutes (10-minute TTL)
+
+**Audit Logging** (`audit.rs`):
+- In-memory ring buffer (1,000 entries) for fast dashboard queries
+- ArangoDB persistence via `brain.audit.store` NATS subject (fire-and-forget)
+- Logs: auth success/failure, rate limit exceeded, token revocation,
+  user registration, and other security events
+- Multi-tenant: entries include `user_id` for per-user accountability
+
+**Multi-User Support:**
+- User CRUD via `brain.user.*` NATS subjects (backed by `users` collection)
+- User-scoped API keys via `brain.apikey.*` NATS subjects (backed by
+  `api_keys` collection)
+- Endpoints: `GET /api/v1/users/me`, `GET /api/v1/users` (admin),
+  `PUT /api/v1/users/:id/role` (admin), `DELETE /api/v1/users/:id` (admin)
+
 **WebSocket API** (`ws://gateway:8080/ws?api_key=KEY`):
 - Bidirectional JSON protocol with `type`-tagged messages
 - Each connection represents one external plugin
 - Full lifecycle: register, capability calls, health pings, event subscriptions, storage
 - Automatic timeout reaping for pending requests (5s interval)
+- Authentication via `api_key` query parameter
 
-**REST API** (`/api/v1/*`, `Authorization: Bearer KEY`):
-- `GET /api/v1/health` — Gateway health (public)
-- `GET /api/v1/plugins` — List connected external plugins
-- `DELETE /api/v1/plugins/{id}` — Deregister a plugin
-- `POST /api/v1/capabilities/{id}/call` — Call a capability synchronously
-- `GET /api/v1/capabilities` — Search capabilities
-- `POST /api/v1/storage/{get,set,delete,list}` — Storage operations
+**WebSocket Event Stream** (`ws://gateway:8080/ws/events?api_key=KEY`):
+- Real-time event streaming with optional subject filter and correlation ID
+
+**CORS:**
+- Configured via `CORS_ALLOWED_ORIGINS` (comma-separated, default: `http://localhost:3000`)
+- Allowed methods: GET, POST, PUT, DELETE, OPTIONS
+- Allowed headers: Authorization, Content-Type
+
+**REST API** (`/api/v1/*`):
+- Auth: `POST /auth/token`, `POST /auth/register`, `POST /auth/revoke`
+- Users: `GET /users/me`, `GET /users`, `GET /users/:id`, `PUT /users/:id/role`, `DELETE /users/:id`
+- API Keys: `POST /apikeys`, `GET /apikeys`, `DELETE /apikeys/:id`
+- Audit: `GET /audit`
+- Plugins: `GET /plugins`, `DELETE /plugins/:id`
+- Capabilities: `GET /capabilities`, `POST /capabilities/:id/call`
+- Storage: `POST /storage/{get,set,delete,list}`
+- Traces: `GET /traces`, `GET /traces/:correlation_id`
+- Dashboard: `GET /dashboard/overview`, plugin health/config, skills, conversations
+- Health: `GET /health` (public, no auth)
 
 **CLI arguments:**
 - `--nats-url` (env: `NATS_URL`, default: `nats://localhost:4222`)
 - `--listen-addr` (env: `GATEWAY_LISTEN_ADDR`, default: `0.0.0.0:8080`)
 - `--api-key` (env: `GATEWAY_API_KEY`, required)
+- `--jwt-secret` (env: `GATEWAY_JWT_SECRET`, optional — enables JWT auth)
+- `--jwt-ttl` (env: `GATEWAY_JWT_TTL`, default: `86400`)
+- `--rate-limit` (env: `GATEWAY_RATE_LIMIT`, default: `60`)
+- `--rate-limit-admin` (env: `GATEWAY_RATE_LIMIT_ADMIN`, default: `300`)
 
 ## Writing a Custom Plugin
 

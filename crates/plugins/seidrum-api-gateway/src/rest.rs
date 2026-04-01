@@ -144,7 +144,14 @@ pub async fn call_capability(
             } else {
                 StatusCode::OK
             };
-            (status, Json(serde_json::to_value(resp).unwrap())).into_response()
+            (
+                status,
+                Json(
+                    serde_json::to_value(resp)
+                        .unwrap_or_else(|_| serde_json::json!({"error": "serialization failed"})),
+                ),
+            )
+                .into_response()
         }
         Ok(Err(err)) => {
             warn!(%err, %capability_id, "Capability call failed");
@@ -183,7 +190,14 @@ pub async fn search_capabilities(
     )
     .await
     {
-        Ok(Ok(resp)) => (StatusCode::OK, Json(serde_json::to_value(resp).unwrap())).into_response(),
+        Ok(Ok(resp)) => (
+            StatusCode::OK,
+            Json(
+                serde_json::to_value(resp)
+                    .unwrap_or_else(|_| serde_json::json!({"error": "serialization failed"})),
+            ),
+        )
+            .into_response(),
         Ok(Err(err)) => (
             StatusCode::BAD_GATEWAY,
             Json(serde_json::json!({"error": err.to_string()})),
@@ -227,7 +241,11 @@ pub async fn storage_get(
     )
     .await
     {
-        Ok(Ok(resp)) => Json(serde_json::to_value(resp).unwrap()).into_response(),
+        Ok(Ok(resp)) => Json(
+            serde_json::to_value(resp)
+                .unwrap_or_else(|_| serde_json::json!({"error": "serialization failed"})),
+        )
+        .into_response(),
         Ok(Err(e)) => (
             StatusCode::BAD_GATEWAY,
             Json(serde_json::json!({"error": e.to_string()})),
@@ -273,7 +291,11 @@ pub async fn storage_set(
     )
     .await
     {
-        Ok(Ok(resp)) => Json(serde_json::to_value(resp).unwrap()).into_response(),
+        Ok(Ok(resp)) => Json(
+            serde_json::to_value(resp)
+                .unwrap_or_else(|_| serde_json::json!({"error": "serialization failed"})),
+        )
+        .into_response(),
         Ok(Err(e)) => (
             StatusCode::BAD_GATEWAY,
             Json(serde_json::json!({"error": e.to_string()})),
@@ -317,7 +339,11 @@ pub async fn storage_delete(
     )
     .await
     {
-        Ok(Ok(resp)) => Json(serde_json::to_value(resp).unwrap()).into_response(),
+        Ok(Ok(resp)) => Json(
+            serde_json::to_value(resp)
+                .unwrap_or_else(|_| serde_json::json!({"error": "serialization failed"})),
+        )
+        .into_response(),
         Ok(Err(e)) => (
             StatusCode::BAD_GATEWAY,
             Json(serde_json::json!({"error": e.to_string()})),
@@ -349,7 +375,11 @@ pub async fn storage_list(
     )
     .await
     {
-        Ok(Ok(resp)) => Json(serde_json::to_value(resp).unwrap()).into_response(),
+        Ok(Ok(resp)) => Json(
+            serde_json::to_value(resp)
+                .unwrap_or_else(|_| serde_json::json!({"error": "serialization failed"})),
+        )
+        .into_response(),
         Ok(Err(e)) => (
             StatusCode::BAD_GATEWAY,
             Json(serde_json::json!({"error": e.to_string()})),

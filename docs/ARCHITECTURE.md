@@ -333,14 +333,80 @@ Default: respond on the same channel. Override: workflow config.
 
 ---
 
+## Security Layer
+
+Authentication, authorization, rate limiting, and audit logging are
+enforced at the API Gateway — the single entry point for all external
+access. See [SECURITY.md](SECURITY.md) for full details.
+
+### Auth Middleware in Request Flow
+
+Every authenticated HTTP request passes through the `auth_rate_limit_middleware`
+before reaching any handler:
+
+```
+External Request
+  │
+  ├─ /api/v1/health ─────────────────────▶ Handler (no auth)
+  ├─ /dashboard/* ────────────────────────▶ Static files (no auth)
+  │
+  └─ /api/v1/* ──┬─ 1. Authenticate ─────▶ AuthHandler
+                 │     (JWT Bearer or API key — constant-time comparison)
+                 │
+                 ├─ 2. Rate limit ────────▶ RateLimiter (token bucket)
+                 │     (per-subject, role-aware RPM limits)
+                 │
+                 ├─ 3. Handler ───────────▶ Route handler
+                 │     (auth result available via request extensions)
+                 │
+                 └─ 4. Audit ─────────────▶ AuditLog
+                       (in-memory ring buffer + ArangoDB via NATS)
+```
+
+Failures at any stage short-circuit the pipeline:
+- Auth failure → `401 Unauthorized` + audit entry
+- Rate limit exceeded → `429 Too Many Requests` + `Retry-After` header + audit entry
+
+### Multi-User Data Isolation
+
+Multi-user support introduces user-scoped data boundaries:
+
+1. **User records** are stored in the `users` ArangoDB collection with
+   Argon2id password hashes.
+2. **JWT tokens** carry `user_id` and `scopes` claims that the kernel
+   uses to filter brain queries.
+3. **Scope enforcement** is extended: the `scoped_to` edge collection
+   now connects to both `scopes` and `users` vertices, enabling
+   per-user knowledge isolation.
+4. **Audit trails** include `user_id` on every entry for accountability.
+5. **User API keys** in the `api_keys` collection provide programmatic
+   access scoped to a specific user.
+
+### Audit Pipeline
+
+```
+API Gateway (auth event occurs)
+  │
+  ├─ In-memory ring buffer (1,000 entries, fast dashboard queries)
+  │
+  └─ NATS publish "brain.audit.store" (fire-and-forget)
+       └─ Kernel Brain Service
+            └─ ArangoDB "audit_log" collection (permanent storage)
+```
+
+---
+
 ## What the Kernel Owns
 
-1. **Brain** (ArangoDB) — knowledge graph, capabilities collection
+1. **Brain** (ArangoDB) — knowledge graph, capabilities collection, users, audit log, API keys
 2. **Plugin Registry** — tracks running plugins, their consumed/produced types
 3. **Capability Registry** — tools, commands, and future capability kinds
 4. **Workflow Engine** — loads workflows, applies wiring rules, manages routing
 5. **Scheduler** — cron jobs (fact decay, health monitoring)
 6. **Scope Enforcement** — filters brain queries by scope boundaries
+7. **User Management** — CRUD for user accounts (`brain.user.*` subjects)
+8. **Audit Persistence** — stores and queries audit entries (`brain.audit.*` subjects)
+9. **API Key Management** — CRUD for user-scoped API keys (`brain.apikey.*` subjects)
 
 ---
 

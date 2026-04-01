@@ -537,6 +537,7 @@ async fn handle_builtin_call(
             let req = seidrum_common::events::ConversationGetRequest {
                 conversation_id: args.conversation_id,
                 max_messages: args.max_messages.unwrap_or(0),
+                user_id: None,
             };
             builtin_capabilities::handle_get_conversation(nats, &req).await
         }
@@ -551,6 +552,7 @@ async fn handle_builtin_call(
                 agent_id: agent_id.to_string(),
                 platform: args.platform,
                 limit: args.limit.unwrap_or(20),
+                user_id: None,
             };
             builtin_capabilities::handle_list_conversations(nats, agent_id, &req).await
         }
@@ -699,6 +701,14 @@ async fn process_consciousness_event(
         .and_then(|v| v.as_str())
         .map(|s| s.to_string());
 
+    // Extract user_id for multi-tenant propagation through the LLM pipeline
+    let user_id = event
+        .payload
+        .get("user_id")
+        .and_then(|v| v.as_str())
+        .filter(|s| !s.is_empty())
+        .map(|s| s.to_string());
+
     // Build UnifiedLlmRequest
     let llm_request = UnifiedLlmRequest {
         agent_id: agent_id.to_string(),
@@ -714,6 +724,7 @@ async fn process_consciousness_event(
         model_preferences: vec!["gemini-2.0-flash".to_string()],
         correlation_id,
         scope: Some(agent_def.scope.clone()),
+        user_id,
     };
 
     // Create guardrail state
@@ -879,6 +890,7 @@ async fn find_or_create_conversation(
         platform: platform.clone(),
         metadata_key: meta_key.clone(),
         metadata_value: meta_value.clone(),
+        user_id: None,
     };
 
     let found: serde_json::Value = match tokio::time::timeout(
@@ -925,6 +937,7 @@ async fn find_or_create_conversation(
         agent_id: agent_id.to_string(),
         scope: agent_def.scope.clone(),
         metadata,
+        user_id: None,
     };
 
     let create_resp: ConversationCreateResponse = tokio::time::timeout(
@@ -956,6 +969,7 @@ async fn load_conversation_history(
     let get_req = ConversationGetRequest {
         conversation_id: conversation_id.to_string(),
         max_messages: 20,
+        user_id: None,
     };
 
     let conv: Option<Conversation> = match tokio::time::timeout(

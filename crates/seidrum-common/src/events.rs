@@ -132,6 +132,9 @@ pub struct ContentStoreRequest {
     pub timestamp: DateTime<Utc>,
     pub metadata: HashMap<String, String>,
     pub generate_embedding: bool,
+    /// Owner user ID for multi-tenant isolation.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub user_id: Option<String>,
 }
 
 /// Content successfully stored.
@@ -143,6 +146,9 @@ pub struct ContentStored {
     pub channel: String,
     pub embedding_generated: bool,
     pub timestamp: DateTime<Utc>,
+    /// Owner user ID propagated from the store request for downstream user scoping.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub user_id: Option<String>,
 }
 
 /// Create or update an entity.
@@ -238,6 +244,9 @@ pub struct BrainQueryRequest {
     pub max_facts: Option<u32>,
     pub graph_depth: Option<u32>,
     pub min_confidence: Option<f64>,
+    /// Filter results by user_id for multi-tenant isolation.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub user_id: Option<String>,
 }
 
 /// Subject: `brain.query.response`
@@ -683,6 +692,9 @@ pub struct UnifiedLlmRequest {
     pub model_preferences: Vec<String>,
     pub correlation_id: Option<String>,
     pub scope: Option<String>,
+    /// User ID for multi-tenant context propagation through the LLM pipeline.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub user_id: Option<String>,
 }
 
 /// Configuration for an LLM call.
@@ -806,6 +818,9 @@ pub struct ConversationCreateRequest {
     pub scope: String,
     #[serde(default)]
     pub metadata: HashMap<String, String>,
+    /// Owner user ID for multi-tenant isolation.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub user_id: Option<String>,
 }
 
 /// Response to conversation create.
@@ -837,6 +852,10 @@ pub struct ConversationGetRequest {
     /// Maximum number of recent messages to return (0 = all).
     #[serde(default)]
     pub max_messages: u32,
+    /// User ID for ownership verification — when present, the response is null if
+    /// the conversation's user_id does not match, preventing cross-user reads.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub user_id: Option<String>,
 }
 
 /// Full conversation document.
@@ -862,6 +881,9 @@ pub struct ConversationFindRequest {
     pub platform: String,
     pub metadata_key: String,
     pub metadata_value: String,
+    /// Filter by owner user ID for multi-tenant isolation.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub user_id: Option<String>,
 }
 
 /// Request to list conversations.
@@ -873,6 +895,9 @@ pub struct ConversationListRequest {
     pub platform: Option<String>,
     #[serde(default)]
     pub limit: u32,
+    /// Filter by owner user ID for multi-tenant isolation.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub user_id: Option<String>,
 }
 
 /// Response to conversation list.
@@ -1059,6 +1084,252 @@ pub struct SkillListResponse {
 }
 
 // ---------------------------------------------------------------------------
+// User Management Events
+// ---------------------------------------------------------------------------
+
+/// Request to create a new user.
+/// Subject: `brain.user.create` (request/reply)
+#[derive(Serialize, Deserialize, Debug, Clone)]
+pub struct UserCreateRequest {
+    pub username: String,
+    pub password_hash: String,
+    pub email: Option<String>,
+    pub display_name: Option<String>,
+    pub role: String,
+}
+
+/// Response after user creation.
+#[derive(Serialize, Deserialize, Debug, Clone)]
+pub struct UserCreateResponse {
+    pub user_id: String,
+    pub username: String,
+    pub role: String,
+    pub created: bool,
+    pub error: Option<String>,
+}
+
+/// Request to get a user by ID.
+/// Subject: `brain.user.get` (request/reply)
+#[derive(Serialize, Deserialize, Debug, Clone)]
+pub struct UserGetRequest {
+    pub user_id: Option<String>,
+    pub username: Option<String>,
+}
+
+/// Response containing user profile.
+#[derive(Serialize, Deserialize, Debug, Clone)]
+pub struct UserGetResponse {
+    pub found: bool,
+    pub user: Option<UserRecord>,
+    pub error: Option<String>,
+}
+
+/// Stored user record.
+#[derive(Serialize, Deserialize, Debug, Clone)]
+pub struct UserRecord {
+    pub user_id: String,
+    pub username: String,
+    pub password_hash: String,
+    pub email: Option<String>,
+    pub display_name: Option<String>,
+    pub role: String,
+    pub status: String,
+    pub scopes: Vec<String>,
+    pub created_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
+}
+
+/// Request to list users (admin only).
+/// Subject: `brain.user.list` (request/reply)
+#[derive(Serialize, Deserialize, Debug, Clone)]
+pub struct UserListRequest {
+    pub limit: Option<u32>,
+    pub offset: Option<u32>,
+    pub role_filter: Option<String>,
+}
+
+/// Response containing user list.
+#[derive(Serialize, Deserialize, Debug, Clone)]
+pub struct UserListResponse {
+    pub users: Vec<UserRecord>,
+    pub total: u32,
+}
+
+/// Request to update a user.
+/// Subject: `brain.user.update` (request/reply)
+#[derive(Serialize, Deserialize, Debug, Clone)]
+pub struct UserUpdateRequest {
+    pub user_id: String,
+    pub role: Option<String>,
+    pub email: Option<String>,
+    pub display_name: Option<String>,
+    pub status: Option<String>,
+    pub password_hash: Option<String>,
+    pub scopes: Option<Vec<String>>,
+}
+
+/// Response after user update.
+#[derive(Serialize, Deserialize, Debug, Clone)]
+pub struct UserUpdateResponse {
+    pub success: bool,
+    pub error: Option<String>,
+}
+
+/// Request to delete a user.
+/// Subject: `brain.user.delete` (request/reply)
+#[derive(Serialize, Deserialize, Debug, Clone)]
+pub struct UserDeleteRequest {
+    pub user_id: String,
+}
+
+/// Response after user deletion.
+#[derive(Serialize, Deserialize, Debug, Clone)]
+pub struct UserDeleteResponse {
+    pub success: bool,
+    pub error: Option<String>,
+}
+
+// ---------------------------------------------------------------------------
+// Audit Persistence Events
+// ---------------------------------------------------------------------------
+
+/// Request to store an audit log entry in ArangoDB.
+/// Subject: `brain.audit.store`
+#[derive(Serialize, Deserialize, Debug, Clone)]
+pub struct AuditStoreRequest {
+    pub entry: AuditEntryRecord,
+}
+
+/// Audit entry for ArangoDB persistence.
+#[derive(Serialize, Deserialize, Debug, Clone)]
+pub struct AuditEntryRecord {
+    pub timestamp: DateTime<Utc>,
+    pub action: String,
+    pub subject: String,
+    pub resource: String,
+    pub method: String,
+    pub path: String,
+    pub status: u16,
+    pub details: Option<String>,
+    pub user_id: Option<String>,
+}
+
+/// Request to query audit logs from ArangoDB.
+/// Subject: `brain.audit.query` (request/reply)
+#[derive(Serialize, Deserialize, Debug, Clone)]
+pub struct AuditQueryRequest {
+    pub limit: Option<u32>,
+    pub since: Option<DateTime<Utc>>,
+    pub action_filter: Option<String>,
+    pub user_id_filter: Option<String>,
+}
+
+/// Response with audit log entries from ArangoDB.
+#[derive(Serialize, Deserialize, Debug, Clone)]
+pub struct AuditQueryResponse {
+    pub entries: Vec<AuditEntryRecord>,
+    pub total: u32,
+}
+
+// ---------------------------------------------------------------------------
+// User API Key Events
+// ---------------------------------------------------------------------------
+
+/// Request to create a user-scoped API key.
+/// Subject: `brain.apikey.create` (request/reply)
+#[derive(Serialize, Deserialize, Debug, Clone)]
+pub struct ApiKeyCreateRequest {
+    pub user_id: String,
+    pub name: String,
+    pub key_hash: String,
+    pub scopes: Vec<String>,
+    pub expires_at: Option<DateTime<Utc>>,
+}
+
+/// Response after API key creation.
+#[derive(Serialize, Deserialize, Debug, Clone)]
+pub struct ApiKeyCreateResponse {
+    pub key_id: String,
+    pub created: bool,
+    pub error: Option<String>,
+}
+
+/// Request to list API keys for a user.
+/// Subject: `brain.apikey.list` (request/reply)
+#[derive(Serialize, Deserialize, Debug, Clone)]
+pub struct ApiKeyListRequest {
+    pub user_id: String,
+}
+
+/// API key record (without the actual key).
+#[derive(Serialize, Deserialize, Debug, Clone)]
+pub struct ApiKeyRecord {
+    pub key_id: String,
+    pub user_id: String,
+    pub name: String,
+    pub key_hash: String,
+    pub scopes: Vec<String>,
+    pub created_at: DateTime<Utc>,
+    pub expires_at: Option<DateTime<Utc>>,
+    pub last_used: Option<DateTime<Utc>>,
+    pub revoked: bool,
+}
+
+/// Response with API key list.
+#[derive(Serialize, Deserialize, Debug, Clone)]
+pub struct ApiKeyListResponse {
+    pub keys: Vec<ApiKeyRecord>,
+}
+
+/// Request to revoke an API key.
+/// Subject: `brain.apikey.revoke` (request/reply)
+#[derive(Serialize, Deserialize, Debug, Clone)]
+pub struct ApiKeyRevokeRequest {
+    pub key_id: String,
+    pub user_id: String,
+}
+
+/// Response after API key revocation.
+#[derive(Serialize, Deserialize, Debug, Clone)]
+pub struct ApiKeyRevokeResponse {
+    pub success: bool,
+    pub error: Option<String>,
+}
+
+/// Request to validate an API key hash.
+/// Subject: `brain.apikey.validate` (request/reply)
+#[derive(Serialize, Deserialize, Debug, Clone)]
+pub struct ApiKeyValidateRequest {
+    pub key_hash: String,
+}
+
+/// Response with validated API key info.
+#[derive(Serialize, Deserialize, Debug, Clone)]
+pub struct ApiKeyValidateResponse {
+    pub valid: bool,
+    pub key: Option<ApiKeyRecord>,
+}
+
+// ---------------------------------------------------------------------------
+// Rate Limiter Persistence Events
+// ---------------------------------------------------------------------------
+
+/// Request to save rate limiter state.
+/// Subject: `storage.set` (using plugin storage)
+#[derive(Serialize, Deserialize, Debug, Clone)]
+pub struct RateLimiterState {
+    pub buckets: HashMap<String, RateLimiterBucket>,
+    pub saved_at: DateTime<Utc>,
+}
+
+/// Serializable rate limiter bucket state.
+#[derive(Serialize, Deserialize, Debug, Clone)]
+pub struct RateLimiterBucket {
+    pub tokens: f64,
+    pub last_refill: u64,
+}
+
+// ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
 
@@ -1171,6 +1442,7 @@ mod tests {
             max_facts: Some(20),
             graph_depth: Some(2),
             min_confidence: Some(0.5),
+            user_id: None,
         };
 
         let json = serde_json::to_string(&event).unwrap();
@@ -1336,6 +1608,7 @@ mod tests {
             model_preferences: vec!["gemini-2.5-pro".to_string()],
             correlation_id: Some("corr-789".to_string()),
             scope: Some("personal".to_string()),
+            user_id: None,
         };
 
         let json = serde_json::to_string(&event).unwrap();

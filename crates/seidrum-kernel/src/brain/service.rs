@@ -10,14 +10,20 @@ use anyhow::{Context, Result};
 use chrono::Utc;
 use futures::StreamExt;
 use seidrum_common::events::{
-    BrainQueryRequest, BrainQueryResponse, ContentStoreRequest, ContentStored,
-    ConversationAppendRequest, ConversationAppendResponse, ConversationCreateRequest,
-    ConversationCreateResponse, ConversationFindRequest, ConversationGetRequest,
-    ConversationListRequest, ConversationListResponse, ConversationSummary, EntityUpsertRequest,
-    EntityUpserted, EventEnvelope, FactUpsertRequest, FactUpserted, PreferencesQueryRequest,
+    ApiKeyCreateRequest, ApiKeyCreateResponse, ApiKeyListRequest, ApiKeyListResponse, ApiKeyRecord,
+    ApiKeyRevokeRequest, ApiKeyRevokeResponse, ApiKeyValidateRequest, ApiKeyValidateResponse,
+    AuditQueryRequest, AuditQueryResponse, AuditStoreRequest, BrainQueryRequest,
+    BrainQueryResponse, ContentStoreRequest, ContentStored, ConversationAppendRequest,
+    ConversationAppendResponse, ConversationCreateRequest, ConversationCreateResponse,
+    ConversationFindRequest, ConversationGetRequest, ConversationListRequest,
+    ConversationListResponse, ConversationSummary, EntityUpsertRequest, EntityUpserted,
+    EventEnvelope, FactUpsertRequest, FactUpserted, PreferencesQueryRequest,
     PreferencesQueryResponse, ScopeAssignRequest, ScopeAssigned, SkillGetRequest, SkillListRequest,
     SkillListResponse, SkillSaveRequest, SkillSaveResponse, SkillSearchRequest,
-    SkillSearchResponse, SkillSearchResult, UserPreference,
+    SkillSearchResponse, SkillSearchResult, UserCreateRequest, UserCreateResponse,
+    UserDeleteRequest, UserDeleteResponse, UserGetRequest, UserGetResponse, UserListRequest,
+    UserListResponse as UserListResp, UserPreference, UserRecord, UserUpdateRequest,
+    UserUpdateResponse,
 };
 use serde_json::Value;
 use tracing::{debug, error, info, warn};
@@ -139,7 +145,68 @@ impl BrainService {
             .await
             .context("subscribe agent.preferences.query")?;
 
-        info!("Brain service started — listening on brain.* and agent.preferences.query subjects");
+        // User management subjects
+        let mut user_create = self
+            .nats
+            .subscribe("brain.user.create")
+            .await
+            .context("subscribe brain.user.create")?;
+        let mut user_get = self
+            .nats
+            .subscribe("brain.user.get")
+            .await
+            .context("subscribe brain.user.get")?;
+        let mut user_list = self
+            .nats
+            .subscribe("brain.user.list")
+            .await
+            .context("subscribe brain.user.list")?;
+        let mut user_update = self
+            .nats
+            .subscribe("brain.user.update")
+            .await
+            .context("subscribe brain.user.update")?;
+        let mut user_delete = self
+            .nats
+            .subscribe("brain.user.delete")
+            .await
+            .context("subscribe brain.user.delete")?;
+
+        // Audit persistence subjects
+        let mut audit_store = self
+            .nats
+            .subscribe("brain.audit.store")
+            .await
+            .context("subscribe brain.audit.store")?;
+        let mut audit_query = self
+            .nats
+            .subscribe("brain.audit.query")
+            .await
+            .context("subscribe brain.audit.query")?;
+
+        // API key management subjects
+        let mut apikey_create = self
+            .nats
+            .subscribe("brain.apikey.create")
+            .await
+            .context("subscribe brain.apikey.create")?;
+        let mut apikey_list = self
+            .nats
+            .subscribe("brain.apikey.list")
+            .await
+            .context("subscribe brain.apikey.list")?;
+        let mut apikey_revoke = self
+            .nats
+            .subscribe("brain.apikey.revoke")
+            .await
+            .context("subscribe brain.apikey.revoke")?;
+        let mut apikey_validate = self
+            .nats
+            .subscribe("brain.apikey.validate")
+            .await
+            .context("subscribe brain.apikey.validate")?;
+
+        info!("Brain service started — listening on brain.*, user.*, audit.*, apikey.*, and agent.preferences.query subjects");
 
         loop {
             tokio::select! {
@@ -300,6 +367,107 @@ impl BrainService {
                         }
                     });
                 }
+                // User management handlers
+                Some(msg) = user_create.next() => {
+                    let arango = self.arango.clone();
+                    let nats = self.nats.clone();
+                    tokio::spawn(async move {
+                        if let Err(e) = handle_user_create(&arango, &nats, msg).await {
+                            error!(error = %e, "brain.user.create handler failed");
+                        }
+                    });
+                }
+                Some(msg) = user_get.next() => {
+                    let arango = self.arango.clone();
+                    let nats = self.nats.clone();
+                    tokio::spawn(async move {
+                        if let Err(e) = handle_user_get(&arango, &nats, msg).await {
+                            error!(error = %e, "brain.user.get handler failed");
+                        }
+                    });
+                }
+                Some(msg) = user_list.next() => {
+                    let arango = self.arango.clone();
+                    let nats = self.nats.clone();
+                    tokio::spawn(async move {
+                        if let Err(e) = handle_user_list(&arango, &nats, msg).await {
+                            error!(error = %e, "brain.user.list handler failed");
+                        }
+                    });
+                }
+                Some(msg) = user_update.next() => {
+                    let arango = self.arango.clone();
+                    let nats = self.nats.clone();
+                    tokio::spawn(async move {
+                        if let Err(e) = handle_user_update(&arango, &nats, msg).await {
+                            error!(error = %e, "brain.user.update handler failed");
+                        }
+                    });
+                }
+                Some(msg) = user_delete.next() => {
+                    let arango = self.arango.clone();
+                    let nats = self.nats.clone();
+                    tokio::spawn(async move {
+                        if let Err(e) = handle_user_delete(&arango, &nats, msg).await {
+                            error!(error = %e, "brain.user.delete handler failed");
+                        }
+                    });
+                }
+                // Audit persistence handlers
+                Some(msg) = audit_store.next() => {
+                    let arango = self.arango.clone();
+                    tokio::spawn(async move {
+                        if let Err(e) = handle_audit_store(&arango, msg).await {
+                            error!(error = %e, "brain.audit.store handler failed");
+                        }
+                    });
+                }
+                Some(msg) = audit_query.next() => {
+                    let arango = self.arango.clone();
+                    let nats = self.nats.clone();
+                    tokio::spawn(async move {
+                        if let Err(e) = handle_audit_query(&arango, &nats, msg).await {
+                            error!(error = %e, "brain.audit.query handler failed");
+                        }
+                    });
+                }
+                // API key handlers
+                Some(msg) = apikey_create.next() => {
+                    let arango = self.arango.clone();
+                    let nats = self.nats.clone();
+                    tokio::spawn(async move {
+                        if let Err(e) = handle_apikey_create(&arango, &nats, msg).await {
+                            error!(error = %e, "brain.apikey.create handler failed");
+                        }
+                    });
+                }
+                Some(msg) = apikey_list.next() => {
+                    let arango = self.arango.clone();
+                    let nats = self.nats.clone();
+                    tokio::spawn(async move {
+                        if let Err(e) = handle_apikey_list(&arango, &nats, msg).await {
+                            error!(error = %e, "brain.apikey.list handler failed");
+                        }
+                    });
+                }
+                Some(msg) = apikey_revoke.next() => {
+                    let arango = self.arango.clone();
+                    let nats = self.nats.clone();
+                    tokio::spawn(async move {
+                        if let Err(e) = handle_apikey_revoke(&arango, &nats, msg).await {
+                            error!(error = %e, "brain.apikey.revoke handler failed");
+                        }
+                    });
+                }
+                Some(msg) = apikey_validate.next() => {
+                    let arango = self.arango.clone();
+                    let nats = self.nats.clone();
+                    tokio::spawn(async move {
+                        if let Err(e) = handle_apikey_validate(&arango, &nats, msg).await {
+                            error!(error = %e, "brain.apikey.validate handler failed");
+                        }
+                    });
+                }
                 else => {
                     warn!("All brain subscriptions closed — exiting brain service");
                     break;
@@ -426,6 +594,7 @@ async fn handle_content_store(
         "timestamp": req.timestamp,
         "ingested_at": Utc::now(),
         "metadata": req.metadata,
+        "user_id": req.user_id,
     });
 
     arango
@@ -474,6 +643,7 @@ async fn handle_content_store(
         channel: req.channel,
         embedding_generated,
         timestamp: req.timestamp,
+        user_id: req.user_id.clone(),
     };
 
     publish_response(
@@ -1183,7 +1353,7 @@ async fn handle_vector_search(
                     FOR s IN 1..1 OUTBOUND doc._id scoped_to
                         RETURN s._key
                 )
-                FILTER LENGTH(doc_scopes) == 0 OR LENGTH(INTERSECTION(doc_scopes, @allowed_scopes)) > 0
+                FILTER LENGTH(INTERSECTION(doc_scopes, @allowed_scopes)) > 0
                 SORT distance DESC
                 LIMIT @limit
                 RETURN MERGE(doc, {{ _similarity: distance }})"#,
@@ -1310,7 +1480,7 @@ async fn handle_hybrid_search(
                     FOR s IN 1..1 OUTBOUND doc._id scoped_to
                         RETURN s._key
                 )
-                FILTER LENGTH(doc_scopes) == 0 OR LENGTH(INTERSECTION(doc_scopes, @allowed_scopes)) > 0
+                FILTER LENGTH(INTERSECTION(doc_scopes, @allowed_scopes)) > 0
                 SORT distance DESC
                 LIMIT @limit
                 RETURN {{ doc, distance, source: "vector_match" }}"#,
@@ -1563,6 +1733,7 @@ async fn handle_conversation_create(
         "messages": [],
         "metadata": &req.metadata,
         "state": "active",
+        "user_id": &req.user_id,
         "created_at": now.to_rfc3339(),
         "updated_at": now.to_rfc3339(),
     });
@@ -1572,13 +1743,29 @@ async fn handle_conversation_create(
         .await
         .context("insert conversation")?;
 
-    debug!(conversation_id = %conv_id, "Conversation created");
+    // Create scoped_to edge linking conversation to user's scope
+    if let Some(user_id) = &req.user_id {
+        let user_scope = format!("scopes/scope_{}", user_id);
+        let edge_data = serde_json::json!({
+            "relevance": 1.0,
+            "added_at": now,
+            "added_by": "kernel",
+        });
+        let from = format!("conversations/{}", conv_id);
+        let _ = arango
+            .insert_edge("scoped_to", &from, &user_scope, &edge_data)
+            .await;
+    }
+
+    debug!(conversation_id = %conv_id, user_id = ?req.user_id, "Conversation created");
 
     if let Some(reply) = msg.reply {
         let resp = ConversationCreateResponse {
             conversation_id: conv_id,
         };
-        let _ = nats.publish(reply, serde_json::to_vec(&resp)?.into()).await;
+        if let Err(e) = nats.publish(reply, serde_json::to_vec(&resp)?.into()).await {
+            warn!(error = %e, "Failed to publish reply");
+        }
     }
 
     Ok(())
@@ -1626,7 +1813,9 @@ async fn handle_conversation_append(
             success: count > 0,
             message_count: count,
         };
-        let _ = nats.publish(reply, serde_json::to_vec(&resp)?.into()).await;
+        if let Err(e) = nats.publish(reply, serde_json::to_vec(&resp)?.into()).await {
+            warn!(error = %e, "Failed to publish reply");
+        }
     }
 
     Ok(())
@@ -1648,30 +1837,63 @@ async fn handle_conversation_get(
     if let Some(reply) = msg.reply {
         let resp = match doc {
             Some(mut d) => {
-                // Trim messages if max_messages is set
-                if req.max_messages > 0 {
-                    if let Some(messages) = d.get("messages").and_then(|v| v.as_array()) {
-                        let len = messages.len();
-                        let skip = len.saturating_sub(req.max_messages as usize);
-                        let trimmed: Vec<_> = messages.iter().skip(skip).cloned().collect();
-                        d["messages"] = serde_json::Value::Array(trimmed);
+                // Enforce user ownership: if user_id is provided, reject cross-user reads
+                if let Some(ref expected_uid) = req.user_id {
+                    let doc_uid = d.get("user_id").and_then(|v| v.as_str()).unwrap_or("");
+                    if doc_uid != expected_uid {
+                        warn!(
+                            conversation_id = %req.conversation_id,
+                            expected_user = %expected_uid,
+                            actual_user = %doc_uid,
+                            "Cross-user conversation access denied"
+                        );
+                        serde_json::json!(null)
+                    } else {
+                        // Trim messages if max_messages is set
+                        if req.max_messages > 0 {
+                            if let Some(messages) = d.get("messages").and_then(|v| v.as_array()) {
+                                let len = messages.len();
+                                let skip = len.saturating_sub(req.max_messages as usize);
+                                let trimmed: Vec<_> = messages.iter().skip(skip).cloned().collect();
+                                d["messages"] = serde_json::Value::Array(trimmed);
+                            }
+                        }
+                        // Map _key to id
+                        if let Some(key) = d.get("_key").and_then(|v| v.as_str()) {
+                            d["id"] = serde_json::Value::String(key.to_string());
+                        }
+                        d
                     }
+                } else {
+                    // No user_id provided — warn and return (internal calls only)
+                    warn!(conversation_id = %req.conversation_id, "ConversationGetRequest missing user_id — cross-user isolation not enforced");
+                    // Trim messages if max_messages is set
+                    if req.max_messages > 0 {
+                        if let Some(messages) = d.get("messages").and_then(|v| v.as_array()) {
+                            let len = messages.len();
+                            let skip = len.saturating_sub(req.max_messages as usize);
+                            let trimmed: Vec<_> = messages.iter().skip(skip).cloned().collect();
+                            d["messages"] = serde_json::Value::Array(trimmed);
+                        }
+                    }
+                    // Map _key to id
+                    if let Some(key) = d.get("_key").and_then(|v| v.as_str()) {
+                        d["id"] = serde_json::Value::String(key.to_string());
+                    }
+                    d
                 }
-                // Map _key to id
-                if let Some(key) = d.get("_key").and_then(|v| v.as_str()) {
-                    d["id"] = serde_json::Value::String(key.to_string());
-                }
-                d
             }
             None => serde_json::json!(null),
         };
-        let _ = nats.publish(reply, serde_json::to_vec(&resp)?.into()).await;
+        if let Err(e) = nats.publish(reply, serde_json::to_vec(&resp)?.into()).await {
+            warn!(error = %e, "Failed to publish reply");
+        }
     }
 
     Ok(())
 }
 
-/// Find a conversation by platform metadata.
+/// Find a conversation by platform metadata, with optional user isolation.
 async fn handle_conversation_find(
     arango: &ArangoClient,
     nats: &async_nats::Client,
@@ -1680,25 +1902,43 @@ async fn handle_conversation_find(
     let req: ConversationFindRequest =
         serde_json::from_slice(&msg.payload).context("parse conversation.find")?;
 
-    let query = r#"
+    // Build query with optional user_id filter
+    let user_filter = if req.user_id.is_some() {
+        "FILTER conv.user_id == @user_id"
+    } else {
+        ""
+    };
+
+    let query = format!(
+        r#"
         FOR conv IN conversations
             FILTER conv.agent_id == @agent_id
             FILTER conv.platform == @platform
             FILTER conv.metadata[@meta_key] == @meta_value
             FILTER conv.state == "active"
+            {}
             SORT conv.updated_at DESC
             LIMIT 1
-            RETURN MERGE(conv, { id: conv._key })
-    "#;
+            RETURN MERGE(conv, {{ id: conv._key }})
+    "#,
+        user_filter
+    );
 
-    let bind_vars = serde_json::json!({
+    let mut bind_vars = serde_json::json!({
         "agent_id": &req.agent_id,
         "platform": &req.platform,
         "meta_key": &req.metadata_key,
         "meta_value": &req.metadata_value,
     });
 
-    let resp = arango.execute_aql(query, &bind_vars).await?;
+    if let Some(ref user_id) = req.user_id {
+        bind_vars
+            .as_object_mut()
+            .unwrap()
+            .insert("user_id".to_string(), serde_json::json!(user_id));
+    }
+
+    let resp = arango.execute_aql(&query, &bind_vars).await?;
     let result = resp
         .get("result")
         .and_then(|v| v.as_array())
@@ -1706,16 +1946,25 @@ async fn handle_conversation_find(
         .cloned()
         .unwrap_or(serde_json::json!(null));
 
+    if let Some(user_id) = &req.user_id {
+        debug!(%user_id, "Conversation find scoped to user");
+    } else {
+        warn!(agent_id = %req.agent_id, "ConversationFindRequest missing user_id — cross-user isolation not enforced");
+    }
+
     if let Some(reply) = msg.reply {
-        let _ = nats
+        if let Err(e) = nats
             .publish(reply, serde_json::to_vec(&result)?.into())
-            .await;
+            .await
+        {
+            warn!(error = %e, "Failed to publish reply");
+        }
     }
 
     Ok(())
 }
 
-/// List conversations for an agent.
+/// List conversations for an agent, with optional user isolation.
 async fn handle_conversation_list(
     arango: &ArangoClient,
     nats: &async_nats::Client,
@@ -1726,97 +1975,53 @@ async fn handle_conversation_list(
 
     let limit = if req.limit == 0 { 20 } else { req.limit };
 
-    let agent_id_empty = req.agent_id.is_empty();
+    // Build dynamic filters
+    let mut filters = Vec::new();
+    let mut bind_vars = serde_json::Map::new();
 
-    let (query, bind_vars) = if let Some(ref platform) = req.platform {
-        if agent_id_empty {
-            (
-                r#"
-                FOR conv IN conversations
-                    FILTER conv.platform == @platform
-                    SORT conv.updated_at DESC
-                    LIMIT @limit
-                    RETURN {
-                        id: conv._key,
-                        platform: conv.platform,
-                        participants: conv.participants,
-                        message_count: LENGTH(conv.messages),
-                        state: conv.state,
-                        updated_at: conv.updated_at
-                    }
-            "#,
-                serde_json::json!({
-                    "platform": platform,
-                    "limit": limit,
-                }),
-            )
-        } else {
-            (
-                r#"
-                FOR conv IN conversations
-                    FILTER conv.agent_id == @agent_id
-                    FILTER conv.platform == @platform
-                    SORT conv.updated_at DESC
-                    LIMIT @limit
-                    RETURN {
-                        id: conv._key,
-                        platform: conv.platform,
-                        participants: conv.participants,
-                        message_count: LENGTH(conv.messages),
-                        state: conv.state,
-                        updated_at: conv.updated_at
-                    }
-            "#,
-                serde_json::json!({
-                    "agent_id": &req.agent_id,
-                    "platform": platform,
-                    "limit": limit,
-                }),
-            )
-        }
-    } else if agent_id_empty {
-        (
-            r#"
-                FOR conv IN conversations
-                    SORT conv.updated_at DESC
-                    LIMIT @limit
-                    RETURN {
-                        id: conv._key,
-                        platform: conv.platform,
-                        participants: conv.participants,
-                        message_count: LENGTH(conv.messages),
-                        state: conv.state,
-                        updated_at: conv.updated_at
-                    }
-            "#,
-            serde_json::json!({
-                "limit": limit,
-            }),
-        )
+    if !req.agent_id.is_empty() {
+        filters.push("conv.agent_id == @agent_id");
+        bind_vars.insert("agent_id".to_string(), serde_json::json!(&req.agent_id));
+    }
+    if let Some(ref platform) = req.platform {
+        filters.push("conv.platform == @platform");
+        bind_vars.insert("platform".to_string(), serde_json::json!(platform));
+    }
+    // Per-user data isolation: filter by user_id when present
+    if let Some(ref user_id) = req.user_id {
+        filters.push("conv.user_id == @user_id");
+        bind_vars.insert("user_id".to_string(), serde_json::json!(user_id));
+    }
+
+    bind_vars.insert("limit".to_string(), serde_json::json!(limit));
+
+    let filter_clause = if filters.is_empty() {
+        String::new()
     } else {
-        (
-            r#"
-                FOR conv IN conversations
-                    FILTER conv.agent_id == @agent_id
-                    SORT conv.updated_at DESC
-                    LIMIT @limit
-                    RETURN {
-                        id: conv._key,
-                        platform: conv.platform,
-                        participants: conv.participants,
-                        message_count: LENGTH(conv.messages),
-                        state: conv.state,
-                        updated_at: conv.updated_at
-                    }
-            "#,
-            serde_json::json!({
-                "agent_id": &req.agent_id,
-                "limit": limit,
-            }),
-        )
+        format!("FILTER {}", filters.join(" AND "))
     };
 
-    let resp = arango.execute_aql(query, &bind_vars).await?;
+    let query = format!(
+        r#"
+            FOR conv IN conversations
+                {}
+                SORT conv.updated_at DESC
+                LIMIT @limit
+                RETURN {{
+                    id: conv._key,
+                    platform: conv.platform,
+                    participants: conv.participants,
+                    message_count: LENGTH(conv.messages),
+                    state: conv.state,
+                    updated_at: conv.updated_at
+                }}
+        "#,
+        filter_clause
+    );
+
+    let bind_vars = Value::Object(bind_vars);
+
+    let resp = arango.execute_aql(&query, &bind_vars).await?;
     let conversations: Vec<ConversationSummary> = resp
         .get("result")
         .and_then(|v| v.as_array())
@@ -1938,7 +2143,9 @@ async fn handle_skill_save(
     if req.description.trim().is_empty() || req.snippet.trim().is_empty() {
         if let Some(reply) = msg.reply {
             let resp = serde_json::json!({"error": "description and snippet are required"});
-            let _ = nats.publish(reply, serde_json::to_vec(&resp)?.into()).await;
+            if let Err(e) = nats.publish(reply, serde_json::to_vec(&resp)?.into()).await {
+                warn!(error = %e, "Failed to publish reply");
+            }
         }
         return Ok(());
     }
@@ -1954,7 +2161,9 @@ async fn handle_skill_save(
     {
         if let Some(reply) = msg.reply {
             let resp = serde_json::json!({"error": "Invalid skill ID: must be 1-254 alphanumeric, dash, or underscore"});
-            let _ = nats.publish(reply, serde_json::to_vec(&resp)?.into()).await;
+            if let Err(e) = nats.publish(reply, serde_json::to_vec(&resp)?.into()).await {
+                warn!(error = %e, "Failed to publish reply");
+            }
         }
         return Ok(());
     }
@@ -1999,7 +2208,9 @@ async fn handle_skill_save(
 
     if let Some(reply) = msg.reply {
         let resp = SkillSaveResponse { skill_id, is_new };
-        let _ = nats.publish(reply, serde_json::to_vec(&resp)?.into()).await;
+        if let Err(e) = nats.publish(reply, serde_json::to_vec(&resp)?.into()).await {
+            warn!(error = %e, "Failed to publish reply");
+        }
     }
 
     Ok(())
@@ -2017,7 +2228,9 @@ async fn handle_skill_get(
 
     if let Some(reply) = msg.reply {
         let resp = doc.unwrap_or(serde_json::json!(null));
-        let _ = nats.publish(reply, serde_json::to_vec(&resp)?.into()).await;
+        if let Err(e) = nats.publish(reply, serde_json::to_vec(&resp)?.into()).await {
+            warn!(error = %e, "Failed to publish reply");
+        }
     }
 
     Ok(())
@@ -2115,7 +2328,9 @@ async fn handle_skill_delete(
                 serde_json::json!({ "success": false, "error": e.to_string() })
             }
         };
-        let _ = nats.publish(reply, serde_json::to_vec(&resp)?.into()).await;
+        if let Err(e) = nats.publish(reply, serde_json::to_vec(&resp)?.into()).await {
+            warn!(error = %e, "Failed to publish reply");
+        }
     }
 
     Ok(())
@@ -2231,8 +2446,800 @@ async fn handle_preferences_query(
 
     if let Some(reply) = msg.reply {
         let resp_bytes = serde_json::to_vec(&response)?;
-        let _ = nats.publish(reply, resp_bytes.into()).await;
+        if let Err(e) = nats.publish(reply, resp_bytes.into()).await {
+            warn!(error = %e, "Failed to publish reply");
+        }
     }
 
     Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// User Management Handlers
+// ---------------------------------------------------------------------------
+
+/// Handle `brain.user.create` — create a new user.
+async fn handle_user_create(
+    arango: &ArangoClient,
+    nats: &async_nats::Client,
+    msg: async_nats::Message,
+) -> Result<()> {
+    let req: UserCreateRequest =
+        serde_json::from_slice(&msg.payload).context("failed to parse UserCreateRequest")?;
+    debug!(username = %req.username, "handling brain.user.create");
+
+    let now = Utc::now();
+    let user_id = format!(
+        "user_{}",
+        &ulid::Ulid::new().to_string().to_lowercase()[..12]
+    );
+
+    // Check for duplicate username
+    let check_query = r#"
+        FOR u IN users
+            FILTER u.username == @username
+            LIMIT 1
+            RETURN u._key
+    "#;
+    let check_result = arango
+        .execute_aql(
+            check_query,
+            &serde_json::json!({ "username": &req.username }),
+        )
+        .await
+        .context("failed to check for existing user")?;
+
+    let existing = check_result
+        .get("result")
+        .and_then(|v| v.as_array())
+        .map(|a| !a.is_empty())
+        .unwrap_or(false);
+
+    if existing {
+        let response = UserCreateResponse {
+            user_id: String::new(),
+            username: req.username,
+            role: req.role,
+            created: false,
+            error: Some("username already exists".to_string()),
+        };
+        if let Some(reply) = msg.reply {
+            let resp_bytes = serde_json::to_vec(&response)?;
+            if let Err(e) = nats.publish(reply, resp_bytes.into()).await {
+                warn!(error = %e, "Failed to publish reply");
+            }
+        }
+        return Ok(());
+    }
+
+    // Create the user scope
+    let user_scope_key = format!("scope_{}", user_id);
+    let scope_doc = serde_json::json!({
+        "_key": user_scope_key,
+        "name": format!("{}'s scope", req.username),
+        "type": "user",
+        "description": format!("Private scope for user {}", req.username),
+        "parent_scope": "scope_root",
+        "access_rules": {
+            "cross_scope_read": [],
+            "cross_scope_write": []
+        },
+        "status": "active",
+        "created_at": now,
+    });
+    let _ = arango.insert_document("scopes", &scope_doc).await;
+
+    let doc = serde_json::json!({
+        "_key": user_id,
+        "username": req.username,
+        "password_hash": req.password_hash,
+        "email": req.email,
+        "display_name": req.display_name,
+        "role": req.role,
+        "status": "active",
+        "scopes": [user_scope_key, "scope_root"],
+        "created_at": now,
+        "updated_at": now,
+    });
+
+    if let Err(e) = arango.insert_document("users", &doc).await {
+        // Handle unique constraint violations (duplicate username/email) gracefully
+        warn!(error = %e, username = %req.username, "User insert failed (likely unique constraint)");
+        let response = UserCreateResponse {
+            user_id: String::new(),
+            username: req.username,
+            role: req.role,
+            created: false,
+            error: Some("username or email already exists".to_string()),
+        };
+        if let Some(reply) = msg.reply {
+            let resp_bytes = serde_json::to_vec(&response)?;
+            if let Err(e) = nats.publish(reply, resp_bytes.into()).await {
+                warn!(error = %e, "Failed to publish reply");
+            }
+        }
+        return Ok(());
+    }
+
+    let response = UserCreateResponse {
+        user_id: user_id.clone(),
+        username: req.username,
+        role: req.role,
+        created: true,
+        error: None,
+    };
+
+    if let Some(reply) = msg.reply {
+        let resp_bytes = serde_json::to_vec(&response)?;
+        if let Err(e) = nats.publish(reply, resp_bytes.into()).await {
+            warn!(error = %e, "Failed to publish reply");
+        }
+    }
+
+    info!(user_id, "user created");
+    Ok(())
+}
+
+/// Handle `brain.user.get` — get user by ID or username.
+async fn handle_user_get(
+    arango: &ArangoClient,
+    nats: &async_nats::Client,
+    msg: async_nats::Message,
+) -> Result<()> {
+    let req: UserGetRequest =
+        serde_json::from_slice(&msg.payload).context("failed to parse UserGetRequest")?;
+
+    let result = if let Some(user_id) = &req.user_id {
+        // Get by ID and verify not deleted
+        let doc = arango.get_document("users", user_id).await?;
+        doc.filter(|d| d.get("status").and_then(|v| v.as_str()) != Some("deleted"))
+    } else if let Some(username) = &req.username {
+        let query = r#"
+            FOR u IN users
+                FILTER u.username == @username
+                FILTER u.status != "deleted"
+                LIMIT 1
+                RETURN u
+        "#;
+        let result = arango
+            .execute_aql(query, &serde_json::json!({ "username": username }))
+            .await?;
+        result
+            .get("result")
+            .and_then(|v| v.as_array())
+            .and_then(|a| a.first())
+            .cloned()
+    } else {
+        None
+    };
+
+    let response = if let Some(doc) = result {
+        UserGetResponse {
+            found: true,
+            user: Some(parse_user_record(&doc)),
+            error: None,
+        }
+    } else {
+        UserGetResponse {
+            found: false,
+            user: None,
+            error: None,
+        }
+    };
+
+    if let Some(reply) = msg.reply {
+        let resp_bytes = serde_json::to_vec(&response)?;
+        if let Err(e) = nats.publish(reply, resp_bytes.into()).await {
+            warn!(error = %e, "Failed to publish reply");
+        }
+    }
+
+    Ok(())
+}
+
+/// Handle `brain.user.list` — list users (admin endpoint).
+async fn handle_user_list(
+    arango: &ArangoClient,
+    nats: &async_nats::Client,
+    msg: async_nats::Message,
+) -> Result<()> {
+    let req: UserListRequest =
+        serde_json::from_slice(&msg.payload).context("failed to parse UserListRequest")?;
+
+    let limit = req.limit.unwrap_or(100);
+    let offset = req.offset.unwrap_or(0);
+
+    let query = if let Some(_role) = &req.role_filter {
+        r#"
+            LET total = LENGTH(FOR u IN users FILTER u.role == @role AND u.status != "deleted" RETURN 1)
+            LET users = (FOR u IN users FILTER u.role == @role AND u.status != "deleted" SORT u.created_at DESC LIMIT @offset, @limit RETURN u)
+            RETURN { total: total, users: users }
+        "#
+        .to_string()
+    } else {
+        r#"
+            LET total = LENGTH(FOR u IN users FILTER u.status != "deleted" RETURN 1)
+            LET users = (FOR u IN users FILTER u.status != "deleted" SORT u.created_at DESC LIMIT @offset, @limit RETURN u)
+            RETURN { total: total, users: users }
+        "#
+        .to_string()
+    };
+
+    let mut bind_vars = serde_json::json!({
+        "limit": limit,
+        "offset": offset,
+    });
+
+    if let Some(role) = &req.role_filter {
+        bind_vars
+            .as_object_mut()
+            .unwrap()
+            .insert("role".to_string(), serde_json::json!(role));
+    }
+
+    let result = arango.execute_aql(&query, &bind_vars).await?;
+
+    let (users, total) = if let Some(arr) = result.get("result").and_then(|v| v.as_array()) {
+        if let Some(first) = arr.first() {
+            let total = first.get("total").and_then(|v| v.as_u64()).unwrap_or(0) as u32;
+            let users = first
+                .get("users")
+                .and_then(|v| v.as_array())
+                .map(|a| a.iter().map(parse_user_record).collect())
+                .unwrap_or_default();
+            (users, total)
+        } else {
+            (Vec::new(), 0)
+        }
+    } else {
+        (Vec::new(), 0)
+    };
+
+    let response = UserListResp { users, total };
+
+    if let Some(reply) = msg.reply {
+        let resp_bytes = serde_json::to_vec(&response)?;
+        if let Err(e) = nats.publish(reply, resp_bytes.into()).await {
+            warn!(error = %e, "Failed to publish reply");
+        }
+    }
+
+    Ok(())
+}
+
+/// Handle `brain.user.update` — update user fields.
+async fn handle_user_update(
+    arango: &ArangoClient,
+    nats: &async_nats::Client,
+    msg: async_nats::Message,
+) -> Result<()> {
+    let req: UserUpdateRequest =
+        serde_json::from_slice(&msg.payload).context("failed to parse UserUpdateRequest")?;
+    debug!(user_id = %req.user_id, "handling brain.user.update");
+
+    let mut update_fields = serde_json::Map::new();
+    update_fields.insert("updated_at".to_string(), serde_json::json!(Utc::now()));
+
+    if let Some(role) = &req.role {
+        update_fields.insert("role".to_string(), serde_json::json!(role));
+    }
+    if let Some(email) = &req.email {
+        update_fields.insert("email".to_string(), serde_json::json!(email));
+    }
+    if let Some(display_name) = &req.display_name {
+        update_fields.insert("display_name".to_string(), serde_json::json!(display_name));
+    }
+    if let Some(status) = &req.status {
+        update_fields.insert("status".to_string(), serde_json::json!(status));
+    }
+    if let Some(password_hash) = &req.password_hash {
+        update_fields.insert(
+            "password_hash".to_string(),
+            serde_json::json!(password_hash),
+        );
+    }
+    if let Some(scopes) = &req.scopes {
+        update_fields.insert("scopes".to_string(), serde_json::json!(scopes));
+    }
+
+    let update_doc = Value::Object(update_fields);
+
+    let query = r#"
+        UPDATE { _key: @user_id } WITH @update IN users
+        RETURN NEW
+    "#;
+    let result = arango
+        .execute_aql(
+            query,
+            &serde_json::json!({
+                "user_id": &req.user_id,
+                "update": &update_doc,
+            }),
+        )
+        .await;
+
+    let response = match result {
+        Ok(_) => UserUpdateResponse {
+            success: true,
+            error: None,
+        },
+        Err(e) => UserUpdateResponse {
+            success: false,
+            error: Some(e.to_string()),
+        },
+    };
+
+    if let Some(reply) = msg.reply {
+        let resp_bytes = serde_json::to_vec(&response)?;
+        if let Err(e) = nats.publish(reply, resp_bytes.into()).await {
+            warn!(error = %e, "Failed to publish reply");
+        }
+    }
+
+    Ok(())
+}
+
+/// Handle `brain.user.delete` — delete a user.
+async fn handle_user_delete(
+    arango: &ArangoClient,
+    nats: &async_nats::Client,
+    msg: async_nats::Message,
+) -> Result<()> {
+    let req: UserDeleteRequest =
+        serde_json::from_slice(&msg.payload).context("failed to parse UserDeleteRequest")?;
+    debug!(user_id = %req.user_id, "handling brain.user.delete");
+
+    // Soft-delete by setting status to "deleted".
+    // Note: this does not cascade — the user's content, entities, conversations, and API keys
+    // remain in the DB and are still readable by admins. Cascade soft-delete (tombstoning all
+    // user-owned data) is a planned improvement tracked in a follow-up issue.
+    let query = r#"
+        UPDATE { _key: @user_id } WITH { status: "deleted", updated_at: @now } IN users
+        RETURN NEW
+    "#;
+    let result = arango
+        .execute_aql(
+            query,
+            &serde_json::json!({
+                "user_id": &req.user_id,
+                "now": Utc::now(),
+            }),
+        )
+        .await;
+
+    let response = match result {
+        Ok(_) => UserDeleteResponse {
+            success: true,
+            error: None,
+        },
+        Err(e) => UserDeleteResponse {
+            success: false,
+            error: Some(e.to_string()),
+        },
+    };
+
+    if let Some(reply) = msg.reply {
+        let resp_bytes = serde_json::to_vec(&response)?;
+        if let Err(e) = nats.publish(reply, resp_bytes.into()).await {
+            warn!(error = %e, "Failed to publish reply");
+        }
+    }
+
+    info!(user_id = %req.user_id, "user deleted (soft)");
+    Ok(())
+}
+
+/// Parse a user document from ArangoDB into a UserRecord.
+fn parse_user_record(doc: &Value) -> UserRecord {
+    UserRecord {
+        user_id: doc
+            .get("_key")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_string(),
+        username: doc
+            .get("username")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_string(),
+        password_hash: doc
+            .get("password_hash")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_string(),
+        email: doc.get("email").and_then(|v| v.as_str()).map(String::from),
+        display_name: doc
+            .get("display_name")
+            .and_then(|v| v.as_str())
+            .map(String::from),
+        role: doc
+            .get("role")
+            .and_then(|v| v.as_str())
+            .unwrap_or("user")
+            .to_string(),
+        status: doc
+            .get("status")
+            .and_then(|v| v.as_str())
+            .unwrap_or("active")
+            .to_string(),
+        scopes: doc
+            .get("scopes")
+            .and_then(|v| v.as_array())
+            .map(|a| {
+                a.iter()
+                    .filter_map(|v| v.as_str().map(String::from))
+                    .collect()
+            })
+            .unwrap_or_default(),
+        created_at: doc
+            .get("created_at")
+            .and_then(|v| v.as_str())
+            .and_then(|s| s.parse().ok())
+            .unwrap_or_else(Utc::now),
+        updated_at: doc
+            .get("updated_at")
+            .and_then(|v| v.as_str())
+            .and_then(|s| s.parse().ok())
+            .unwrap_or_else(Utc::now),
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Audit Persistence Handlers
+// ---------------------------------------------------------------------------
+
+/// Handle `brain.audit.store` — persist an audit entry to ArangoDB (fire-and-forget).
+async fn handle_audit_store(arango: &ArangoClient, msg: async_nats::Message) -> Result<()> {
+    let req: AuditStoreRequest =
+        serde_json::from_slice(&msg.payload).context("failed to parse AuditStoreRequest")?;
+
+    let key = format!(
+        "audit_{}",
+        &ulid::Ulid::new().to_string().to_lowercase()[..12]
+    );
+    let doc = serde_json::json!({
+        "_key": key,
+        "timestamp": req.entry.timestamp,
+        "action": req.entry.action,
+        "subject": req.entry.subject,
+        "resource": req.entry.resource,
+        "method": req.entry.method,
+        "path": req.entry.path,
+        "status": req.entry.status,
+        "details": req.entry.details,
+        "user_id": req.entry.user_id,
+    });
+
+    arango
+        .insert_document("audit_log", &doc)
+        .await
+        .context("failed to insert audit entry")?;
+
+    debug!(key, "audit entry persisted");
+    Ok(())
+}
+
+/// Handle `brain.audit.query` — query audit logs from ArangoDB (request/reply).
+async fn handle_audit_query(
+    arango: &ArangoClient,
+    nats: &async_nats::Client,
+    msg: async_nats::Message,
+) -> Result<()> {
+    let req: AuditQueryRequest =
+        serde_json::from_slice(&msg.payload).context("failed to parse AuditQueryRequest")?;
+
+    let limit = req.limit.unwrap_or(50);
+
+    let mut filters = Vec::new();
+    let mut bind_vars = serde_json::Map::new();
+    bind_vars.insert("limit".to_string(), serde_json::json!(limit));
+
+    if let Some(since) = &req.since {
+        filters.push("a.timestamp >= @since");
+        bind_vars.insert("since".to_string(), serde_json::json!(since));
+    }
+    if let Some(action) = &req.action_filter {
+        filters.push("a.action == @action");
+        bind_vars.insert("action".to_string(), serde_json::json!(action));
+    }
+    if let Some(user_id) = &req.user_id_filter {
+        filters.push("a.user_id == @user_id");
+        bind_vars.insert("user_id".to_string(), serde_json::json!(user_id));
+    }
+
+    let filter_clause = if filters.is_empty() {
+        String::new()
+    } else {
+        format!("FILTER {}", filters.join(" AND "))
+    };
+
+    let query = format!(
+        r#"
+        LET total = LENGTH(FOR a IN audit_log {} RETURN 1)
+        LET entries = (FOR a IN audit_log {} SORT a.timestamp DESC LIMIT @limit RETURN a)
+        RETURN {{ total: total, entries: entries }}
+    "#,
+        filter_clause, filter_clause
+    );
+
+    let result = arango
+        .execute_aql(&query, &Value::Object(bind_vars))
+        .await?;
+
+    let (entries, total) = if let Some(arr) = result.get("result").and_then(|v| v.as_array()) {
+        if let Some(first) = arr.first() {
+            let total = first.get("total").and_then(|v| v.as_u64()).unwrap_or(0) as u32;
+            let entries = first
+                .get("entries")
+                .and_then(|v| v.as_array())
+                .map(|a| {
+                    a.iter()
+                        .filter_map(|v| serde_json::from_value(v.clone()).ok())
+                        .collect()
+                })
+                .unwrap_or_default();
+            (entries, total)
+        } else {
+            (Vec::new(), 0)
+        }
+    } else {
+        (Vec::new(), 0)
+    };
+
+    let response = AuditQueryResponse { entries, total };
+
+    if let Some(reply) = msg.reply {
+        let resp_bytes = serde_json::to_vec(&response)?;
+        if let Err(e) = nats.publish(reply, resp_bytes.into()).await {
+            warn!(error = %e, "Failed to publish reply");
+        }
+    }
+
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// API Key Handlers
+// ---------------------------------------------------------------------------
+
+/// Handle `brain.apikey.create` — create a user-scoped API key.
+async fn handle_apikey_create(
+    arango: &ArangoClient,
+    nats: &async_nats::Client,
+    msg: async_nats::Message,
+) -> Result<()> {
+    let req: ApiKeyCreateRequest =
+        serde_json::from_slice(&msg.payload).context("failed to parse ApiKeyCreateRequest")?;
+
+    let now = Utc::now();
+    let key_id = format!(
+        "apikey_{}",
+        &ulid::Ulid::new().to_string().to_lowercase()[..12]
+    );
+
+    let doc = serde_json::json!({
+        "_key": key_id,
+        "user_id": req.user_id,
+        "name": req.name,
+        "key_hash": req.key_hash,
+        "scopes": req.scopes,
+        "created_at": now,
+        "expires_at": req.expires_at,
+        "last_used": null,
+        "revoked": false,
+    });
+
+    let result = arango.insert_document("api_keys", &doc).await;
+
+    let response = match result {
+        Ok(_) => ApiKeyCreateResponse {
+            key_id: key_id.clone(),
+            created: true,
+            error: None,
+        },
+        Err(e) => ApiKeyCreateResponse {
+            key_id: String::new(),
+            created: false,
+            error: Some(e.to_string()),
+        },
+    };
+
+    if let Some(reply) = msg.reply {
+        let resp_bytes = serde_json::to_vec(&response)?;
+        if let Err(e) = nats.publish(reply, resp_bytes.into()).await {
+            warn!(error = %e, "Failed to publish reply");
+        }
+    }
+
+    Ok(())
+}
+
+/// Handle `brain.apikey.list` — list API keys for a user.
+async fn handle_apikey_list(
+    arango: &ArangoClient,
+    nats: &async_nats::Client,
+    msg: async_nats::Message,
+) -> Result<()> {
+    let req: ApiKeyListRequest =
+        serde_json::from_slice(&msg.payload).context("failed to parse ApiKeyListRequest")?;
+
+    let query = r#"
+        FOR k IN api_keys
+            FILTER k.user_id == @user_id
+            SORT k.created_at DESC
+            RETURN k
+    "#;
+    let result = arango
+        .execute_aql(query, &serde_json::json!({ "user_id": &req.user_id }))
+        .await?;
+
+    let keys: Vec<ApiKeyRecord> = result
+        .get("result")
+        .and_then(|v| v.as_array())
+        .map(|a| a.iter().filter_map(parse_apikey_record).collect())
+        .unwrap_or_default();
+
+    let response = ApiKeyListResponse { keys };
+
+    if let Some(reply) = msg.reply {
+        let resp_bytes = serde_json::to_vec(&response)?;
+        if let Err(e) = nats.publish(reply, resp_bytes.into()).await {
+            warn!(error = %e, "Failed to publish reply");
+        }
+    }
+
+    Ok(())
+}
+
+/// Handle `brain.apikey.revoke` — revoke an API key.
+async fn handle_apikey_revoke(
+    arango: &ArangoClient,
+    nats: &async_nats::Client,
+    msg: async_nats::Message,
+) -> Result<()> {
+    let req: ApiKeyRevokeRequest =
+        serde_json::from_slice(&msg.payload).context("failed to parse ApiKeyRevokeRequest")?;
+
+    let query = r#"
+        UPDATE { _key: @key_id } WITH { revoked: true } IN api_keys
+        RETURN NEW
+    "#;
+    let result = arango
+        .execute_aql(
+            query,
+            &serde_json::json!({
+                "key_id": &req.key_id,
+            }),
+        )
+        .await;
+
+    let response = match result {
+        Ok(_) => ApiKeyRevokeResponse {
+            success: true,
+            error: None,
+        },
+        Err(e) => ApiKeyRevokeResponse {
+            success: false,
+            error: Some(e.to_string()),
+        },
+    };
+
+    if let Some(reply) = msg.reply {
+        let resp_bytes = serde_json::to_vec(&response)?;
+        if let Err(e) = nats.publish(reply, resp_bytes.into()).await {
+            warn!(error = %e, "Failed to publish reply");
+        }
+    }
+
+    Ok(())
+}
+
+/// Handle `brain.apikey.validate` — validate an API key by hash.
+async fn handle_apikey_validate(
+    arango: &ArangoClient,
+    nats: &async_nats::Client,
+    msg: async_nats::Message,
+) -> Result<()> {
+    let req: ApiKeyValidateRequest =
+        serde_json::from_slice(&msg.payload).context("failed to parse ApiKeyValidateRequest")?;
+
+    let query = r#"
+        FOR k IN api_keys
+            FILTER k.key_hash == @key_hash
+               AND k.revoked == false
+            LIMIT 1
+            RETURN k
+    "#;
+    let result = arango
+        .execute_aql(query, &serde_json::json!({ "key_hash": &req.key_hash }))
+        .await?;
+
+    let key_record = result
+        .get("result")
+        .and_then(|v| v.as_array())
+        .and_then(|a| a.first())
+        .and_then(parse_apikey_record);
+
+    // Check expiration
+    let valid = key_record
+        .as_ref()
+        .map(|k| k.expires_at.map(|exp| exp > Utc::now()).unwrap_or(true))
+        .unwrap_or(false);
+
+    // Update last_used timestamp if valid
+    if valid {
+        if let Some(key) = &key_record {
+            let _ = arango
+                .execute_aql(
+                    "UPDATE { _key: @key_id } WITH { last_used: @now } IN api_keys",
+                    &serde_json::json!({
+                        "key_id": &key.key_id,
+                        "now": Utc::now(),
+                    }),
+                )
+                .await;
+        }
+    }
+
+    let response = ApiKeyValidateResponse {
+        valid,
+        key: if valid { key_record } else { None },
+    };
+
+    if let Some(reply) = msg.reply {
+        let resp_bytes = serde_json::to_vec(&response)?;
+        if let Err(e) = nats.publish(reply, resp_bytes.into()).await {
+            warn!(error = %e, "Failed to publish reply");
+        }
+    }
+
+    Ok(())
+}
+
+/// Parse an API key document from ArangoDB.
+fn parse_apikey_record(doc: &Value) -> Option<ApiKeyRecord> {
+    Some(ApiKeyRecord {
+        key_id: doc.get("_key")?.as_str()?.to_string(),
+        user_id: doc
+            .get("user_id")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_string(),
+        name: doc
+            .get("name")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_string(),
+        key_hash: doc
+            .get("key_hash")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_string(),
+        scopes: doc
+            .get("scopes")
+            .and_then(|v| v.as_array())
+            .map(|a| {
+                a.iter()
+                    .filter_map(|v| v.as_str().map(String::from))
+                    .collect()
+            })
+            .unwrap_or_default(),
+        created_at: doc
+            .get("created_at")
+            .and_then(|v| v.as_str())
+            .and_then(|s| s.parse().ok())
+            .unwrap_or_else(Utc::now),
+        expires_at: doc
+            .get("expires_at")
+            .and_then(|v| v.as_str())
+            .and_then(|s| s.parse().ok()),
+        last_used: doc
+            .get("last_used")
+            .and_then(|v| v.as_str())
+            .and_then(|s| s.parse().ok()),
+        revoked: doc
+            .get("revoked")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false),
+    })
 }

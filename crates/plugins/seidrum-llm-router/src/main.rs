@@ -417,6 +417,7 @@ async fn handle_message(
         model_preferences: vec![],
         correlation_id: correlation_id.clone(),
         scope: scope.clone(),
+        user_id: None,
     };
 
     let request_bytes = serde_json::to_vec(&unified_request)?;
