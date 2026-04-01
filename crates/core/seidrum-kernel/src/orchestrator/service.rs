@@ -820,7 +820,7 @@ mod tests {
     #[tokio::test]
     async fn load_agents_from_directory() {
         let engine = WorkflowEngine::new();
-        let agents_dir = format!("{}/../../agents/", env!("CARGO_MANIFEST_DIR"));
+        let agents_dir = format!("{}/../../../agents/", env!("CARGO_MANIFEST_DIR"));
         let result = engine.load_agents(&agents_dir).await;
         assert!(result.is_ok());
         let count = result.unwrap();
@@ -831,10 +831,10 @@ mod tests {
     async fn load_workflows_from_directory() {
         let engine = WorkflowEngine::new();
         // Load agents first so workflow references resolve.
-        let agents_dir = format!("{}/../../agents/", env!("CARGO_MANIFEST_DIR"));
+        let agents_dir = format!("{}/../../../agents/", env!("CARGO_MANIFEST_DIR"));
         engine.load_agents(&agents_dir).await.unwrap();
 
-        let workflows_dir = format!("{}/../../workflows/", env!("CARGO_MANIFEST_DIR"));
+        let workflows_dir = format!("{}/../../../workflows/", env!("CARGO_MANIFEST_DIR"));
         let result = engine.load_workflows(&workflows_dir).await;
         assert!(result.is_ok());
         let count = result.unwrap();
@@ -844,10 +844,10 @@ mod tests {
     #[tokio::test]
     async fn workflow_resolves_agent_refs() {
         let engine = WorkflowEngine::new();
-        let agents_dir = format!("{}/../../agents/", env!("CARGO_MANIFEST_DIR"));
+        let agents_dir = format!("{}/../../../agents/", env!("CARGO_MANIFEST_DIR"));
         engine.load_agents(&agents_dir).await.unwrap();
 
-        let workflows_dir = format!("{}/../../workflows/", env!("CARGO_MANIFEST_DIR"));
+        let workflows_dir = format!("{}/../../../workflows/", env!("CARGO_MANIFEST_DIR"));
         engine.load_workflows(&workflows_dir).await.unwrap();
 
         let workflows = engine.list_workflows().await;
@@ -864,7 +864,7 @@ mod tests {
     #[tokio::test]
     async fn get_agent_returns_v2_definition() {
         let engine = WorkflowEngine::new();
-        let agents_dir = format!("{}/../../agents/", env!("CARGO_MANIFEST_DIR"));
+        let agents_dir = format!("{}/../../../agents/", env!("CARGO_MANIFEST_DIR"));
         engine.load_agents(&agents_dir).await.unwrap();
 
         let agent = engine.get_agent("personal-assistant").await;

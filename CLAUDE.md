@@ -39,7 +39,7 @@ cargo run -p seidrum-telegram                # Run a specific plugin
 6. Response-formatter formats per channel → publishes `channel.{platform}.outbound`
 7. Channel plugin delivers response to user
 
-### Kernel Services (crates/seidrum-kernel)
+### Kernel Services (crates/core/seidrum-kernel)
 
 The kernel is a single binary that owns all shared state. Services run as concurrent tokio tasks:
 
@@ -64,7 +64,7 @@ Every plugin follows the same pattern (see any `crates/plugins/*/src/main.rs`):
 
 Plugins never access ArangoDB directly — all brain operations go through NATS request/reply to kernel.
 
-### Common Library (crates/seidrum-common)
+### Common Library (crates/core/seidrum-common)
 
 - `events.rs`: All event structs (`EventEnvelope`, `ChannelInbound`, `LlmRequest`, `ContentStoreRequest`, etc.)
 - `config.rs`: Config loading (platform.yaml, agents, workflows)

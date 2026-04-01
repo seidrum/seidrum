@@ -1,7 +1,9 @@
 [workspace]
 members = [
-    "crates/seidrum-common",
-    "crates/seidrum-kernel",
+    "crates/core/seidrum-common",
+    "crates/core/seidrum-kernel",
+    "crates/core/seidrum-daemon",
+    "crates/core/seidrum-e2e",
     "crates/plugins/seidrum-cli",
     "crates/plugins/seidrum-llm-router",
     "crates/plugins/seidrum-response-formatter",
@@ -25,7 +27,5 @@ members = [
     "crates/plugins/seidrum-claude-code",
     "crates/plugins/seidrum-api-gateway",
     "crates/plugins/seidrum-feedback-extractor",
-    "crates/seidrum-daemon",
-    "crates/seidrum-e2e",
 ]
 resolver = "2"

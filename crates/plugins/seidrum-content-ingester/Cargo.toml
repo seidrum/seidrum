@@ -8,7 +8,7 @@ name = "seidrum-content-ingester"
 path = "src/main.rs"
 
 [dependencies]
-seidrum-common = { path = "../../seidrum-common" }
+seidrum-common = { path = "../../core/seidrum-common" }
 tokio = { version = "1", features = ["full"] }
 async-nats = "0.38"
 serde = { version = "1", features = ["derive"] }
