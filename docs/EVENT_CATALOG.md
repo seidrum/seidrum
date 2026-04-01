@@ -833,3 +833,328 @@ Delete a skill by ID.
 // Uses SkillGetRequest { skill_id: String }
 // Returns { success: bool, skill_id: String }
 ```
+
+---
+
+## User Management Events
+
+### `brain.user.create` (request/reply)
+
+Create a new user account.
+
+```rust
+pub struct UserCreateRequest {
+    pub username: String,
+    pub password_hash: String,      // Argon2id hash (hashed by caller)
+    pub email: Option<String>,
+    pub display_name: Option<String>,
+    pub role: String,               // "admin" | "user" | "readonly"
+}
+
+pub struct UserCreateResponse {
+    pub user_id: String,
+    pub username: String,
+    pub role: String,
+    pub created: bool,
+    pub error: Option<String>,
+}
+```
+
+### `brain.user.get` (request/reply)
+
+Get a user by ID or username. Exactly one of the fields should be set.
+
+```rust
+pub struct UserGetRequest {
+    pub user_id: Option<String>,
+    pub username: Option<String>,
+}
+
+pub struct UserGetResponse {
+    pub found: bool,
+    pub user: Option<UserRecord>,
+    pub error: Option<String>,
+}
+
+pub struct UserRecord {
+    pub user_id: String,
+    pub username: String,
+    pub password_hash: String,
+    pub email: Option<String>,
+    pub display_name: Option<String>,
+    pub role: String,
+    pub status: String,             // "active" | "suspended" | "deleted"
+    pub scopes: Vec<String>,
+    pub created_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
+}
+```
+
+### `brain.user.list` (request/reply)
+
+List users with optional filtering.
+
+```rust
+pub struct UserListRequest {
+    pub limit: Option<u32>,
+    pub offset: Option<u32>,
+    pub role_filter: Option<String>,
+}
+
+pub struct UserListResponse {
+    pub users: Vec<UserRecord>,
+    pub total: u32,
+}
+```
+
+### `brain.user.update` (request/reply)
+
+Update user fields. All fields except `user_id` are optional — only provided fields are updated.
+
+```rust
+pub struct UserUpdateRequest {
+    pub user_id: String,
+    pub role: Option<String>,
+    pub email: Option<String>,
+    pub display_name: Option<String>,
+    pub status: Option<String>,
+    pub password_hash: Option<String>,
+    pub scopes: Option<Vec<String>>,
+}
+
+pub struct UserUpdateResponse {
+    pub success: bool,
+    pub error: Option<String>,
+}
+```
+
+### `brain.user.delete` (request/reply)
+
+Soft-delete a user by setting status to `"deleted"`.
+
+```rust
+pub struct UserDeleteRequest {
+    pub user_id: String,
+}
+
+pub struct UserDeleteResponse {
+    pub success: bool,
+    pub error: Option<String>,
+}
+```
+
+---
+
+## Audit Events
+
+### `brain.audit.store` (fire-and-forget)
+
+Persist an audit entry to ArangoDB. Published by the API Gateway on every
+security-relevant event.
+
+```rust
+pub struct AuditStoreRequest {
+    pub entry: AuditEntryRecord,
+}
+
+pub struct AuditEntryRecord {
+    pub timestamp: DateTime<Utc>,
+    pub action: String,             // e.g., "auth.login", "rate_limit.exceeded"
+    pub subject: String,            // who (username or "api-key")
+    pub resource: String,           // what was affected
+    pub method: String,             // HTTP method
+    pub path: String,               // request path
+    pub status: u16,                // HTTP status code
+    pub details: Option<String>,
+    pub user_id: Option<String>,
+}
+```
+
+### `brain.audit.query` (request/reply)
+
+Query audit logs from ArangoDB with filters.
+
+```rust
+pub struct AuditQueryRequest {
+    pub limit: Option<u32>,
+    pub since: Option<DateTime<Utc>>,
+    pub action_filter: Option<String>,
+    pub user_id_filter: Option<String>,
+}
+
+pub struct AuditQueryResponse {
+    pub entries: Vec<AuditEntryRecord>,
+    pub total: u32,
+}
+```
+
+---
+
+## User API Key Events
+
+### `brain.apikey.create` (request/reply)
+
+Create a user-scoped API key.
+
+```rust
+pub struct ApiKeyCreateRequest {
+    pub user_id: String,
+    pub name: String,
+    pub key_hash: String,
+    pub scopes: Vec<String>,
+    pub expires_at: Option<DateTime<Utc>>,
+}
+
+pub struct ApiKeyCreateResponse {
+    pub key_id: String,
+    pub created: bool,
+    pub error: Option<String>,
+}
+```
+
+### `brain.apikey.list` (request/reply)
+
+List API keys for a user.
+
+```rust
+pub struct ApiKeyListRequest {
+    pub user_id: String,
+}
+
+pub struct ApiKeyListResponse {
+    pub keys: Vec<ApiKeyRecord>,
+}
+
+pub struct ApiKeyRecord {
+    pub key_id: String,
+    pub user_id: String,
+    pub name: String,
+    pub key_hash: String,
+    pub scopes: Vec<String>,
+    pub created_at: DateTime<Utc>,
+    pub expires_at: Option<DateTime<Utc>>,
+    pub last_used: Option<DateTime<Utc>>,
+    pub revoked: bool,
+}
+```
+
+### `brain.apikey.revoke` (request/reply)
+
+Revoke an API key.
+
+```rust
+pub struct ApiKeyRevokeRequest {
+    pub key_id: String,
+    pub user_id: String,
+}
+
+pub struct ApiKeyRevokeResponse {
+    pub success: bool,
+    pub error: Option<String>,
+}
+```
+
+### `brain.apikey.validate` (request/reply)
+
+Validate an API key hash and return the associated key record.
+
+```rust
+pub struct ApiKeyValidateRequest {
+    pub key_hash: String,
+}
+
+pub struct ApiKeyValidateResponse {
+    pub valid: bool,
+    pub key: Option<ApiKeyRecord>,
+}
+```
+
+---
+
+## REST API Endpoints (API Gateway)
+
+The API Gateway exposes the following HTTP endpoints. All `/api/v1/*`
+endpoints (except `/api/v1/health`) require authentication via
+`Authorization: Bearer <jwt>` or `Authorization: ApiKey <key>`.
+
+### Authentication
+
+| Method | Path | Auth | Description |
+|--------|------|------|-------------|
+| `POST` | `/api/v1/auth/token` | Yes* | Generate JWT from API key or username/password |
+| `POST` | `/api/v1/auth/register` | Yes | Register a new user account |
+| `POST` | `/api/v1/auth/revoke` | Yes | Revoke a JWT token |
+
+\* The `/auth/token` endpoint accepts API key or username/password in the request body rather than the Authorization header.
+
+### User Management
+
+| Method | Path | Auth | Role | Description |
+|--------|------|------|------|-------------|
+| `GET` | `/api/v1/users/me` | Yes | Any | Get current user's profile |
+| `PUT` | `/api/v1/users/me` | Yes | Any | Update current user's profile |
+| `GET` | `/api/v1/users` | Yes | Admin | List all users |
+| `GET` | `/api/v1/users/:id` | Yes | Admin | Get user by ID |
+| `PUT` | `/api/v1/users/:id/role` | Yes | Admin | Update user role |
+| `DELETE` | `/api/v1/users/:id` | Yes | Admin | Delete user (soft-delete) |
+
+### User API Keys
+
+| Method | Path | Auth | Description |
+|--------|------|------|-------------|
+| `POST` | `/api/v1/apikeys` | Yes | Create a new API key for current user |
+| `GET` | `/api/v1/apikeys` | Yes | List current user's API keys |
+| `DELETE` | `/api/v1/apikeys/:id` | Yes | Revoke an API key |
+
+### Audit
+
+| Method | Path | Auth | Role | Description |
+|--------|------|------|------|-------------|
+| `GET` | `/api/v1/audit` | Yes | Admin | Query audit log entries |
+
+### Plugins & Capabilities
+
+| Method | Path | Auth | Description |
+|--------|------|------|-------------|
+| `GET` | `/api/v1/health` | No | Gateway health check |
+| `GET` | `/api/v1/plugins` | Yes | List connected external plugins |
+| `DELETE` | `/api/v1/plugins/:id` | Yes | Deregister a plugin |
+| `POST` | `/api/v1/capabilities/:id/call` | Yes | Call a capability synchronously |
+| `GET` | `/api/v1/capabilities` | Yes | Search capabilities |
+
+### Storage
+
+| Method | Path | Auth | Description |
+|--------|------|------|-------------|
+| `POST` | `/api/v1/storage/get` | Yes | Get value from plugin storage |
+| `POST` | `/api/v1/storage/set` | Yes | Set value in plugin storage |
+| `POST` | `/api/v1/storage/delete` | Yes | Delete key from plugin storage |
+| `POST` | `/api/v1/storage/list` | Yes | List keys in plugin storage |
+
+### Traces
+
+| Method | Path | Auth | Description |
+|--------|------|------|-------------|
+| `GET` | `/api/v1/traces` | Yes | List recent execution traces |
+| `GET` | `/api/v1/traces/:correlation_id` | Yes | Get a specific trace |
+
+### Dashboard
+
+| Method | Path | Auth | Description |
+|--------|------|------|-------------|
+| `GET` | `/api/v1/dashboard/overview` | Yes | System overview with plugin health |
+| `GET` | `/api/v1/dashboard/plugins/:id/health` | Yes | Individual plugin health |
+| `GET` | `/api/v1/dashboard/plugins/:id/config` | Yes | Get plugin config + schema |
+| `PUT` | `/api/v1/dashboard/plugins/:id/config` | Yes | Update plugin config |
+| `GET` | `/api/v1/dashboard/plugins/:id/config/schema` | Yes | Get plugin config schema |
+| `GET` | `/api/v1/dashboard/skills` | Yes | List all skills |
+| `GET` | `/api/v1/dashboard/skills/:id` | Yes | Get a single skill |
+| `GET` | `/api/v1/dashboard/conversations` | Yes | List recent conversations |
+| `GET` | `/api/v1/dashboard/conversations/:id` | Yes | Get conversation with messages |
+
+### WebSocket
+
+| Path | Auth | Description |
+|------|------|-------------|
+| `GET /ws?api_key=KEY` | Query param | Plugin WebSocket (bidirectional JSON protocol) |
+| `GET /ws/events?api_key=KEY` | Query param | Real-time event stream with optional filter |
