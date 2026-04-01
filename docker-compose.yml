@@ -19,7 +19,7 @@ services:
   kernel:
     build:
       context: .
-      dockerfile: crates/seidrum-kernel/Dockerfile
+      dockerfile: crates/core/seidrum-kernel/Dockerfile
     command: ["serve"]
     environment:
       NATS_URL: nats://nats:4222
