@@ -1,0 +1,150 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 200 200" width="200" height="200">
+  <defs>
+    <!-- Glow filters -->
+    <filter id="glow-lg" x="-100%" y="-100%" width="300%" height="300%">
+      <feGaussianBlur stdDeviation="8" result="blur"/>
+      <feMerge>
+        <feMergeNode in="blur"/>
+        <feMergeNode in="blur"/>
+        <feMergeNode in="SourceGraphic"/>
+      </feMerge>
+    </filter>
+    <filter id="glow-md" x="-50%" y="-50%" width="200%" height="200%">
+      <feGaussianBlur stdDeviation="4" result="blur"/>
+      <feMerge>
+        <feMergeNode in="blur"/>
+        <feMergeNode in="blur"/>
+        <feMergeNode in="SourceGraphic"/>
+      </feMerge>
+    </filter>
+    <filter id="glow-sm" x="-40%" y="-40%" width="180%" height="180%">
+      <feGaussianBlur stdDeviation="2.5" result="blur"/>
+      <feMerge>
+        <feMergeNode in="blur"/>
+        <feMergeNode in="SourceGraphic"/>
+      </feMerge>
+    </filter>
+
+    <!-- S-curve gradient: cyan → indigo → purple -->
+    <linearGradient id="sGrad" x1="0%" y1="0%" x2="0%" y2="100%">
+      <stop offset="0%"   stop-color="#22d3ee"/>
+      <stop offset="48%"  stop-color="#818cf8"/>
+      <stop offset="100%" stop-color="#a855f7"/>
+    </linearGradient>
+
+    <!-- Background radial -->
+    <radialGradient id="bgGrad" cx="42%" cy="38%" r="65%">
+      <stop offset="0%"   stop-color="#0d1530"/>
+      <stop offset="100%" stop-color="#030712"/>
+    </radialGradient>
+
+    <!-- Node: cyan -->
+    <radialGradient id="nodeCyan" cx="35%" cy="30%" r="70%">
+      <stop offset="0%"   stop-color="#cffafe"/>
+      <stop offset="100%" stop-color="#0e7490"/>
+    </radialGradient>
+
+    <!-- Node: purple -->
+    <radialGradient id="nodePurple" cx="35%" cy="30%" r="70%">
+      <stop offset="0%"   stop-color="#ede9fe"/>
+      <stop offset="100%" stop-color="#7e22ce"/>
+    </radialGradient>
+
+    <!-- Node: indigo (center) -->
+    <radialGradient id="nodeIndigo" cx="35%" cy="30%" r="70%">
+      <stop offset="0%"   stop-color="#e0e7ff"/>
+      <stop offset="100%" stop-color="#4338ca"/>
+    </radialGradient>
+
+    <!-- Ring border gradient -->
+    <linearGradient id="ringGrad" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%"   stop-color="#22d3ee" stop-opacity="0.5"/>
+      <stop offset="50%"  stop-color="#818cf8" stop-opacity="0.3"/>
+      <stop offset="100%" stop-color="#a855f7" stop-opacity="0.5"/>
+    </linearGradient>
+
+    <clipPath id="circClip">
+      <circle cx="100" cy="100" r="90"/>
+    </clipPath>
+  </defs>
+
+  <!-- ── Background ── -->
+  <circle cx="100" cy="100" r="99" fill="#060b18"/>
+  <circle cx="100" cy="100" r="97" fill="url(#bgGrad)"/>
+
+  <!-- ── Ambient background network (very faint) ── -->
+  <g clip-path="url(#circClip)" opacity="0.11">
+    <circle cx="46"  cy="40"  r="2"   fill="#22d3ee"/>
+    <circle cx="154" cy="52"  r="1.8" fill="#818cf8"/>
+    <circle cx="36"  cy="148" r="1.8" fill="#a855f7"/>
+    <circle cx="164" cy="158" r="2"   fill="#22d3ee"/>
+    <circle cx="108" cy="26"  r="1.5" fill="#818cf8"/>
+    <circle cx="26"  cy="94"  r="1.5" fill="#22d3ee"/>
+    <circle cx="174" cy="110" r="1.5" fill="#a855f7"/>
+    <circle cx="72"  cy="174" r="1.8" fill="#22d3ee"/>
+    <circle cx="138" cy="176" r="1.5" fill="#818cf8"/>
+    <line x1="46"  y1="40"  x2="154" y2="52"  stroke="#818cf8" stroke-width="0.6"/>
+    <line x1="154" y1="52"  x2="164" y2="158" stroke="#22d3ee" stroke-width="0.6"/>
+    <line x1="36"  y1="148" x2="72"  y2="174" stroke="#a855f7" stroke-width="0.6"/>
+    <line x1="26"  y1="94"  x2="36"  y2="148" stroke="#22d3ee" stroke-width="0.6"/>
+    <line x1="108" y1="26"  x2="46"  y2="40"  stroke="#818cf8" stroke-width="0.6"/>
+    <line x1="138" y1="176" x2="164" y2="158" stroke="#818cf8" stroke-width="0.6"/>
+    <line x1="174" y1="110" x2="164" y2="158" stroke="#a855f7" stroke-width="0.6"/>
+    <line x1="26"  y1="94"  x2="108" y2="26"  stroke="#818cf8" stroke-width="0.6"/>
+  </g>
+
+  <!-- ══════════════════════════════════════════
+       TRUE S-CURVE — two opposing cubic beziers
+       Top half bulges RIGHT, bottom half bulges LEFT
+       ══════════════════════════════════════════ -->
+
+  <!-- S-curve: deep glow halo -->
+  <path d="M 130 35 C 50 25 35 65 100 100 C 165 135 150 175 70 165"
+        fill="none" stroke="#818cf8" stroke-width="16"
+        stroke-linecap="round" opacity="0.18"
+        filter="url(#glow-lg)"
+        clip-path="url(#circClip)"/>
+
+  <!-- S-curve: mid glow -->
+  <path d="M 130 35 C 50 25 35 65 100 100 C 165 135 150 175 70 165"
+        fill="none" stroke="url(#sGrad)" stroke-width="5"
+        stroke-linecap="round" opacity="0.55"
+        filter="url(#glow-md)"
+        clip-path="url(#circClip)"/>
+
+  <!-- S-curve: sharp bright line -->
+  <path d="M 130 35 C 50 25 35 65 100 100 C 165 135 150 175 70 165"
+        fill="none" stroke="url(#sGrad)" stroke-width="2.2"
+        stroke-linecap="round"
+        clip-path="url(#circClip)"/>
+
+  <!-- ── Quarter-point particle (top-left bulge, ~61, 51) ── -->
+  <circle cx="61" cy="51" r="5" fill="#22d3ee" opacity="0.15" filter="url(#glow-md)"/>
+  <circle cx="61" cy="51" r="3.5" fill="#22d3ee" opacity="0.8" filter="url(#glow-sm)"/>
+  <circle cx="61" cy="51" r="1.5" fill="white" opacity="0.9"/>
+
+  <!-- ── Three-quarter particle (bottom-right bulge, ~139, 149) ── -->
+  <circle cx="139" cy="149" r="5" fill="#a855f7" opacity="0.15" filter="url(#glow-md)"/>
+  <circle cx="139" cy="149" r="3.5" fill="#a855f7" opacity="0.8" filter="url(#glow-sm)"/>
+  <circle cx="139" cy="149" r="1.5" fill="white" opacity="0.9"/>
+
+  <!-- ── Center node (inflection point at 100, 100) ── -->
+  <circle cx="100" cy="100" r="10" fill="#818cf8" opacity="0.15" filter="url(#glow-lg)"/>
+  <circle cx="100" cy="100" r="7"  fill="url(#nodeIndigo)" filter="url(#glow-md)"/>
+  <circle cx="100" cy="100" r="3"  fill="white" opacity="0.95"/>
+
+  <!-- ── Top-right start node (start of S) ── -->
+  <circle cx="130" cy="35" r="16" fill="#030d1f" opacity="0.9"/>
+  <circle cx="130" cy="35" r="14" fill="url(#nodeCyan)" filter="url(#glow-md)"/>
+  <circle cx="130" cy="35" r="5.5" fill="white" opacity="0.95"/>
+
+  <!-- ── Bottom-left end node (end of S) ── -->
+  <circle cx="70" cy="165" r="16" fill="#030d1f" opacity="0.9"/>
+  <circle cx="70" cy="165" r="14" fill="url(#nodePurple)" filter="url(#glow-md)"/>
+  <circle cx="70" cy="165" r="5.5" fill="white" opacity="0.95"/>
+
+  <!-- ── Ring border ── -->
+  <circle cx="100" cy="100" r="97" fill="none" stroke="url(#ringGrad)" stroke-width="1.2"/>
+  <circle cx="100" cy="100" r="95" fill="none" stroke="#1e3561" stroke-width="0.6" opacity="0.6"/>
+</svg>

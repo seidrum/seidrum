@@ -1,0 +1,56 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 48 48" width="48" height="48">
+  <defs>
+    <linearGradient id="sg" x1="0%" y1="0%" x2="0%" y2="100%">
+      <stop offset="0%" stop-color="#22d3ee"/>
+      <stop offset="50%" stop-color="#818cf8"/>
+      <stop offset="100%" stop-color="#a855f7"/>
+    </linearGradient>
+    <radialGradient id="bg" cx="42%" cy="38%" r="65%">
+      <stop offset="0%" stop-color="#0d1530"/>
+      <stop offset="100%" stop-color="#030712"/>
+    </radialGradient>
+    <radialGradient id="nc" cx="35%" cy="30%" r="70%">
+      <stop offset="0%" stop-color="#cffafe"/>
+      <stop offset="100%" stop-color="#0e7490"/>
+    </radialGradient>
+    <radialGradient id="np" cx="35%" cy="30%" r="70%">
+      <stop offset="0%" stop-color="#ede9fe"/>
+      <stop offset="100%" stop-color="#7e22ce"/>
+    </radialGradient>
+    <radialGradient id="ni" cx="35%" cy="30%" r="70%">
+      <stop offset="0%" stop-color="#e0e7ff"/>
+      <stop offset="100%" stop-color="#4338ca"/>
+    </radialGradient>
+    <linearGradient id="rg" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#22d3ee" stop-opacity="0.5"/>
+      <stop offset="50%" stop-color="#818cf8" stop-opacity="0.3"/>
+      <stop offset="100%" stop-color="#a855f7" stop-opacity="0.5"/>
+    </linearGradient>
+    <clipPath id="cc"><circle cx="24" cy="24" r="22"/></clipPath>
+  </defs>
+
+  <!-- Background -->
+  <circle cx="24" cy="24" r="24" fill="#060b18"/>
+  <circle cx="24" cy="24" r="23" fill="url(#bg)"/>
+
+  <!-- S-curve (two opposing beziers) -->
+  <path d="M 31 8 C 12 6 8 16 24 24 C 40 32 36 42 17 40"
+        fill="none" stroke="url(#sg)" stroke-width="2.5"
+        stroke-linecap="round"
+        clip-path="url(#cc)"/>
+
+  <!-- Start node (top-right) -->
+  <circle cx="31" cy="8" r="4" fill="url(#nc)"/>
+  <circle cx="31" cy="8" r="1.5" fill="white" opacity="0.95"/>
+
+  <!-- Center node -->
+  <circle cx="24" cy="24" r="3" fill="url(#ni)"/>
+  <circle cx="24" cy="24" r="1.2" fill="white" opacity="0.95"/>
+
+  <!-- End node (bottom-left) -->
+  <circle cx="17" cy="40" r="4" fill="url(#np)"/>
+  <circle cx="17" cy="40" r="1.5" fill="white" opacity="0.95"/>
+
+  <!-- Ring -->
+  <circle cx="24" cy="24" r="23" fill="none" stroke="url(#rg)" stroke-width="0.8"/>
+</svg>
