@@ -176,10 +176,10 @@ fn install_agent(resolved: &super::ResolvedPackage, paths: &SeidrumPaths) -> Res
     Ok(())
 }
 
-fn install_bundle(
-    resolved: &super::ResolvedPackage,
-    paths: &SeidrumPaths,
-) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<()>> + '_>> {
+fn install_bundle<'a>(
+    resolved: &'a super::ResolvedPackage,
+    paths: &'a SeidrumPaths,
+) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<()>> + 'a>> {
     Box::pin(async move {
         let manifest = &resolved.manifest;
 
