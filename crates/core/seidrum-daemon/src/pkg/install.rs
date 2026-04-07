@@ -140,10 +140,8 @@ fn install_agent(resolved: &super::ResolvedPackage, paths: &SeidrumPaths) -> Res
 
     // Create a basic agent YAML with all required fields
     let agent_yaml = format!(
-        "agent:\n  id: {}\n  name: {}\n  version: {}\n  description: {}\n  enabled: false\n  scope: \"default\"\n  subscribe:\n    - \"channel.*.inbound\"\n  prompt: \"{}_prompt\"\n  tools: []\n",
+        "agent:\n  id: {}\n  description: {}\n  enabled: false\n  scope: \"default\"\n  subscribe:\n    - \"channel.*.inbound\"\n  prompt: \"prompts/{}.md\"\n  tools: []\n",
         manifest.name,
-        manifest.name,
-        manifest.version,
         manifest.description.as_deref().unwrap_or(""),
         manifest.name
     );
@@ -151,6 +149,21 @@ fn install_agent(resolved: &super::ResolvedPackage, paths: &SeidrumPaths) -> Res
     let agent_file = agents_dir.join(format!("{}.yaml", manifest.name));
     fs::write(&agent_file, agent_yaml)?;
     println!("  Installed agent config to {}", agent_file.display());
+
+    // Write placeholder prompt file
+    let prompts_dir = agents_dir.parent()
+        .unwrap_or(&agents_dir)
+        .join("prompts");
+    fs::create_dir_all(&prompts_dir)?;
+    let prompt_path = prompts_dir.join(format!("{}.md", manifest.name));
+    if !prompt_path.exists() {
+        fs::write(&prompt_path, format!(
+            "# {}\n\n{}\n\nYou are a helpful AI assistant.\n",
+            manifest.name,
+            manifest.description.as_deref().unwrap_or("")
+        ))?;
+        info!("Created placeholder prompt: {}", prompt_path.display());
+    }
 
     Ok(())
 }

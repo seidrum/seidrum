@@ -129,7 +129,7 @@ pub async fn get_agent(
 pub async fn enable_agent(
     State(state): State<ManagementState>,
     Path(id): Path<String>,
-) -> Result<Json<AgentDetailResponse>, (StatusCode, String)> {
+) -> Result<(StatusCode, Json<AgentDetailResponse>), (StatusCode, String)> {
     set_agent_enabled(&state, &id, true)
         .await
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
@@ -145,15 +145,16 @@ pub async fn enable_agent(
         tracing::error!("Failed to publish agent reload signal: {}", e);
     }
 
-    get_agent(State(state), Path(id))
-        .await
+    let response = get_agent(State(state), Path(id))
+        .await?;
+    Ok((StatusCode::ACCEPTED, response))
 }
 
 /// Disable an agent by id.
 pub async fn disable_agent(
     State(state): State<ManagementState>,
     Path(id): Path<String>,
-) -> Result<Json<AgentDetailResponse>, (StatusCode, String)> {
+) -> Result<(StatusCode, Json<AgentDetailResponse>), (StatusCode, String)> {
     set_agent_enabled(&state, &id, false)
         .await
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
@@ -169,8 +170,9 @@ pub async fn disable_agent(
         tracing::error!("Failed to publish agent reload signal: {}", e);
     }
 
-    get_agent(State(state), Path(id))
-        .await
+    let response = get_agent(State(state), Path(id))
+        .await?;
+    Ok((StatusCode::ACCEPTED, response))
 }
 
 // ============================================================================

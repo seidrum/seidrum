@@ -83,7 +83,7 @@ pub async fn download_artifact(
                 target,
                 artifacts
                     .iter()
-                    .map(|a| &a.target)
+                    .map(|a| format!("{} ({})", a.target, a.url))
                     .collect::<Vec<_>>()
                     .join(", ")
             )

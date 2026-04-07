@@ -37,12 +37,8 @@ pub enum PackageKind {
     Bundle,
 }
 
-#[derive(Serialize, Deserialize, Debug, Clone)]
-pub struct PackageArtifact {
-    pub target: String, // e.g., "x86_64-unknown-linux-gnu", "aarch64-apple-darwin"
-    pub url: String,
-    pub sha256: String,
-}
+// PackageArtifact is re-exported from seidrum_common::config
+pub use seidrum_common::config::PackageArtifact;
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct PackageDependency {
