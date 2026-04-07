@@ -52,7 +52,7 @@ pub fn uninstall(name: &str, yes: bool, paths: &SeidrumPaths) -> Result<()> {
     }
 
     // Remove from plugins.yaml
-    remove_plugin_from_config(paths, name)?;
+    remove_plugin_from_config(name, paths)?;
 
     // Remove agent files if present
     let agents_dir = paths.config_dir.join("agents");
@@ -75,21 +75,24 @@ pub fn uninstall(name: &str, yes: bool, paths: &SeidrumPaths) -> Result<()> {
     Ok(())
 }
 
-fn remove_plugin_from_config(paths: &SeidrumPaths, plugin_name: &str) -> Result<()> {
+fn remove_plugin_from_config(plugin_name: &str, paths: &SeidrumPaths) -> Result<()> {
     let plugins_yaml = paths.plugins_yaml();
+    if !plugins_yaml.exists() {
+        return Ok(());
+    }
 
-    if plugins_yaml.exists() {
-        let content = fs::read_to_string(&plugins_yaml)?;
-        let mut plugins: serde_yaml::Value = serde_yaml::from_str(&content)?;
+    let content = fs::read_to_string(&plugins_yaml)?;
+    let mut doc: serde_yaml::Value = serde_yaml::from_str(&content)?;
 
-        if let Some(enabled) = plugins.get_mut("enabled") {
-            if let serde_yaml::Value::Sequence(seq) = enabled {
-                seq.retain(|v| v.as_str().map_or(true, |s| s != plugin_name));
-                let yaml = serde_yaml::to_string(&plugins)?;
-                fs::write(&plugins_yaml, yaml)?;
-            }
+    if let Some(root) = doc.as_mapping_mut() {
+        let plugins_key = serde_yaml::Value::String("plugins".to_string());
+        if let Some(plugins_map) = root.get_mut(&plugins_key).and_then(|v| v.as_mapping_mut()) {
+            plugins_map.remove(&serde_yaml::Value::String(plugin_name.to_string()));
         }
     }
+
+    let yaml = serde_yaml::to_string(&doc)?;
+    fs::write(&plugins_yaml, yaml)?;
 
     Ok(())
 }

@@ -99,7 +99,7 @@ async fn main() -> Result<()> {
         },
         Commands::Pkg { action } => match action {
             PkgAction::Search { query } => pkg::search::search(&query, &paths),
-            PkgAction::Install { package, yes } => pkg::install::install(&package, yes, &paths),
+            PkgAction::Install { package, yes } => pkg::install::install(&package, yes, &paths).await,
             PkgAction::Uninstall { name, yes } => pkg::uninstall::uninstall(&name, yes, &paths),
             PkgAction::List => pkg::list::list_packages(&paths),
             PkgAction::Info { name } => pkg::list::show_package_info(&name, &paths),

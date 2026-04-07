@@ -95,6 +95,30 @@ pub async fn set_env(
     Path(key): Path<String>,
     Json(req): Json<SetEnvRequest>,
 ) -> Result<Json<SetEnvResponse>, (StatusCode, String)> {
+    // Validate environment variable name: must start with letter/underscore
+    // and contain only alphanumeric characters and underscores
+    if key.is_empty() {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            "Environment variable name cannot be empty".to_string(),
+        ));
+    }
+
+    let first_char = key.chars().next().unwrap();
+    if !first_char.is_ascii_alphabetic() && first_char != '_' {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            "Environment variable name must start with a letter or underscore".to_string(),
+        ));
+    }
+
+    if !key.chars().all(|c| c.is_ascii_alphanumeric() || c == '_') {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            "Environment variable name must contain only alphanumeric characters and underscores".to_string(),
+        ));
+    }
+
     let env_file = &state.env_file;
 
     // Read existing .env content

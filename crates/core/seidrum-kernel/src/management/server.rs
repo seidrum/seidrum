@@ -35,10 +35,10 @@ impl ManagementServer {
         let cors = CorsLayer::new()
             .allow_origin(
                 [
-                    "http://localhost:3030".parse().unwrap(),
-                    "http://127.0.0.1:3030".parse().unwrap(),
-                    "http://localhost:5173".parse().unwrap(),
-                    "http://127.0.0.1:5173".parse().unwrap(),
+                    "http://localhost:3030".parse().expect("valid origin literal"),
+                    "http://127.0.0.1:3030".parse().expect("valid origin literal"),
+                    "http://localhost:5173".parse().expect("valid origin literal"),
+                    "http://127.0.0.1:5173".parse().expect("valid origin literal"),
                 ]
                 .into_iter()
                 .collect::<AllowOrigin>()

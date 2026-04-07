@@ -13,7 +13,7 @@ use tracing::{debug, info};
 use std::os::unix::fs::PermissionsExt;
 
 /// Main install command
-pub fn install(package_str: &str, yes: bool, paths: &SeidrumPaths) -> Result<()> {
+pub async fn install(package_str: &str, yes: bool, paths: &SeidrumPaths) -> Result<()> {
     println!("Resolving package: {}", package_str);
 
     // Step 1: Resolve package
@@ -52,7 +52,7 @@ pub fn install(package_str: &str, yes: bool, paths: &SeidrumPaths) -> Result<()>
 
     // Step 3: Download and install based on kind
     match manifest.kind {
-        PackageKind::Plugin => install_plugin(&resolved, paths)?,
+        PackageKind::Plugin => install_plugin(&resolved, paths).await?,
         PackageKind::Agent => install_agent(&resolved, paths)?,
         PackageKind::Bundle => install_bundle(&resolved, paths)?,
     }
@@ -86,21 +86,25 @@ pub fn install(package_str: &str, yes: bool, paths: &SeidrumPaths) -> Result<()>
     Ok(())
 }
 
-fn install_plugin(resolved: &super::ResolvedPackage, paths: &SeidrumPaths) -> Result<()> {
+async fn install_plugin(resolved: &super::ResolvedPackage, paths: &SeidrumPaths) -> Result<()> {
     let manifest = &resolved.manifest;
 
     // Download artifact
     let temp_dir = paths.seidrum_home.join("temp");
     fs::create_dir_all(&temp_dir)?;
 
-    let artifact_path = download::download_artifact(&manifest.artifacts, &temp_dir)?;
+    let artifact_path = download::download_artifact(&manifest.artifacts, &temp_dir).await?;
     debug!("Downloaded artifact to {}", artifact_path.display());
 
-    // Verify SHA-256
-    if let Some(artifact) = manifest.artifacts.first() {
-        if !verify::verify_sha256(&artifact_path, &artifact.sha256)? {
-            anyhow::bail!("SHA-256 verification failed for artifact");
-        }
+    // Find the artifact for the current platform
+    let target = download::current_target();
+    let artifact = manifest.artifacts.iter()
+        .find(|a| a.target == target)
+        .ok_or_else(|| anyhow::anyhow!("No artifact for target {}", target))?;
+
+    // Verify against the SPECIFIC artifact that was downloaded
+    if !verify::verify_sha256(&artifact_path, &artifact.sha256)? {
+        anyhow::bail!("SHA-256 verification failed");
     }
 
     // Extract plugin binary
@@ -121,7 +125,7 @@ fn install_plugin(resolved: &super::ResolvedPackage, paths: &SeidrumPaths) -> Re
     println!("  Installed plugin binary to {}", dest_path.display());
 
     // Add to plugins.yaml if it exists
-    add_plugin_to_config(paths, &manifest.name)?;
+    add_plugin_to_config(&manifest.name, &manifest.name, paths)?;
 
     // Cleanup
     let _ = fs::remove_dir_all(&extract_dir);
@@ -187,26 +191,45 @@ fn install_bundle(resolved: &super::ResolvedPackage, paths: &SeidrumPaths) -> Re
     Ok(())
 }
 
-fn add_plugin_to_config(paths: &SeidrumPaths, plugin_name: &str) -> Result<()> {
+fn add_plugin_to_config(plugin_name: &str, binary_name: &str, paths: &SeidrumPaths) -> Result<()> {
     let plugins_yaml = paths.plugins_yaml();
 
-    if plugins_yaml.exists() {
+    let mut doc: serde_yaml::Value = if plugins_yaml.exists() {
         let content = fs::read_to_string(&plugins_yaml)?;
-        let mut plugins: serde_yaml::Value = serde_yaml::from_str(&content)?;
+        serde_yaml::from_str(&content).unwrap_or(serde_yaml::Value::Mapping(serde_yaml::Mapping::new()))
+    } else {
+        serde_yaml::Value::Mapping(serde_yaml::Mapping::new())
+    };
 
-        if let Some(list) = plugins.get_mut("enabled") {
-            if let serde_yaml::Value::Sequence(seq) = list {
-                if !seq
-                    .iter()
-                    .any(|v| v.as_str().map_or(false, |s| s == plugin_name))
-                {
-                    seq.push(serde_yaml::Value::String(plugin_name.to_string()));
-                    let yaml = serde_yaml::to_string(&plugins)?;
-                    fs::write(&plugins_yaml, yaml)?;
-                }
-            }
-        }
-    }
+    // Navigate to or create plugins map
+    let root = doc.as_mapping_mut()
+        .ok_or_else(|| anyhow::anyhow!("plugins.yaml root is not a mapping"))?;
+
+    let plugins_key = serde_yaml::Value::String("plugins".to_string());
+    let plugins_map = root.entry(plugins_key)
+        .or_insert_with(|| serde_yaml::Value::Mapping(serde_yaml::Mapping::new()));
+
+    let plugins_map = plugins_map.as_mapping_mut()
+        .ok_or_else(|| anyhow::anyhow!("plugins key is not a mapping"))?;
+
+    // Add the plugin entry
+    let mut entry = serde_yaml::Mapping::new();
+    entry.insert(
+        serde_yaml::Value::String("enabled".to_string()),
+        serde_yaml::Value::Bool(false),
+    );
+    entry.insert(
+        serde_yaml::Value::String("binary".to_string()),
+        serde_yaml::Value::String(binary_name.to_string()),
+    );
+
+    plugins_map.insert(
+        serde_yaml::Value::String(plugin_name.to_string()),
+        serde_yaml::Value::Mapping(entry),
+    );
+
+    let yaml = serde_yaml::to_string(&doc)?;
+    fs::write(&plugins_yaml, yaml)?;
 
     Ok(())
 }

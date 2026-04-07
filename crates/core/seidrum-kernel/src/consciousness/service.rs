@@ -36,6 +36,8 @@ pub struct ConsciousnessService {
     runtime_subs: Arc<RwLock<HashMap<String, Vec<RuntimeSubscription>>>>,
     /// Cached identity prompts: agent_id -> rendered prompt text.
     identity_prompts: Arc<RwLock<HashMap<String, String>>>,
+    /// Path to agents directory, used for reloading agents at runtime
+    agents_dir: String,
 }
 
 impl ConsciousnessService {
@@ -55,6 +57,7 @@ impl ConsciousnessService {
         }
 
         Ok(Self {
+            agents_dir: agents_dir.to_string(),
             nats,
             agents: Arc::new(RwLock::new(agents)),
             system_prompt,
@@ -302,6 +305,7 @@ impl ConsciousnessService {
         let runtime_subs = self.runtime_subs.clone();
         let agents = self.agents.clone();
         let identity_prompts = self.identity_prompts.clone();
+        let agents_dir = self.agents_dir.clone();
 
         let handle = tokio::spawn(async move {
             let agent_count = agents.read().await.len();
@@ -315,7 +319,7 @@ impl ConsciousnessService {
                     Some(_msg) = reload_sub.next() => {
                         // Agent reload request from management API
                         info!("Reloading agent definitions from disk");
-                        if let Err(e) = reload_agents_internal(&agents, &identity_prompts).await {
+                        if let Err(e) = reload_agents_internal(&agents, &identity_prompts, &agents_dir).await {
                             error!(error = %e, "Failed to reload agents");
                         } else {
                             let count = agents.read().await.len();
@@ -1561,10 +1565,18 @@ struct ListConversationsArgs {
 async fn reload_agents_internal(
     agents: &Arc<RwLock<HashMap<String, AgentDefinition>>>,
     identity_prompts: &Arc<RwLock<HashMap<String, String>>>,
+    agents_dir: &str,
 ) -> Result<()> {
-    // For now, reload happens by scanning the agents directory passed at init.
-    // In future, this could accept a parameter. For now we use a default path.
-    let agents_dir = "agents/";
+    // TODO: Full reload should reconcile NATS subscriptions and per-agent tasks.
+    // Currently only the in-memory agent definitions are updated. Agents that are
+    // newly enabled won't receive events, and agents that are disabled will continue
+    // processing until restart. A full fix requires tracking per-agent subscriptions
+    // and spawning/stopping forwarder tasks on reload.
+    tracing::warn!(
+        "Agent reload updated definitions only. New/removed agents require restart to take full effect."
+    );
+
+    // Use the agents directory path passed at initialization
 
     let fresh_agents = load_agents(agents_dir)?;
 

@@ -12,6 +12,21 @@ use tracing::{error, info, warn};
 use crate::management::state::ManagementState;
 
 // ============================================================================
+// Security helpers
+// ============================================================================
+
+/// Validate that a filename is safe (no path traversal)
+fn sanitize_filename(name: &str) -> Result<&str, (StatusCode, String)> {
+    if name.contains("..") || name.contains('/') || name.contains('\\') || name.starts_with('.') {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            format!("Invalid filename: {}", name),
+        ));
+    }
+    Ok(name)
+}
+
+// ============================================================================
 // Request/Response types
 // ============================================================================
 
@@ -119,7 +134,8 @@ pub async fn export_preset(
     if let Some(bundle) = &preset_file.preset.bundle {
         // Collect agent files
         for agent_file in &bundle.agents {
-            let path = state.agents_dir.join(agent_file);
+            let safe_name = sanitize_filename(agent_file)?;
+            let path = state.agents_dir.join(safe_name);
             if path.exists() {
                 match std::fs::read_to_string(&path) {
                     Ok(content) => {
@@ -134,8 +150,9 @@ pub async fn export_preset(
 
         // Collect prompt files
         for prompt_file in &bundle.prompts {
+            let safe_name = sanitize_filename(prompt_file)?;
             let prompts_dir = state.config_dir.parent().unwrap_or(&state.config_dir).join("prompts");
-            let path = prompts_dir.join(prompt_file);
+            let path = prompts_dir.join(safe_name);
             if path.exists() {
                 match std::fs::read_to_string(&path) {
                     Ok(content) => {
@@ -307,7 +324,9 @@ async fn install_bundle(
     if let Some(bundle) = &preset.bundle {
         for agent_file in &bundle.agents {
             if let Some(content) = agents.get(agent_file) {
-                let dest = state.agents_dir.join(agent_file);
+                let safe_name = sanitize_filename(agent_file)
+                    .map_err(|e| anyhow::anyhow!("{}", e.1))?;
+                let dest = state.agents_dir.join(safe_name);
 
                 // Don't overwrite existing agents
                 if dest.exists() {
@@ -341,7 +360,9 @@ async fn install_bundle(
 
         for prompt_file in &bundle.prompts {
             if let Some(content) = prompts.get(prompt_file) {
-                let dest = prompts_dir.join(prompt_file);
+                let safe_name = sanitize_filename(prompt_file)
+                    .map_err(|e| anyhow::anyhow!("{}", e.1))?;
+                let dest = prompts_dir.join(safe_name);
 
                 if dest.exists() {
                     warn!(
