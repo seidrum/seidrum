@@ -1,4 +1,4 @@
-use super::{PackageManifest, PackageSource, ResolvedPackage, RegistriesConfig};
+use super::{PackageManifest, PackageSource, ResolvedPackage};
 use crate::paths::SeidrumPaths;
 use anyhow::{anyhow, Result};
 use std::path::PathBuf;
@@ -68,7 +68,7 @@ fn resolve_from_local(path: &PathBuf) -> Result<ResolvedPackage> {
 }
 
 /// Resolve from registry
-fn resolve_from_registry(reference: &str, paths: &SeidrumPaths) -> Result<ResolvedPackage> {
+fn resolve_from_registry(reference: &str, _paths: &SeidrumPaths) -> Result<ResolvedPackage> {
     info!("Resolving package from registry: {}", reference);
 
     // Registry-based package resolution is not yet implemented.

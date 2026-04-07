@@ -48,6 +48,7 @@ fn validate_artifact_url(url: &str) -> Result<()> {
 }
 
 /// Detect current target platform triple
+#[allow(unreachable_code)]
 pub fn current_target() -> &'static str {
     #[cfg(all(target_arch = "x86_64", target_os = "macos"))]
     return "x86_64-apple-darwin";

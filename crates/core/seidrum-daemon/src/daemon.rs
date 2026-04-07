@@ -233,7 +233,7 @@ pub async fn start(paths: &SeidrumPaths) -> Result<()> {
 
     // 2. Load plugins.yaml and start enabled plugins
     let plugins_yaml = paths.plugins_yaml();
-    let config = if plugins_yaml.exists() {
+    let _config = if plugins_yaml.exists() {
         let cfg = load_plugins_config(&plugins_yaml)?;
         for (name, entry) in &cfg.plugins {
             if !entry.enabled {

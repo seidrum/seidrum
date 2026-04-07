@@ -37,8 +37,15 @@ pub enum PackageKind {
     Bundle,
 }
 
-// PackageArtifact is re-exported from seidrum_common::config
-pub use seidrum_common::config::PackageArtifact;
+/// A pre-built binary artifact for a specific platform.
+#[derive(Serialize, Deserialize, Debug, Clone)]
+pub struct PackageArtifact {
+    pub target: String,
+    pub url: String,
+    #[serde(default)]
+    pub image: Option<String>,
+    pub sha256: String,
+}
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct PackageDependency {

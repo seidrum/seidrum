@@ -54,7 +54,7 @@ pub async fn install(package_str: &str, yes: bool, paths: &SeidrumPaths) -> Resu
     match manifest.kind {
         PackageKind::Plugin => install_plugin(&resolved, paths).await?,
         PackageKind::Agent => install_agent(&resolved, paths)?,
-        PackageKind::Bundle => install_bundle(&resolved, paths)?,
+        PackageKind::Bundle => install_bundle(&resolved, paths).await?,
     }
 
     // Step 4: Record in installed.yaml
@@ -172,7 +172,7 @@ fn install_agent(resolved: &super::ResolvedPackage, paths: &SeidrumPaths) -> Res
     Ok(())
 }
 
-fn install_bundle(resolved: &super::ResolvedPackage, paths: &SeidrumPaths) -> Result<()> {
+async fn install_bundle(resolved: &super::ResolvedPackage, paths: &SeidrumPaths) -> Result<()> {
     let manifest = &resolved.manifest;
 
     // Install dependencies recursively
@@ -184,7 +184,7 @@ fn install_bundle(resolved: &super::ResolvedPackage, paths: &SeidrumPaths) -> Re
         };
 
         println!("  Installing dependency: {}", dep.name);
-        install(&dep_ref, true, paths)?;
+        install(&dep_ref, true, paths).await?;
     }
 
     println!("  Bundle dependencies installed");

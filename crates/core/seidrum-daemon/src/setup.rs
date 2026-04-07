@@ -151,6 +151,7 @@ pub async fn run(paths: &SeidrumPaths, use_defaults: bool) -> Result<()> {
 /// Generate a random alphanumeric password.
 fn generate_password(len: usize) -> String {
     use rand::distributions::Alphanumeric;
+    use rand::Rng;
     rand::thread_rng()
         .sample_iter(&Alphanumeric)
         .take(len)

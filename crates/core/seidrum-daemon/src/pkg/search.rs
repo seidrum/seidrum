@@ -1,9 +1,9 @@
 use crate::paths::SeidrumPaths;
 use anyhow::Result;
-use std::fs;
-use tabled::{Table, Tabled};
+use tabled::Tabled;
 use tracing::info;
 
+#[allow(dead_code)]
 #[derive(Tabled)]
 struct SearchResult {
     name: String,
