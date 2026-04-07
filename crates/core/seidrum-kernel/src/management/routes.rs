@@ -1,6 +1,5 @@
 use axum::{
     extract::State,
-    http::StatusCode,
     response::Json,
     routing::{delete, get, post, put},
     Router,
@@ -17,11 +16,20 @@ pub fn build_router(state: ManagementState) -> Router {
         .route("/api/mgmt/status", get(system_status))
         // Plugins
         .route("/api/mgmt/plugins", get(plugins::list_plugins))
-        .route("/api/mgmt/plugins/:name/enable", put(plugins::enable_plugin))
-        .route("/api/mgmt/plugins/:name/disable", put(plugins::disable_plugin))
+        .route(
+            "/api/mgmt/plugins/:name/enable",
+            put(plugins::enable_plugin),
+        )
+        .route(
+            "/api/mgmt/plugins/:name/disable",
+            put(plugins::disable_plugin),
+        )
         .route("/api/mgmt/plugins/:name/start", post(plugins::start_plugin))
         .route("/api/mgmt/plugins/:name/stop", post(plugins::stop_plugin))
-        .route("/api/mgmt/plugins/:name/config/schema", get(plugins::plugin_config_schema))
+        .route(
+            "/api/mgmt/plugins/:name/config/schema",
+            get(plugins::plugin_config_schema),
+        )
         // Agents
         .route("/api/mgmt/agents", get(agents::list_agents))
         .route("/api/mgmt/agents/:id", get(agents::get_agent))
@@ -42,8 +50,14 @@ pub fn build_router(state: ManagementState) -> Router {
         .route("/api/mgmt/pkg/:name", delete(packages::uninstall_package))
         .route("/api/mgmt/pkg/installed", get(packages::list_installed))
         // Onboarding
-        .route("/api/mgmt/onboarding/status", get(onboarding::onboarding_status))
-        .route("/api/mgmt/onboarding/complete", post(onboarding::onboarding_complete))
+        .route(
+            "/api/mgmt/onboarding/status",
+            get(onboarding::onboarding_status),
+        )
+        .route(
+            "/api/mgmt/onboarding/complete",
+            post(onboarding::onboarding_complete),
+        )
         .with_state(state)
 }
 

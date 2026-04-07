@@ -11,7 +11,7 @@ mod status;
 use anyhow::Result;
 use clap::Parser;
 
-use cli::{Cli, Commands, PluginAction, PkgAction, RegistryAction, ServiceAction};
+use cli::{Cli, Commands, PkgAction, PluginAction, RegistryAction, ServiceAction};
 use paths::SeidrumPaths;
 
 #[tokio::main]
@@ -99,7 +99,9 @@ async fn main() -> Result<()> {
         },
         Commands::Pkg { action } => match action {
             PkgAction::Search { query } => pkg::search::search(&query, &paths),
-            PkgAction::Install { package, yes } => pkg::install::install(&package, yes, &paths).await,
+            PkgAction::Install { package, yes } => {
+                pkg::install::install(&package, yes, &paths).await
+            }
             PkgAction::Uninstall { name, yes } => pkg::uninstall::uninstall(&name, yes, &paths),
             PkgAction::List => pkg::list::list_packages(&paths),
             PkgAction::Info { name } => pkg::list::show_package_info(&name, &paths),
@@ -120,7 +122,9 @@ async fn main() -> Result<()> {
                 }
                 RegistryAction::List => pkg::registry::list_registries(&paths),
                 RegistryAction::Remove { name } => pkg::registry::remove_registry(&name, &paths),
-                RegistryAction::Sync { name } => pkg::registry::sync_registry(name.as_deref(), &paths),
+                RegistryAction::Sync { name } => {
+                    pkg::registry::sync_registry(name.as_deref(), &paths)
+                }
             },
         },
     }

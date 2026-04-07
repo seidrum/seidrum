@@ -269,14 +269,18 @@ pub async fn start(paths: &SeidrumPaths) -> Result<()> {
     );
 
     // 3. Connect to NATS and subscribe to plugin control subjects
-    let nats_url = std::env::var("NATS_URL").unwrap_or_else(|_| "nats://localhost:4222".to_string());
+    let nats_url =
+        std::env::var("NATS_URL").unwrap_or_else(|_| "nats://localhost:4222".to_string());
     let nats_client = match async_nats::connect(&nats_url).await {
         Ok(client) => {
             info!("Connected to NATS for plugin lifecycle control");
             Some(client)
         }
         Err(e) => {
-            warn!("Failed to connect to NATS ({}), plugin lifecycle control via NATS unavailable", e);
+            warn!(
+                "Failed to connect to NATS ({}), plugin lifecycle control via NATS unavailable",
+                e
+            );
             None
         }
     };
@@ -530,7 +534,12 @@ async fn handle_plugin_start(
                     success: false,
                     message: format!("Failed to parse command: {}", e),
                 };
-                let _ = client.publish(reply.clone(), serde_json::to_vec(&response).unwrap_or_default().into()).await;
+                let _ = client
+                    .publish(
+                        reply.clone(),
+                        serde_json::to_vec(&response).unwrap_or_default().into(),
+                    )
+                    .await;
             }
             return;
         }
@@ -547,7 +556,12 @@ async fn handle_plugin_start(
                 message: "Failed to load plugins.yaml".to_string(),
             };
             if let Some(reply) = &msg.reply {
-                let _ = client.publish(reply.clone(), serde_json::to_vec(&response).unwrap_or_default().into()).await;
+                let _ = client
+                    .publish(
+                        reply.clone(),
+                        serde_json::to_vec(&response).unwrap_or_default().into(),
+                    )
+                    .await;
             }
             return;
         }
@@ -561,7 +575,12 @@ async fn handle_plugin_start(
                 message: format!("Plugin '{}' not found in plugins.yaml", plugin_name),
             };
             if let Some(reply) = &msg.reply {
-                let _ = client.publish(reply.clone(), serde_json::to_vec(&response).unwrap_or_default().into()).await;
+                let _ = client
+                    .publish(
+                        reply.clone(),
+                        serde_json::to_vec(&response).unwrap_or_default().into(),
+                    )
+                    .await;
             }
             return;
         }
@@ -576,7 +595,12 @@ async fn handle_plugin_start(
                     message: format!("Plugin '{}' is already running (PID {})", plugin_name, pid),
                 };
                 if let Some(reply) = &msg.reply {
-                    let _ = client.publish(reply.clone(), serde_json::to_vec(&response).unwrap_or_default().into()).await;
+                    let _ = client
+                        .publish(
+                            reply.clone(),
+                            serde_json::to_vec(&response).unwrap_or_default().into(),
+                        )
+                        .await;
                 }
                 return;
             }
@@ -606,7 +630,12 @@ async fn handle_plugin_start(
                 message: format!("Plugin '{}' started", plugin_name),
             };
             if let Some(reply) = &msg.reply {
-                let _ = client.publish(reply.clone(), serde_json::to_vec(&response).unwrap_or_default().into()).await;
+                let _ = client
+                    .publish(
+                        reply.clone(),
+                        serde_json::to_vec(&response).unwrap_or_default().into(),
+                    )
+                    .await;
             }
         }
         Err(e) => {
@@ -616,7 +645,12 @@ async fn handle_plugin_start(
                 message: format!("Failed to start plugin: {}", e),
             };
             if let Some(reply) = &msg.reply {
-                let _ = client.publish(reply.clone(), serde_json::to_vec(&response).unwrap_or_default().into()).await;
+                let _ = client
+                    .publish(
+                        reply.clone(),
+                        serde_json::to_vec(&response).unwrap_or_default().into(),
+                    )
+                    .await;
             }
         }
     }
@@ -639,7 +673,12 @@ async fn handle_plugin_stop(
                     success: false,
                     message: format!("Failed to parse command: {}", e),
                 };
-                let _ = client.publish(reply.clone(), serde_json::to_vec(&response).unwrap_or_default().into()).await;
+                let _ = client
+                    .publish(
+                        reply.clone(),
+                        serde_json::to_vec(&response).unwrap_or_default().into(),
+                    )
+                    .await;
             }
             return;
         }
@@ -657,7 +696,12 @@ async fn handle_plugin_stop(
                 message: format!("Plugin '{}' does not appear to be running", plugin_name),
             };
             if let Some(reply) = &msg.reply {
-                let _ = client.publish(reply.clone(), serde_json::to_vec(&response).unwrap_or_default().into()).await;
+                let _ = client
+                    .publish(
+                        reply.clone(),
+                        serde_json::to_vec(&response).unwrap_or_default().into(),
+                    )
+                    .await;
             }
             return;
         }
@@ -671,7 +715,12 @@ async fn handle_plugin_stop(
                 message: "Invalid PID file".to_string(),
             };
             if let Some(reply) = &msg.reply {
-                let _ = client.publish(reply.clone(), serde_json::to_vec(&response).unwrap_or_default().into()).await;
+                let _ = client
+                    .publish(
+                        reply.clone(),
+                        serde_json::to_vec(&response).unwrap_or_default().into(),
+                    )
+                    .await;
             }
             return;
         }
@@ -681,10 +730,18 @@ async fn handle_plugin_stop(
         let _ = std::fs::remove_file(&pid_file);
         let response = PluginCommandResponse {
             success: false,
-            message: format!("Plugin '{}' is not running (stale PID file cleaned up)", plugin_name),
+            message: format!(
+                "Plugin '{}' is not running (stale PID file cleaned up)",
+                plugin_name
+            ),
         };
         if let Some(reply) = &msg.reply {
-            let _ = client.publish(reply.clone(), serde_json::to_vec(&response).unwrap_or_default().into()).await;
+            let _ = client
+                .publish(
+                    reply.clone(),
+                    serde_json::to_vec(&response).unwrap_or_default().into(),
+                )
+                .await;
         }
         // Remove entry from processes vector
         processes.retain(|p| p.name != *plugin_name);
@@ -707,7 +764,12 @@ async fn handle_plugin_stop(
                 message: format!("Plugin '{}' stopped", plugin_name),
             };
             if let Some(reply) = &msg.reply {
-                let _ = client.publish(reply.clone(), serde_json::to_vec(&response).unwrap_or_default().into()).await;
+                let _ = client
+                    .publish(
+                        reply.clone(),
+                        serde_json::to_vec(&response).unwrap_or_default().into(),
+                    )
+                    .await;
             }
             info!(name = %plugin_name, "Plugin stopped via NATS");
             // Remove entry from processes vector
@@ -726,7 +788,12 @@ async fn handle_plugin_stop(
         message: format!("Plugin '{}' killed", plugin_name),
     };
     if let Some(reply) = &msg.reply {
-        let _ = client.publish(reply.clone(), serde_json::to_vec(&response).unwrap_or_default().into()).await;
+        let _ = client
+            .publish(
+                reply.clone(),
+                serde_json::to_vec(&response).unwrap_or_default().into(),
+            )
+            .await;
     }
     info!(name = %plugin_name, "Plugin killed via NATS");
     // Remove entry from processes vector

@@ -90,11 +90,7 @@ pub fn list_registries(paths: &SeidrumPaths) -> Result<()> {
         .map(|r| RegistryRow {
             name: r.name.clone(),
             url: r.url.clone(),
-            synced: r
-                .synced_at
-                .as_deref()
-                .unwrap_or("never")
-                .to_string(),
+            synced: r.synced_at.as_deref().unwrap_or("never").to_string(),
         })
         .collect();
 
@@ -152,7 +148,11 @@ pub fn sync_registry(name: Option<&str>, paths: &SeidrumPaths) -> Result<()> {
     let registries_to_sync = if let Some(n) = name {
         vec![n.to_string()]
     } else {
-        registries.registries.iter().map(|r| r.name.clone()).collect()
+        registries
+            .registries
+            .iter()
+            .map(|r| r.name.clone())
+            .collect()
     };
 
     for reg_name in registries_to_sync {

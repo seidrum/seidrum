@@ -11,36 +11,32 @@ use tracing::{debug, info};
 /// Validate artifact URL before downloading
 fn validate_artifact_url(url: &str) -> Result<()> {
     // Allow https:// (and http:// for localhost dev)
-    if !url.starts_with("https://") && !url.starts_with("http://localhost") && !url.starts_with("http://127.0.0.1") {
-        anyhow::bail!("Artifact URL must use https:// or be localhost for development: {}", url);
+    if !url.starts_with("https://")
+        && !url.starts_with("http://localhost")
+        && !url.starts_with("http://127.0.0.1")
+    {
+        anyhow::bail!(
+            "Artifact URL must use https:// or be localhost for development: {}",
+            url
+        );
     }
 
     // Check for private/internal IP ranges (basic string-based check)
     let private_ranges = [
-        "10.",           // 10.0.0.0/8
-        "172.16.",       // 172.16.0.0/12
-        "172.17.",
-        "172.18.",
-        "172.19.",
-        "172.20.",
-        "172.21.",
-        "172.22.",
-        "172.23.",
-        "172.24.",
-        "172.25.",
-        "172.26.",
-        "172.27.",
-        "172.28.",
-        "172.29.",
-        "172.30.",
-        "172.31.",
-        "192.168.",      // 192.168.0.0/16
-        "169.254.",      // 169.254.0.0/16 (link-local)
+        "10.",     // 10.0.0.0/8
+        "172.16.", // 172.16.0.0/12
+        "172.17.", "172.18.", "172.19.", "172.20.", "172.21.", "172.22.", "172.23.", "172.24.",
+        "172.25.", "172.26.", "172.27.", "172.28.", "172.29.", "172.30.", "172.31.",
+        "192.168.", // 192.168.0.0/16
+        "169.254.", // 169.254.0.0/16 (link-local)
     ];
 
     for range in &private_ranges {
         if url.contains(range) && !url.contains("localhost") && !url.contains("127.0.0.1") {
-            anyhow::bail!("Artifact URL uses private/internal IP range, which is not allowed: {}", url);
+            anyhow::bail!(
+                "Artifact URL uses private/internal IP range, which is not allowed: {}",
+                url
+            );
         }
     }
 
@@ -68,10 +64,7 @@ pub fn current_target() -> &'static str {
 }
 
 /// Download artifact for current platform to destination
-pub async fn download_artifact(
-    artifacts: &[PackageArtifact],
-    dest_dir: &Path,
-) -> Result<PathBuf> {
+pub async fn download_artifact(artifacts: &[PackageArtifact], dest_dir: &Path) -> Result<PathBuf> {
     let target = current_target();
     debug!("Looking for artifact for target: {}", target);
 
@@ -96,10 +89,7 @@ pub async fn download_artifact(
     info!("Downloading artifact from {}", artifact.url);
 
     let client = reqwest::Client::new();
-    let response = client
-        .get(&artifact.url)
-        .send()
-        .await?;
+    let response = client.get(&artifact.url).send().await?;
 
     let total_size = response.content_length().unwrap_or(0);
     let pb = if total_size > 0 {
@@ -115,11 +105,7 @@ pub async fn download_artifact(
     };
 
     let mut stream = response.bytes_stream();
-    let filename = artifact
-        .url
-        .split('/')
-        .last()
-        .unwrap_or("package.tar.gz");
+    let filename = artifact.url.split('/').last().unwrap_or("package.tar.gz");
     let dest_path = dest_dir.join(filename);
 
     let mut file = File::create(&dest_path)?;

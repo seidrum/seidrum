@@ -219,6 +219,7 @@ impl WorkflowEngine {
                                     .unwrap_or_else(|| "scope_root".to_string()),
                                 additional_scopes: vec![],
                                 description: None,
+                                enabled: true,
                                 subscribe: vec![],
                                 guardrails: None,
                             };
@@ -348,7 +349,7 @@ impl WorkflowEngine {
             // Spawn reload handler
             {
                 let engine = engine.clone();
-                let nats = nats.clone();
+                let _nats = nats.clone();
                 let mut reload_sub = reload_sub;
 
                 let h = tokio::spawn(async move {

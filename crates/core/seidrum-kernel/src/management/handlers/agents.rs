@@ -3,8 +3,8 @@ use axum::{
     http::StatusCode,
     response::Json,
 };
-use serde::{Deserialize, Serialize};
 use seidrum_common::config::AgentDefinition;
+use serde::Serialize;
 use std::path::PathBuf;
 use tracing::{error, info};
 
@@ -105,10 +105,7 @@ pub async fn get_agent(
 ) -> Result<Json<AgentDetailResponse>, (StatusCode, String)> {
     let agent_path = find_agent_file(&state.agents_dir, &id)
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
-        .ok_or((
-            StatusCode::NOT_FOUND,
-            format!("Agent '{}' not found", id),
-        ))?;
+        .ok_or((StatusCode::NOT_FOUND, format!("Agent '{}' not found", id)))?;
 
     let agent = load_agent_definition(&agent_path)
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
@@ -145,8 +142,7 @@ pub async fn enable_agent(
         tracing::error!("Failed to publish agent reload signal: {}", e);
     }
 
-    let response = get_agent(State(state), Path(id))
-        .await?;
+    let response = get_agent(State(state), Path(id)).await?;
     Ok((StatusCode::ACCEPTED, response))
 }
 
@@ -170,8 +166,7 @@ pub async fn disable_agent(
         tracing::error!("Failed to publish agent reload signal: {}", e);
     }
 
-    let response = get_agent(State(state), Path(id))
-        .await?;
+    let response = get_agent(State(state), Path(id)).await?;
     Ok((StatusCode::ACCEPTED, response))
 }
 
@@ -181,15 +176,11 @@ pub async fn disable_agent(
 
 pub fn load_agent_definition(path: &PathBuf) -> anyhow::Result<AgentDefinition> {
     let contents = std::fs::read_to_string(path)?;
-    let file: seidrum_common::config::AgentDefinitionFile =
-        serde_yaml::from_str(&contents)?;
+    let file: seidrum_common::config::AgentDefinitionFile = serde_yaml::from_str(&contents)?;
     Ok(file.agent)
 }
 
-pub fn save_agent_definition(
-    path: &PathBuf,
-    agent: &AgentDefinition,
-) -> anyhow::Result<()> {
+pub fn save_agent_definition(path: &PathBuf, agent: &AgentDefinition) -> anyhow::Result<()> {
     let file = seidrum_common::config::AgentDefinitionFile {
         agent: agent.clone(),
     };
@@ -230,11 +221,7 @@ pub fn find_agent_file(agents_dir: &PathBuf, id: &str) -> anyhow::Result<Option<
     Ok(None)
 }
 
-async fn set_agent_enabled(
-    state: &ManagementState,
-    id: &str,
-    enabled: bool,
-) -> anyhow::Result<()> {
+async fn set_agent_enabled(state: &ManagementState, id: &str, enabled: bool) -> anyhow::Result<()> {
     let agent_path = find_agent_file(&state.agents_dir, id)?
         .ok_or_else(|| anyhow::anyhow!("Agent '{}' not found", id))?;
 

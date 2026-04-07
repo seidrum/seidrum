@@ -59,7 +59,6 @@ pub fn verify_sha256(file_path: &Path, expected: &str) -> Result<bool> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::fs;
     use std::io::Write;
     use tempfile::NamedTempFile;
 

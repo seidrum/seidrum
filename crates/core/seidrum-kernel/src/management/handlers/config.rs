@@ -35,8 +35,12 @@ pub struct SetEnvResponse {
 
 /// Escape environment variable values for safe .env file writing
 fn escape_env_value(value: &str) -> String {
-    if value.contains(' ') || value.contains('"') || value.contains('\'')
-        || value.contains('\n') || value.contains('#') || value.contains('$')
+    if value.contains(' ')
+        || value.contains('"')
+        || value.contains('\'')
+        || value.contains('\n')
+        || value.contains('#')
+        || value.contains('$')
     {
         format!(
             "\"{}\"",
@@ -59,8 +63,7 @@ fn escape_env_value(value: &str) -> String {
 pub async fn list_env(
     State(state): State<ManagementState>,
 ) -> Result<Json<Vec<EnvItem>>, (StatusCode, String)> {
-    let env_content = std::fs::read_to_string(&state.env_file)
-        .unwrap_or_default();
+    let env_content = std::fs::read_to_string(&state.env_file).unwrap_or_default();
 
     let items: Vec<EnvItem> = env_content
         .lines()
@@ -115,15 +118,15 @@ pub async fn set_env(
     if !key.chars().all(|c| c.is_ascii_alphanumeric() || c == '_') {
         return Err((
             StatusCode::BAD_REQUEST,
-            "Environment variable name must contain only alphanumeric characters and underscores".to_string(),
+            "Environment variable name must contain only alphanumeric characters and underscores"
+                .to_string(),
         ));
     }
 
     let env_file = &state.env_file;
 
     // Read existing .env content
-    let content = std::fs::read_to_string(env_file)
-        .unwrap_or_default();
+    let content = std::fs::read_to_string(env_file).unwrap_or_default();
 
     let mut lines: Vec<String> = content.lines().map(|l| l.to_string()).collect();
 
@@ -146,16 +149,12 @@ pub async fn set_env(
 
     // Write back to file
     let new_content = lines.join("\n") + "\n";
-    std::fs::write(env_file, new_content)
-        .map_err(|e| {
-            error!("Failed to write .env file: {}", e);
-            (StatusCode::INTERNAL_SERVER_ERROR, e.to_string())
-        })?;
+    std::fs::write(env_file, new_content).map_err(|e| {
+        error!("Failed to write .env file: {}", e);
+        (StatusCode::INTERNAL_SERVER_ERROR, e.to_string())
+    })?;
 
     info!("Environment variable '{}' set", key);
 
-    Ok(Json(SetEnvResponse {
-        key,
-        set: true,
-    }))
+    Ok(Json(SetEnvResponse { key, set: true }))
 }

@@ -5,12 +5,10 @@ use std::path::PathBuf;
 use tracing::{debug, info};
 
 /// Resolve a package reference: name, name@version, or URL
-pub fn resolve_package(
-    reference: &str,
-    _paths: &SeidrumPaths,
-) -> Result<ResolvedPackage> {
+pub fn resolve_package(reference: &str, _paths: &SeidrumPaths) -> Result<ResolvedPackage> {
     // Check if it's a URL
-    if reference.starts_with("http://") || reference.starts_with("https://")
+    if reference.starts_with("http://")
+        || reference.starts_with("https://")
         || reference.starts_with("git@")
         || reference.ends_with(".git")
     {
@@ -83,8 +81,6 @@ fn resolve_from_registry(reference: &str, _paths: &SeidrumPaths) -> Result<Resol
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-
     #[test]
     fn test_parse_name_at_version() {
         let (name, version) = if let Some(at_pos) = "telegram@1.0.0".find('@') {

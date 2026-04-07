@@ -1,8 +1,4 @@
-use axum::{
-    extract::State,
-    http::StatusCode,
-    response::Json,
-};
+use axum::{extract::State, http::StatusCode, response::Json};
 use serde::Serialize;
 use tracing::info;
 
@@ -41,19 +37,13 @@ pub async fn onboarding_status(
     let first_run = !onboarding_marker.exists();
 
     // Count enabled plugins
-    let plugins_enabled = count_enabled_plugins(&state)
-        .await
-        .unwrap_or(0);
+    let plugins_enabled = count_enabled_plugins(&state).await.unwrap_or(0);
 
     // Count enabled agents
-    let agents_enabled = count_enabled_agents(&state)
-        .await
-        .unwrap_or(0);
+    let agents_enabled = count_enabled_agents(&state).await.unwrap_or(0);
 
     // Count active channels (plugins that are channel-related and enabled)
-    let channels_active = count_active_channels(&state)
-        .await
-        .unwrap_or(0);
+    let channels_active = count_active_channels(&state).await.unwrap_or(0);
 
     Ok(Json(OnboardingStatusResponse {
         first_run,
@@ -70,15 +60,11 @@ pub async fn onboarding_complete(
     let marker_file = state.config_dir.join(".onboarding_complete");
 
     std::fs::write(&marker_file, "")
-        .map_err(|e| {
-            (StatusCode::INTERNAL_SERVER_ERROR, e.to_string())
-        })?;
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
 
     info!("Onboarding marked as complete");
 
-    Ok(Json(OnboardingCompleteResponse {
-        completed: true,
-    }))
+    Ok(Json(OnboardingCompleteResponse { completed: true }))
 }
 
 // ============================================================================
@@ -130,20 +116,12 @@ async fn count_active_channels(state: &ManagementState) -> anyhow::Result<usize>
     let config = super::plugins::load_plugins_config(&state.plugins_yaml())?;
 
     // Channel plugins: telegram, cli, email, notification, api-gateway
-    let channel_plugins = [
-        "telegram",
-        "cli",
-        "email",
-        "notification",
-        "api-gateway",
-    ];
+    let channel_plugins = ["telegram", "cli", "email", "notification", "api-gateway"];
 
     let count = config
         .plugins
         .iter()
-        .filter(|(name, entry)| {
-            entry.enabled && channel_plugins.contains(&name.as_str())
-        })
+        .filter(|(name, entry)| entry.enabled && channel_plugins.contains(&name.as_str()))
         .count();
 
     Ok(count)

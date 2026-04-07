@@ -1,6 +1,4 @@
-use super::{
-    download, resolve, verify, InstalledPackage, InstalledPackagesRegistry, PackageKind,
-};
+use super::{download, resolve, verify, InstalledPackage, InstalledPackagesRegistry, PackageKind};
 use crate::paths::SeidrumPaths;
 use anyhow::Result;
 use chrono::Utc;
@@ -82,7 +80,10 @@ pub async fn install(package_str: &str, yes: bool, paths: &SeidrumPaths) -> Resu
     let yaml_content = serde_yaml::to_string(&registry)?;
     fs::write(&installed_yaml, yaml_content)?;
 
-    println!("\nSuccessfully installed {} v{}", manifest.name, manifest.version);
+    println!(
+        "\nSuccessfully installed {} v{}",
+        manifest.name, manifest.version
+    );
     Ok(())
 }
 
@@ -98,7 +99,9 @@ async fn install_plugin(resolved: &super::ResolvedPackage, paths: &SeidrumPaths)
 
     // Find the artifact for the current platform
     let target = download::current_target();
-    let artifact = manifest.artifacts.iter()
+    let artifact = manifest
+        .artifacts
+        .iter()
         .find(|a| a.target == target)
         .ok_or_else(|| anyhow::anyhow!("No artifact for target {}", target))?;
 
@@ -155,40 +158,46 @@ fn install_agent(resolved: &super::ResolvedPackage, paths: &SeidrumPaths) -> Res
     println!("  Installed agent config to {}", agent_file.display());
 
     // Write placeholder prompt file
-    let prompts_dir = agents_dir.parent()
-        .unwrap_or(&agents_dir)
-        .join("prompts");
+    let prompts_dir = agents_dir.parent().unwrap_or(&agents_dir).join("prompts");
     fs::create_dir_all(&prompts_dir)?;
     let prompt_path = prompts_dir.join(format!("{}.md", manifest.name));
     if !prompt_path.exists() {
-        fs::write(&prompt_path, format!(
-            "# {}\n\n{}\n\nYou are a helpful AI assistant.\n",
-            manifest.name,
-            manifest.description.as_deref().unwrap_or("")
-        ))?;
+        fs::write(
+            &prompt_path,
+            format!(
+                "# {}\n\n{}\n\nYou are a helpful AI assistant.\n",
+                manifest.name,
+                manifest.description.as_deref().unwrap_or("")
+            ),
+        )?;
         info!("Created placeholder prompt: {}", prompt_path.display());
     }
 
     Ok(())
 }
 
-async fn install_bundle(resolved: &super::ResolvedPackage, paths: &SeidrumPaths) -> Result<()> {
-    let manifest = &resolved.manifest;
+fn install_bundle(
+    resolved: &super::ResolvedPackage,
+    paths: &SeidrumPaths,
+) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<()>> + '_>> {
+    Box::pin(async move {
+        let manifest = &resolved.manifest;
 
-    // Install dependencies recursively
-    for dep in &manifest.dependencies {
-        let dep_ref = if let Some(ver) = &dep.version {
-            format!("{}@{}", dep.name, ver)
-        } else {
-            dep.name.clone()
-        };
+        // Install dependencies recursively
+        for dep in &manifest.dependencies {
+            let dep_ref = if let Some(ver) = &dep.version {
+                format!("{}@{}", dep.name, ver)
+            } else {
+                dep.name.clone()
+            };
 
-        println!("  Installing dependency: {}", dep.name);
-        install(&dep_ref, true, paths).await?;
-    }
+            println!("  Installing dependency: {}", dep.name);
+            install(&dep_ref, true, paths).await?;
+        }
 
-    println!("  Bundle dependencies installed");
-    Ok(())
+        println!("  Bundle dependencies installed");
+        Ok(())
+    })
 }
 
 fn add_plugin_to_config(plugin_name: &str, binary_name: &str, paths: &SeidrumPaths) -> Result<()> {
@@ -196,20 +205,24 @@ fn add_plugin_to_config(plugin_name: &str, binary_name: &str, paths: &SeidrumPat
 
     let mut doc: serde_yaml::Value = if plugins_yaml.exists() {
         let content = fs::read_to_string(&plugins_yaml)?;
-        serde_yaml::from_str(&content).unwrap_or(serde_yaml::Value::Mapping(serde_yaml::Mapping::new()))
+        serde_yaml::from_str(&content)
+            .unwrap_or(serde_yaml::Value::Mapping(serde_yaml::Mapping::new()))
     } else {
         serde_yaml::Value::Mapping(serde_yaml::Mapping::new())
     };
 
     // Navigate to or create plugins map
-    let root = doc.as_mapping_mut()
+    let root = doc
+        .as_mapping_mut()
         .ok_or_else(|| anyhow::anyhow!("plugins.yaml root is not a mapping"))?;
 
     let plugins_key = serde_yaml::Value::String("plugins".to_string());
-    let plugins_map = root.entry(plugins_key)
+    let plugins_map = root
+        .entry(plugins_key)
         .or_insert_with(|| serde_yaml::Value::Mapping(serde_yaml::Mapping::new()));
 
-    let plugins_map = plugins_map.as_mapping_mut()
+    let plugins_map = plugins_map
+        .as_mapping_mut()
         .ok_or_else(|| anyhow::anyhow!("plugins key is not a mapping"))?;
 
     // Add the plugin entry

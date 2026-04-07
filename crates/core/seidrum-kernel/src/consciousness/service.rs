@@ -309,10 +309,7 @@ impl ConsciousnessService {
 
         let handle = tokio::spawn(async move {
             let agent_count = agents.read().await.len();
-            info!(
-                agent_count = agent_count,
-                "Consciousness service started"
-            );
+            info!(agent_count = agent_count, "Consciousness service started");
 
             loop {
                 tokio::select! {
@@ -348,8 +345,6 @@ impl ConsciousnessService {
                     }
                 }
             }
-
-            info!("Consciousness service stopped");
         });
 
         Ok(handle)

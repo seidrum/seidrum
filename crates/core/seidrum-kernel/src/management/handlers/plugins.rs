@@ -1,7 +1,7 @@
 use axum::{
     extract::{Path, State},
     http::StatusCode,
-    response::{IntoResponse, Json},
+    response::Json,
 };
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
@@ -65,9 +65,7 @@ pub async fn list_plugins(
     let config = load_plugins_config(&state.plugins_yaml())
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
 
-    let running_plugins = query_running_plugins(&state)
-        .await
-        .unwrap_or_default();
+    let running_plugins = query_running_plugins(&state).await.unwrap_or_default();
 
     let items: Vec<PluginListItem> = config
         .plugins
@@ -226,13 +224,12 @@ async fn get_plugin_detail(
 ) -> anyhow::Result<Json<PluginDetailResponse>> {
     let config = load_plugins_config(&state.plugins_yaml())?;
 
-    let entry = config.plugins.get(name).ok_or_else(|| {
-        anyhow::anyhow!("Plugin '{}' not found", name)
-    })?;
+    let entry = config
+        .plugins
+        .get(name)
+        .ok_or_else(|| anyhow::anyhow!("Plugin '{}' not found", name))?;
 
-    let running_plugins = query_running_plugins(state)
-        .await
-        .unwrap_or_default();
+    let running_plugins = query_running_plugins(state).await.unwrap_or_default();
     let running = running_plugins.contains(name);
 
     Ok(Json(PluginDetailResponse {
@@ -246,7 +243,9 @@ async fn get_plugin_detail(
 
 /// Query NATS registry.query subject to get list of running plugins.
 /// This subscribes to registry.query and expects a response with running plugin names.
-async fn query_running_plugins(state: &ManagementState) -> anyhow::Result<std::collections::HashSet<String>> {
+async fn query_running_plugins(
+    state: &ManagementState,
+) -> anyhow::Result<std::collections::HashSet<String>> {
     // Try to request plugin list from registry via NATS
     // The registry.query subject expects a response with plugin names
     let request = serde_json::json!({ "type": "list_plugins" }).to_string();

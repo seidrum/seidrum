@@ -3,8 +3,8 @@ use axum::{
     http::StatusCode,
     response::Json,
 };
+use seidrum_common::config::{Preset, PresetFile};
 use serde::{Deserialize, Serialize};
-use seidrum_common::config::{Preset, PresetBundle, PresetFile};
 use std::collections::HashMap;
 use std::path::PathBuf;
 use tracing::{error, info, warn};
@@ -96,9 +96,7 @@ pub async fn import_preset(
     Json(req): Json<ImportBundleRequest>,
 ) -> Result<Json<InstallResult>, (StatusCode, String)> {
     match req.source.as_str() {
-        "inline" => {
-            import_inline(&state, req).await.map(Json)
-        }
+        "inline" => import_inline(&state, req).await.map(Json),
         "url" => {
             // URL import would require HTTP client; for now return error
             Err((
@@ -120,10 +118,7 @@ pub async fn export_preset(
 ) -> Result<Json<ExportBundleResponse>, (StatusCode, String)> {
     let preset_path = super::presets::find_preset_file(&state.presets_dir, &id)
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
-        .ok_or((
-            StatusCode::NOT_FOUND,
-            format!("Preset '{}' not found", id),
-        ))?;
+        .ok_or((StatusCode::NOT_FOUND, format!("Preset '{}' not found", id)))?;
 
     let preset_file = load_preset_file(&preset_path)
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
@@ -151,7 +146,11 @@ pub async fn export_preset(
         // Collect prompt files
         for prompt_file in &bundle.prompts {
             let safe_name = sanitize_filename(prompt_file)?;
-            let prompts_dir = state.config_dir.parent().unwrap_or(&state.config_dir).join("prompts");
+            let prompts_dir = state
+                .config_dir
+                .parent()
+                .unwrap_or(&state.config_dir)
+                .join("prompts");
             let path = prompts_dir.join(safe_name);
             if path.exists() {
                 match std::fs::read_to_string(&path) {
@@ -180,16 +179,12 @@ pub async fn delete_preset(
 ) -> Result<StatusCode, (StatusCode, String)> {
     let preset_path = super::presets::find_preset_file(&state.presets_dir, &id)
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
-        .ok_or((
-            StatusCode::NOT_FOUND,
-            format!("Preset '{}' not found", id),
-        ))?;
+        .ok_or((StatusCode::NOT_FOUND, format!("Preset '{}' not found", id)))?;
 
-    std::fs::remove_file(&preset_path)
-        .map_err(|e| {
-            error!("Failed to delete preset file: {}", e);
-            (StatusCode::INTERNAL_SERVER_ERROR, e.to_string())
-        })?;
+    std::fs::remove_file(&preset_path).map_err(|e| {
+        error!("Failed to delete preset file: {}", e);
+        (StatusCode::INTERNAL_SERVER_ERROR, e.to_string())
+    })?;
 
     info!("Deleted preset '{}'", id);
     Ok(StatusCode::OK)
@@ -324,16 +319,13 @@ async fn install_bundle(
     if let Some(bundle) = &preset.bundle {
         for agent_file in &bundle.agents {
             if let Some(content) = agents.get(agent_file) {
-                let safe_name = sanitize_filename(agent_file)
-                    .map_err(|e| anyhow::anyhow!("{}", e.1))?;
+                let safe_name =
+                    sanitize_filename(agent_file).map_err(|e| anyhow::anyhow!("{}", e.1))?;
                 let dest = state.agents_dir.join(safe_name);
 
                 // Don't overwrite existing agents
                 if dest.exists() {
-                    warn!(
-                        "Agent file {} already exists, skipping",
-                        agent_file
-                    );
+                    warn!("Agent file {} already exists, skipping", agent_file);
                     skipped_agents.push(agent_file.clone());
                     continue;
                 }
@@ -360,15 +352,12 @@ async fn install_bundle(
 
         for prompt_file in &bundle.prompts {
             if let Some(content) = prompts.get(prompt_file) {
-                let safe_name = sanitize_filename(prompt_file)
-                    .map_err(|e| anyhow::anyhow!("{}", e.1))?;
+                let safe_name =
+                    sanitize_filename(prompt_file).map_err(|e| anyhow::anyhow!("{}", e.1))?;
                 let dest = prompts_dir.join(safe_name);
 
                 if dest.exists() {
-                    warn!(
-                        "Prompt file {} already exists, skipping",
-                        prompt_file
-                    );
+                    warn!("Prompt file {} already exists, skipping", prompt_file);
                     skipped_prompts.push(prompt_file.clone());
                     continue;
                 }
@@ -383,13 +372,12 @@ async fn install_bundle(
 
         // 3. Add new plugin entries to plugins.yaml
         let plugins_yaml = state.plugins_yaml();
-        let mut plugins_config =
-            match super::plugins::load_plugins_config(&plugins_yaml) {
-                Ok(cfg) => cfg,
-                Err(_) => super::plugins::PluginsConfig {
-                    plugins: std::collections::BTreeMap::new(),
-                },
-            };
+        let mut plugins_config = match super::plugins::load_plugins_config(&plugins_yaml) {
+            Ok(cfg) => cfg,
+            Err(_) => super::plugins::PluginsConfig {
+                plugins: std::collections::BTreeMap::new(),
+            },
+        };
 
         for bundled_plugin in &bundle.plugins {
             // Only add if not already present
@@ -419,7 +407,9 @@ async fn install_bundle(
         std::fs::create_dir_all(&state.presets_dir)?;
     }
 
-    let preset_file = PresetFile { preset: preset.clone() };
+    let preset_file = PresetFile {
+        preset: preset.clone(),
+    };
     let yaml = serde_yaml::to_string(&preset_file)?;
     std::fs::write(&preset_dest, yaml)?;
 

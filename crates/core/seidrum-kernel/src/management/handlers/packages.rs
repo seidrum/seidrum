@@ -1,11 +1,11 @@
 use axum::{
-    extract::{Path, State, Query},
+    extract::{Path, Query, State},
     http::StatusCode,
     response::{IntoResponse, Json},
 };
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
-use tracing::{info, error};
+use tracing::{error, info};
 
 use crate::management::state::ManagementState;
 
@@ -35,7 +35,7 @@ pub struct SearchQuery {
     pub kind: Option<String>,
 }
 
-#[derive(Deserialize, Debug)]
+#[derive(Serialize, Deserialize, Debug)]
 pub struct InstallRequest {
     pub package: String,
     pub confirm: bool,
@@ -145,10 +145,7 @@ pub async fn search_packages(
             });
 
             let installed = load_installed().unwrap_or_default();
-            let installed_names: Vec<String> = installed
-                .iter()
-                .map(|p| p.name.clone())
-                .collect();
+            let installed_names: Vec<String> = installed.iter().map(|p| p.name.clone()).collect();
 
             for pkg in &mut results {
                 pkg.installed = installed_names.contains(&pkg.name);
@@ -263,7 +260,10 @@ pub async fn list_installed(_state: State<ManagementState>) -> impl IntoResponse
                 })
                 .collect();
 
-            Json(InstalledPackages { packages: installed }).into_response()
+            Json(InstalledPackages {
+                packages: installed,
+            })
+            .into_response()
         }
         Err(_) => {
             // No installed packages yet
@@ -294,10 +294,7 @@ fn load_all_registries() -> anyhow::Result<Vec<PackageInfo>> {
             if index_path.exists() {
                 if let Ok(contents) = std::fs::read_to_string(&index_path) {
                     if let Ok(index) = serde_yaml::from_str::<RegistryIndexResponse>(&contents) {
-                        let source = entry
-                            .file_name()
-                            .to_string_lossy()
-                            .to_string();
+                        let source = entry.file_name().to_string_lossy().to_string();
 
                         if let Some(packages) = index.packages {
                             for pkg in packages {
@@ -307,7 +304,7 @@ fn load_all_registries() -> anyhow::Result<Vec<PackageInfo>> {
                                     kind: pkg.kind,
                                     description: pkg.description,
                                     author: pkg.author,
-                                    source,
+                                    source: source.clone(),
                                     installed: false,
                                 });
                             }

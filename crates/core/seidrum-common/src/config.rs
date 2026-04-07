@@ -684,9 +684,8 @@ pub struct BundledPlugin {
 pub fn load_preset(path: &Path) -> anyhow::Result<PresetFile> {
     let contents = std::fs::read_to_string(path)
         .map_err(|e| anyhow::anyhow!("Failed to read preset at {}: {}", path.display(), e))?;
-    let preset: PresetFile = serde_yaml::from_str(&contents).map_err(|e| {
-        anyhow::anyhow!("Failed to parse preset at {}: {}", path.display(), e)
-    })?;
+    let preset: PresetFile = serde_yaml::from_str(&contents)
+        .map_err(|e| anyhow::anyhow!("Failed to parse preset at {}: {}", path.display(), e))?;
     Ok(preset)
 }
 

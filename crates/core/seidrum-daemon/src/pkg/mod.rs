@@ -63,10 +63,7 @@ pub struct ResolvedPackage {
 
 #[derive(Debug, Clone)]
 pub enum PackageSource {
-    Registry {
-        name: String,
-        version: String,
-    },
+    Registry { name: String, version: String },
     Url(String),
     Local(PathBuf),
 }

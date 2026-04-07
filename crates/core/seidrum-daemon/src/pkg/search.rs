@@ -29,8 +29,6 @@ pub fn search(query: &str, _paths: &SeidrumPaths) -> Result<()> {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-
     #[test]
     fn test_search_placeholder() {
         // Search functionality requires external registry integration

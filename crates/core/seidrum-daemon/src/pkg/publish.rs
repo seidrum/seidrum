@@ -15,9 +15,7 @@ pub fn publish(registry_name: &str, paths: &SeidrumPaths) -> Result<()> {
     // Check for seidrum-pkg.yaml
     let manifest_path = cwd.join("seidrum-pkg.yaml");
     if !manifest_path.exists() {
-        anyhow::bail!(
-            "No seidrum-pkg.yaml found in current directory. Please create one first."
-        );
+        anyhow::bail!("No seidrum-pkg.yaml found in current directory. Please create one first.");
     }
 
     // Load and validate manifest
@@ -43,9 +41,7 @@ pub fn publish(registry_name: &str, paths: &SeidrumPaths) -> Result<()> {
 
     let registry = registries_config
         .find(registry_name)
-        .ok_or_else(|| {
-            anyhow::anyhow!("Registry '{}' not configured", registry_name)
-        })?;
+        .ok_or_else(|| anyhow::anyhow!("Registry '{}' not configured", registry_name))?;
 
     println!("  Registry: {} ({})", registry.name, registry.url);
 
@@ -72,7 +68,10 @@ pub fn publish(registry_name: &str, paths: &SeidrumPaths) -> Result<()> {
     println!("\nTo publish to the registry repository:");
     println!("  1. cd {}", registry_path.display());
     println!("  2. git add packages/{}", manifest.name);
-    println!("  3. git commit -m 'Publish {} v{}'", manifest.name, manifest.version);
+    println!(
+        "  3. git commit -m 'Publish {} v{}'",
+        manifest.name, manifest.version
+    );
     println!("  4. git push");
 
     Ok(())
