@@ -61,3 +61,12 @@ thiserror = "2"
 
 # Date/time
 chrono = { version = "0.4", features = ["serde"] }
+
+# HTTP server
+axum = "0.8"
+http = "1"
+tower-http = { version = "0.6", features = ["cors", "fs"] }
+tower = "0.5"
+
+# Home directory resolution
+dirs = "6"

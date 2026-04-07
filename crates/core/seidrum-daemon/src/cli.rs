@@ -39,6 +39,11 @@ pub enum Commands {
         #[command(subcommand)]
         action: ServiceAction,
     },
+    /// Package manager: install, search, publish, and manage packages
+    Pkg {
+        #[command(subcommand)]
+        action: PkgAction,
+    },
 }
 
 #[derive(Subcommand)]
@@ -77,5 +82,76 @@ pub enum PluginAction {
     Restart {
         /// Plugin name
         name: String,
+    },
+}
+
+#[derive(Subcommand, Debug)]
+pub enum PkgAction {
+    /// Search the registry for packages
+    Search {
+        /// Search query
+        query: String,
+    },
+    /// Install a package from the registry or a URL
+    Install {
+        /// Package name, name@version, or URL
+        package: String,
+        /// Skip confirmation prompt
+        #[arg(long)]
+        yes: bool,
+    },
+    /// Uninstall a package
+    Uninstall {
+        /// Package name
+        name: String,
+        /// Skip confirmation prompt
+        #[arg(long)]
+        yes: bool,
+    },
+    /// List installed packages
+    List,
+    /// Show package details
+    Info {
+        /// Package name
+        name: String,
+    },
+    /// Update installed packages
+    Update {
+        /// Specific package to update (all if omitted)
+        name: Option<String>,
+    },
+    /// Publish current directory as a package to the registry
+    Publish {
+        /// Registry to publish to
+        #[arg(long, default_value = "default")]
+        registry: String,
+    },
+    /// Manage registries
+    Registry {
+        #[command(subcommand)]
+        action: RegistryAction,
+    },
+}
+
+#[derive(Subcommand, Debug)]
+pub enum RegistryAction {
+    /// Add a custom registry
+    Add {
+        /// Registry name
+        name: String,
+        /// Git URL of the registry
+        url: String,
+    },
+    /// List configured registries
+    List,
+    /// Remove a custom registry
+    Remove {
+        /// Registry name
+        name: String,
+    },
+    /// Sync registry index
+    Sync {
+        /// Registry name (all if omitted)
+        name: Option<String>,
     },
 }

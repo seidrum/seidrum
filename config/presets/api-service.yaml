@@ -1,0 +1,30 @@
+preset:
+  id: api-service
+  name: API Service
+  description: Headless AI service with REST API and WebSocket streaming. For integrating Seidrum into other apps.
+  icon: globe
+  plugins:
+    required:
+      - api-gateway
+      - content-ingester
+      - llm-router
+      - response-formatter
+    recommended:
+      - entity-extractor
+      - fact-extractor
+      - scope-classifier
+      - tool-dispatcher
+  agents:
+    required:
+      - personal-assistant
+    recommended:
+      - research-agent
+  env_required:
+    - key: GOOGLE_API_KEY
+      label: Google AI API Key
+      help: "Get one at https://aistudio.google.com/apikey"
+    - key: GATEWAY_API_KEY
+      label: API Gateway Key
+      help: "Used to authenticate API requests. Will be auto-generated if empty."
+      auto_generate: "hex:32"
+  llm_provider: llm-google

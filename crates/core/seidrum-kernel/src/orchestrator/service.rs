@@ -97,6 +97,10 @@ impl WorkflowEngine {
             // Try V2 format first (prompt + tools + scope)
             if let Ok(def_file) = load_agent_definition(&path) {
                 let def = def_file.agent;
+                if !def.enabled {
+                    info!(agent_id = %def.id, "agent disabled, skipping (V2 format)");
+                    continue;
+                }
                 info!(
                     agent_id = %def.id,
                     scope = %def.scope,
@@ -215,6 +219,7 @@ impl WorkflowEngine {
                                     .unwrap_or_else(|| "scope_root".to_string()),
                                 additional_scopes: vec![],
                                 description: None,
+                                enabled: true,
                                 subscribe: vec![],
                                 guardrails: None,
                             };
@@ -328,11 +333,40 @@ impl WorkflowEngine {
             .with_context(|| "failed to subscribe to llm.response")?;
         info!("subscribed to llm.response for response routing");
 
+        // Subscribe to agent reload events from management API
+        let reload_sub = nats_client
+            .subscribe("kernel.agents.reload".to_string())
+            .await
+            .with_context(|| "failed to subscribe to kernel.agents.reload")?;
+
         let nats = nats_client.clone();
         let engine = self.clone();
+        let agents_dir_reload = agents_dir.to_string();
 
         let handle = tokio::spawn(async move {
             let mut handles = Vec::new();
+
+            // Spawn reload handler
+            {
+                let engine = engine.clone();
+                let _nats = nats.clone();
+                let mut reload_sub = reload_sub;
+
+                let h = tokio::spawn(async move {
+                    while let Some(_msg) = reload_sub.next().await {
+                        info!("Orchestrator: reloading agents from disk");
+                        match engine.load_agents(&agents_dir_reload).await {
+                            Ok(count) => {
+                                info!(count = count, "Orchestrator: agents reloaded");
+                            }
+                            Err(e) => {
+                                error!(error = %e, "Orchestrator: failed to reload agents");
+                            }
+                        }
+                    }
+                });
+                handles.push(h);
+            }
 
             // Spawn a task per trigger subscription.
             for (mut sub, contexts) in trigger_subs {

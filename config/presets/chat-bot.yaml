@@ -1,0 +1,32 @@
+preset:
+  id: chat-bot
+  name: Chat Bot
+  description: Personal AI assistant via Telegram. Remembers context, extracts knowledge, handles tasks.
+  icon: message-circle
+  plugins:
+    required:
+      - telegram
+      - content-ingester
+      - llm-router
+      - response-formatter
+    recommended:
+      - entity-extractor
+      - fact-extractor
+      - scope-classifier
+      - graph-context-loader
+      - event-emitter
+      - task-detector
+      - notification
+  agents:
+    required:
+      - personal-assistant
+    recommended:
+      - proactive-monitor
+  env_required:
+    - key: TELEGRAM_TOKEN
+      label: Telegram Bot Token
+      help: "Create a bot via @BotFather on Telegram and copy the token"
+    - key: GOOGLE_API_KEY
+      label: Google AI API Key
+      help: "Get one at https://aistudio.google.com/apikey"
+  llm_provider: llm-google

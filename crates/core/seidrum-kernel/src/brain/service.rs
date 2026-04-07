@@ -1622,7 +1622,7 @@ async fn handle_get_facts(
     let min_confidence = req.min_confidence.unwrap_or(0.5);
     let limit = req.limit.unwrap_or(50);
 
-    // start_vertex can be an entity _id ("entities/entity_luis") or _key
+    // start_vertex can be an entity _id ("entities/entity_alex") or _key
     let entity_id = if start_vertex.contains('/') {
         start_vertex.to_string()
     } else {

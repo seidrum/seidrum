@@ -1,0 +1,35 @@
+# Example: Standalone Agent Package Manifest
+#
+# Agents are distributable YAML definitions with system prompts.
+# Can be used standalone or as part of a bundle.
+
+package:
+  name: seidrum-summarizer-agent
+  version: 0.1.0
+  kind: agent
+  description: An intelligent agent that summarizes long content into concise overviews
+  author: seidrum
+  license: MIT
+  repository: https://github.com/seidrum/summarizer-agent
+
+agent:
+  # Unique agent ID within a Seidrum instance
+  id: summarizer
+
+  # Path to the system prompt template (Tera-templated markdown)
+  # This file is relative to the package root when distributed
+  prompt: ./prompts/summarizer.md
+
+  # Tools/capabilities this agent can use
+  tools:
+    - brain-query              # Built-in: query knowledge graph
+    - send-notification        # Built-in: send user notifications
+    - summarize-content        # Custom tool from a plugin
+
+  # Scope constraint: scope_root means no cross-scope access
+  scope: scope_root
+
+  # NATS subjects that trigger this agent (wake events)
+  subscribe:
+    - content.stored           # Wake on new content
+    - agent.summarizer.wake    # Explicit wake by ID

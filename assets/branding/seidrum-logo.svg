@@ -1,0 +1,193 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 460 110" width="460" height="110">
+  <defs>
+    <!-- Glow filters -->
+    <filter id="glow-lg" x="-100%" y="-100%" width="300%" height="300%">
+      <feGaussianBlur stdDeviation="6" result="blur"/>
+      <feMerge>
+        <feMergeNode in="blur"/>
+        <feMergeNode in="blur"/>
+        <feMergeNode in="SourceGraphic"/>
+      </feMerge>
+    </filter>
+    <filter id="glow-md" x="-50%" y="-50%" width="200%" height="200%">
+      <feGaussianBlur stdDeviation="3" result="blur"/>
+      <feMerge>
+        <feMergeNode in="blur"/>
+        <feMergeNode in="blur"/>
+        <feMergeNode in="SourceGraphic"/>
+      </feMerge>
+    </filter>
+    <filter id="glow-sm" x="-40%" y="-40%" width="180%" height="180%">
+      <feGaussianBlur stdDeviation="2" result="blur"/>
+      <feMerge>
+        <feMergeNode in="blur"/>
+        <feMergeNode in="SourceGraphic"/>
+      </feMerge>
+    </filter>
+    <filter id="text-glow" x="-10%" y="-40%" width="120%" height="180%">
+      <feGaussianBlur stdDeviation="3" result="blur"/>
+      <feMerge>
+        <feMergeNode in="blur"/>
+        <feMergeNode in="SourceGraphic"/>
+      </feMerge>
+    </filter>
+
+    <!-- S-curve gradient -->
+    <linearGradient id="sGrad" x1="0%" y1="0%" x2="0%" y2="100%">
+      <stop offset="0%"   stop-color="#22d3ee"/>
+      <stop offset="48%"  stop-color="#818cf8"/>
+      <stop offset="100%" stop-color="#a855f7"/>
+    </linearGradient>
+
+    <!-- Background -->
+    <radialGradient id="bgGrad" cx="30%" cy="40%" r="70%">
+      <stop offset="0%"   stop-color="#0d1530"/>
+      <stop offset="100%" stop-color="#030712"/>
+    </radialGradient>
+
+    <!-- Text gradient -->
+    <linearGradient id="textGrad" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%"   stop-color="#f0f9ff"/>
+      <stop offset="60%"  stop-color="#e0e7ff"/>
+      <stop offset="100%" stop-color="#c4b5fd"/>
+    </linearGradient>
+
+    <!-- Node gradients -->
+    <radialGradient id="nodeCyan" cx="35%" cy="30%" r="70%">
+      <stop offset="0%"   stop-color="#cffafe"/>
+      <stop offset="100%" stop-color="#0e7490"/>
+    </radialGradient>
+    <radialGradient id="nodePurple" cx="35%" cy="30%" r="70%">
+      <stop offset="0%"   stop-color="#ede9fe"/>
+      <stop offset="100%" stop-color="#7e22ce"/>
+    </radialGradient>
+    <radialGradient id="nodeIndigo" cx="35%" cy="30%" r="70%">
+      <stop offset="0%"   stop-color="#e0e7ff"/>
+      <stop offset="100%" stop-color="#4338ca"/>
+    </radialGradient>
+
+    <!-- Ring border -->
+    <linearGradient id="ringGrad" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%"   stop-color="#22d3ee" stop-opacity="0.5"/>
+      <stop offset="50%"  stop-color="#818cf8" stop-opacity="0.25"/>
+      <stop offset="100%" stop-color="#a855f7" stop-opacity="0.5"/>
+    </linearGradient>
+
+    <clipPath id="iconClip">
+      <circle cx="55" cy="55" r="46"/>
+    </clipPath>
+  </defs>
+
+  <!-- ── Canvas background ── -->
+  <rect width="460" height="110" fill="url(#bgGrad)" rx="14"/>
+
+  <!-- ────────────────────────────
+       ICON (centered at 55, 55)
+       ──────────────────────────── -->
+
+  <!-- Icon bg -->
+  <circle cx="55" cy="55" r="50" fill="#060b18"/>
+  <circle cx="55" cy="55" r="48" fill="url(#bgGrad)"/>
+
+  <!-- Ambient network dots -->
+  <g clip-path="url(#iconClip)" opacity="0.13">
+    <circle cx="28" cy="24" r="1.4" fill="#22d3ee"/>
+    <circle cx="82" cy="30" r="1.3" fill="#818cf8"/>
+    <circle cx="22" cy="82" r="1.3" fill="#a855f7"/>
+    <circle cx="88" cy="88" r="1.4" fill="#22d3ee"/>
+    <circle cx="58" cy="16" r="1.1" fill="#818cf8"/>
+    <circle cx="14" cy="52" r="1.1" fill="#22d3ee"/>
+    <circle cx="95" cy="60" r="1.1" fill="#a855f7"/>
+    <circle cx="40" cy="96" r="1.3" fill="#22d3ee"/>
+    <circle cx="75" cy="98" r="1.1" fill="#818cf8"/>
+    <line x1="28" y1="24" x2="82" y2="30" stroke="#818cf8" stroke-width="0.5"/>
+    <line x1="82" y1="30" x2="88" y2="88" stroke="#22d3ee" stroke-width="0.5"/>
+    <line x1="22" y1="82" x2="40" y2="96" stroke="#a855f7" stroke-width="0.5"/>
+    <line x1="14" y1="52" x2="22" y2="82" stroke="#22d3ee" stroke-width="0.5"/>
+    <line x1="58" y1="16" x2="28" y2="24" stroke="#818cf8" stroke-width="0.5"/>
+    <line x1="75" y1="98" x2="88" y2="88" stroke="#818cf8" stroke-width="0.5"/>
+    <line x1="95" y1="60" x2="88" y2="88" stroke="#a855f7" stroke-width="0.5"/>
+  </g>
+
+  <!-- ══════════════════════════════════════════
+       TRUE S-CURVE (scaled to icon)
+       Top bulges RIGHT, bottom bulges LEFT
+       Mapped from 200x200 → icon at (55,55) r=46
+       ══════════════════════════════════════════ -->
+
+  <!-- S-curve: deep halo -->
+  <path d="M 69 25 C 32 21 25 39 55 55 C 85 71 78 90 41 85"
+        fill="none" stroke="#818cf8" stroke-width="10"
+        stroke-linecap="round" opacity="0.18"
+        filter="url(#glow-lg)"
+        clip-path="url(#iconClip)"/>
+  <!-- S-curve: mid glow -->
+  <path d="M 69 25 C 32 21 25 39 55 55 C 85 71 78 90 41 85"
+        fill="none" stroke="url(#sGrad)" stroke-width="3"
+        stroke-linecap="round" opacity="0.55"
+        filter="url(#glow-md)"
+        clip-path="url(#iconClip)"/>
+  <!-- S-curve: sharp line -->
+  <path d="M 69 25 C 32 21 25 39 55 55 C 85 71 78 90 41 85"
+        fill="none" stroke="url(#sGrad)" stroke-width="1.5"
+        stroke-linecap="round"
+        clip-path="url(#iconClip)"/>
+
+  <!-- Quarter-point (top-left bulge ≈ 37, 33) -->
+  <circle cx="37" cy="33" r="2.8" fill="#22d3ee" opacity="0.8" filter="url(#glow-sm)"/>
+  <circle cx="37" cy="33" r="1.2" fill="white" opacity="0.9"/>
+
+  <!-- Three-quarter point (bottom-right bulge ≈ 73, 78) -->
+  <circle cx="73" cy="78" r="2.8" fill="#a855f7" opacity="0.8" filter="url(#glow-sm)"/>
+  <circle cx="73" cy="78" r="1.2" fill="white" opacity="0.9"/>
+
+  <!-- Center node (inflection at 55, 55) -->
+  <circle cx="55" cy="55" r="7"   fill="url(#nodeIndigo)" filter="url(#glow-md)"/>
+  <circle cx="55" cy="55" r="2.5" fill="white" opacity="0.95"/>
+
+  <!-- Top-right start node -->
+  <circle cx="69" cy="25" r="10" fill="#030d1f" opacity="0.9"/>
+  <circle cx="69" cy="25" r="9"  fill="url(#nodeCyan)" filter="url(#glow-md)"/>
+  <circle cx="69" cy="25" r="3.5" fill="white" opacity="0.95"/>
+
+  <!-- Bottom-left end node -->
+  <circle cx="41" cy="85" r="10" fill="#030d1f" opacity="0.9"/>
+  <circle cx="41" cy="85" r="9"  fill="url(#nodePurple)" filter="url(#glow-md)"/>
+  <circle cx="41" cy="85" r="3.5" fill="white" opacity="0.95"/>
+
+  <!-- Icon ring -->
+  <circle cx="55" cy="55" r="48" fill="none" stroke="url(#ringGrad)" stroke-width="1"/>
+  <circle cx="55" cy="55" r="46" fill="none" stroke="#1e3561" stroke-width="0.5" opacity="0.5"/>
+
+  <!-- ─────────────────────────────
+       WORDMARK
+       ───────────────────────────── -->
+
+  <!-- Subtle glow behind wordmark -->
+  <text x="120" y="67"
+        font-family="'Inter', 'SF Pro Display', 'Helvetica Neue', Arial, sans-serif"
+        font-size="38" font-weight="300" letter-spacing="9"
+        fill="#818cf8" opacity="0.18"
+        filter="url(#text-glow)">SEIDRUM</text>
+
+  <!-- Main wordmark -->
+  <text x="120" y="67"
+        font-family="'Inter', 'SF Pro Display', 'Helvetica Neue', Arial, sans-serif"
+        font-size="38" font-weight="300" letter-spacing="9"
+        fill="url(#textGrad)">SEIDRUM</text>
+
+  <!-- Tagline -->
+  <text x="122" y="85"
+        font-family="'Inter', 'SF Pro Display', 'Helvetica Neue', Arial, sans-serif"
+        font-size="10" font-weight="400" letter-spacing="3.5"
+        fill="#818cf8" opacity="0.65">EVENT-DRIVEN AGENT PLATFORM</text>
+
+  <!-- Subtle divider line between icon and text -->
+  <line x1="110" y1="22" x2="110" y2="88"
+        stroke="#818cf8" stroke-width="0.5" opacity="0.2"/>
+
+  <!-- Canvas border -->
+  <rect width="460" height="110" fill="none" stroke="url(#ringGrad)"
+        stroke-width="1" rx="14" opacity="0.5"/>
+</svg>

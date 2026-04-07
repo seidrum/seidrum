@@ -9,68 +9,68 @@
 plugins:
   telegram:
     binary: seidrum-telegram
-    enabled: true
+    enabled: false
     env:
       TELEGRAM_TOKEN: "${TELEGRAM_TOKEN}"
       TELEGRAM_ALLOWED_USERS: "${TELEGRAM_ALLOWED_USERS}"
 
   llm-router:
     binary: seidrum-llm-router
-    enabled: true
+    enabled: false
     env:
       LLM_ROUTING_STRATEGY: "${LLM_ROUTING_STRATEGY:-fallback}"
       LLM_FALLBACK_PROVIDERS: "${LLM_FALLBACK_PROVIDERS:-google,openai,anthropic}"
 
   llm-google:
     binary: seidrum-llm-google
-    enabled: true
+    enabled: false
     env:
       GOOGLE_API_KEY: "${GOOGLE_API_KEY}"
 
   tool-dispatcher:
     binary: seidrum-tool-dispatcher
-    enabled: true
+    enabled: false
 
   content-ingester:
     binary: seidrum-content-ingester
-    enabled: true
+    enabled: false
     env:
       EMBEDDING_PROVIDER: "${EMBEDDING_PROVIDER:-openai}"
       OPENAI_API_KEY: "${OPENAI_API_KEY}"
 
   entity-extractor:
     binary: seidrum-entity-extractor
-    enabled: true
+    enabled: false
     env:
       GOOGLE_API_KEY: "${GOOGLE_API_KEY}"
 
   fact-extractor:
     binary: seidrum-fact-extractor
-    enabled: true
+    enabled: false
     env:
       GOOGLE_API_KEY: "${GOOGLE_API_KEY}"
 
   graph-context-loader:
     binary: seidrum-graph-context-loader
-    enabled: true
+    enabled: false
 
   scope-classifier:
     binary: seidrum-scope-classifier
-    enabled: true
+    enabled: false
     env:
       GOOGLE_API_KEY: "${GOOGLE_API_KEY}"
 
   response-formatter:
     binary: seidrum-response-formatter
-    enabled: true
+    enabled: false
 
   event-emitter:
     binary: seidrum-event-emitter
-    enabled: true
+    enabled: false
 
   task-detector:
     binary: seidrum-task-detector
-    enabled: true
+    enabled: false
     env:
       GOOGLE_API_KEY: "${GOOGLE_API_KEY}"
 
@@ -97,15 +97,15 @@ plugins:
 
   feedback-extractor:
     binary: seidrum-feedback-extractor
-    enabled: true
+    enabled: false
 
   code-executor:
     binary: seidrum-code-executor
-    enabled: true
+    enabled: false
 
   notification:
     binary: seidrum-notification
-    enabled: true
+    enabled: false
 
   cli:
     binary: seidrum-cli

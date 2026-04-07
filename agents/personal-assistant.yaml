@@ -1,5 +1,6 @@
 agent:
   id: personal-assistant
+  enabled: true
   description: General-purpose personal assistant with proactive capabilities
   prompt: ./prompts/assistant.md
   tools:

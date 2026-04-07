@@ -1,0 +1,51 @@
+preset:
+  id: email-assistant
+  name: Email Assistant
+  version: "1.0.0"
+  author: seidrum
+  description: Email triage and response agent. Monitors inbox, categorizes messages, and drafts replies based on urgency and sender priority.
+  icon: mail
+  repository: "https://github.com/seidrum/preset-email-assistant"
+
+  plugins:
+    required:
+      - email
+      - content-ingester
+      - llm-router
+      - response-formatter
+      - notification
+    recommended:
+      - entity-extractor
+      - fact-extractor
+      - task-detector
+
+  agents:
+    required:
+      - email-triage-agent
+    recommended: []
+
+  env_required:
+    - key: IMAP_HOST
+      label: IMAP Server
+      help: "Your email provider's IMAP server (e.g., imap.gmail.com)"
+    - key: IMAP_USER
+      label: Email Address
+      help: "The email account to monitor"
+    - key: IMAP_PASSWORD
+      label: Email Password
+      help: "App-specific password for your email account"
+    - key: SMTP_HOST
+      label: SMTP Server
+      help: "Your email provider's SMTP server (e.g., smtp.gmail.com)"
+    - key: GOOGLE_API_KEY
+      label: Google AI API Key
+      help: "For LLM processing"
+
+  llm_provider: llm-google
+
+  bundle:
+    agents:
+      - email-triage-agent.yaml
+    prompts:
+      - email-triage.md
+    plugins: []

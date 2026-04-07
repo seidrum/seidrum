@@ -227,6 +227,9 @@ pub struct AgentDefinition {
     pub additional_scopes: Vec<String>,
     #[serde(default)]
     pub description: Option<String>,
+    /// Whether this agent is enabled. Defaults to false so first boot starts clean.
+    #[serde(default)]
+    pub enabled: bool,
     /// NATS subjects this agent subscribes to for consciousness events.
     #[serde(default)]
     pub subscribe: Vec<String>,
@@ -548,4 +551,346 @@ agent:
         assert!(agent.background.is_none());
         assert!(agent.rate_limit.is_none());
     }
+}
+
+// ---------------------------------------------------------------------------
+// Preset definitions
+// ---------------------------------------------------------------------------
+
+/// Top-level wrapper for preset YAML files (config/presets/*.yaml)
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PresetFile {
+    pub preset: Preset,
+}
+
+/// Preset configuration that defines plugin + agent requirements and dependencies.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Preset {
+    /// Unique identifier (e.g., "chat-bot", "developer", "api-service")
+    pub id: String,
+
+    /// Human-readable name (e.g., "Chat Bot", "Developer Assistant")
+    pub name: String,
+
+    /// Description of what this preset provides
+    pub description: String,
+
+    /// Icon name (e.g., "message-circle", "code", "globe")
+    #[serde(default)]
+    pub icon: String,
+
+    /// Plugin requirements (required + recommended)
+    pub plugins: PresetPlugins,
+
+    /// Agent requirements (required + recommended)
+    pub agents: PresetAgents,
+
+    /// Environment variables needed to enable this preset
+    #[serde(default)]
+    pub env_required: Vec<EnvRequirement>,
+
+    /// Preferred LLM provider for this preset
+    #[serde(default)]
+    pub llm_provider: Option<String>,
+
+    /// Semantic version of this preset
+    #[serde(default)]
+    pub version: Option<String>,
+
+    /// Author of this preset
+    #[serde(default)]
+    pub author: Option<String>,
+
+    /// Repository URL for this preset
+    #[serde(default)]
+    pub repository: Option<String>,
+
+    /// Bundle contents — files included in this preset package
+    #[serde(default)]
+    pub bundle: Option<PresetBundle>,
+}
+
+/// Plugin list for a preset (required + recommended)
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PresetPlugins {
+    /// Plugins that must be enabled for this preset to function
+    pub required: Vec<String>,
+
+    /// Plugins that enhance the preset but are optional
+    #[serde(default)]
+    pub recommended: Vec<String>,
+}
+
+/// Agent list for a preset (required + recommended)
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PresetAgents {
+    /// Agents that must be enabled for this preset to function
+    pub required: Vec<String>,
+
+    /// Agents that enhance the preset but are optional
+    #[serde(default)]
+    pub recommended: Vec<String>,
+}
+
+/// Environment variable requirement for a preset
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct EnvRequirement {
+    /// Environment variable name
+    pub key: String,
+
+    /// Human-readable label for UI
+    pub label: String,
+
+    /// Help text explaining what this variable is for
+    #[serde(default)]
+    pub help: String,
+
+    /// Auto-generation strategy (e.g., "hex:32" for random hex string)
+    #[serde(default)]
+    pub auto_generate: Option<String>,
+}
+
+/// Bundle contents declaration for a preset
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PresetBundle {
+    /// Agent YAML files included in the bundle (relative paths)
+    #[serde(default)]
+    pub agents: Vec<String>,
+
+    /// Prompt files included in the bundle (relative paths)
+    #[serde(default)]
+    pub prompts: Vec<String>,
+
+    /// New plugin entries to add to plugins.yaml
+    #[serde(default)]
+    pub plugins: Vec<BundledPlugin>,
+}
+
+/// A plugin entry to be added to plugins.yaml when a bundle is imported
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct BundledPlugin {
+    /// Plugin name/identifier
+    pub name: String,
+
+    /// Binary name for this plugin
+    pub binary: String,
+
+    /// Environment variables for this plugin
+    #[serde(default)]
+    pub env: std::collections::BTreeMap<String, String>,
+}
+
+/// Load and parse a preset configuration from a YAML file.
+pub fn load_preset(path: &Path) -> anyhow::Result<PresetFile> {
+    let contents = std::fs::read_to_string(path)
+        .map_err(|e| anyhow::anyhow!("Failed to read preset at {}: {}", path.display(), e))?;
+    let preset: PresetFile = serde_yaml::from_str(&contents)
+        .map_err(|e| anyhow::anyhow!("Failed to parse preset at {}: {}", path.display(), e))?;
+    Ok(preset)
+}
+
+// ---------------------------------------------------------------------------
+// Package manager types
+// ---------------------------------------------------------------------------
+
+/// The kind of package.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum PackageKind {
+    Plugin,
+    Agent,
+    Bundle,
+}
+
+/// Top-level seidrum-pkg.yaml
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PackageManifestFile {
+    pub package: PackageMeta,
+    #[serde(default)]
+    pub plugin: Option<PluginPackageSpec>,
+    #[serde(default)]
+    pub agent: Option<AgentPackageSpec>,
+    #[serde(default)]
+    pub bundle: Option<BundleSpec>,
+}
+
+/// Package metadata (common to all kinds).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PackageMeta {
+    pub name: String,
+    pub version: String,
+    pub kind: PackageKind,
+    #[serde(default)]
+    pub description: Option<String>,
+    #[serde(default)]
+    pub author: Option<String>,
+    #[serde(default)]
+    pub license: Option<String>,
+    #[serde(default)]
+    pub repository: Option<String>,
+    #[serde(default)]
+    pub homepage: Option<String>,
+    #[serde(default)]
+    pub min_seidrum_version: Option<String>,
+}
+
+/// Plugin-specific package spec.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PluginPackageSpec {
+    pub binary: String,
+    #[serde(default)]
+    pub consumes: Vec<String>,
+    #[serde(default)]
+    pub produces: Vec<String>,
+    #[serde(default)]
+    pub capabilities: Vec<PackageCapability>,
+    #[serde(default)]
+    pub env: Vec<EnvRequirement>,
+    #[serde(default)]
+    pub artifacts: Vec<PackageArtifact>,
+}
+
+/// A capability (tool/command) declared by a plugin.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PackageCapability {
+    pub name: String,
+    #[serde(default = "default_capability_kind")]
+    pub kind: String,
+    #[serde(default)]
+    pub description: Option<String>,
+}
+
+fn default_capability_kind() -> String {
+    "tool".to_string()
+}
+
+/// A pre-built binary artifact for a specific platform.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PackageArtifact {
+    pub target: String,
+    pub url: String,
+    #[serde(default)]
+    pub image: Option<String>,
+    pub sha256: String,
+}
+
+/// Agent-specific package spec (used when kind=agent or inside bundles).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AgentPackageSpec {
+    pub id: String,
+    pub prompt: String,
+    #[serde(default)]
+    pub tools: Vec<String>,
+    #[serde(default)]
+    pub scope: Option<String>,
+    #[serde(default)]
+    pub subscribe: Vec<String>,
+}
+
+/// Bundle spec — contains plugins, agents, prompts, and a preset.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct BundleSpec {
+    #[serde(default)]
+    pub preset: Option<BundlePreset>,
+    #[serde(default)]
+    pub includes: Vec<BundleDependency>,
+    #[serde(default)]
+    pub agents: Vec<AgentPackageSpec>,
+    #[serde(default)]
+    pub prompts: Vec<String>,
+}
+
+/// Preset embedded in a bundle.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct BundlePreset {
+    pub name: String,
+    #[serde(default)]
+    pub description: Option<String>,
+    #[serde(default)]
+    pub icon: Option<String>,
+    #[serde(default)]
+    pub plugins: Option<PresetPlugins>,
+    #[serde(default)]
+    pub agents: Option<PresetAgents>,
+    #[serde(default)]
+    pub env_required: Vec<EnvRequirement>,
+}
+
+/// A dependency reference in a bundle.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct BundleDependency {
+    #[serde(default)]
+    pub package: Option<String>,
+    #[serde(default)]
+    pub agent: Option<String>,
+}
+
+// Registry index types
+
+/// The top-level registry index.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RegistryIndex {
+    #[serde(default)]
+    pub packages: Vec<RegistryEntry>,
+}
+
+/// A single entry in the registry index.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RegistryEntry {
+    pub name: String,
+    pub latest: String,
+    pub kind: PackageKind,
+    #[serde(default)]
+    pub description: Option<String>,
+    #[serde(default)]
+    pub author: Option<String>,
+    #[serde(default)]
+    pub downloads: Option<u64>,
+}
+
+/// Installed package tracking (stored in installed.yaml).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct InstalledPackages {
+    #[serde(default)]
+    pub packages: Vec<InstalledPackage>,
+}
+
+/// A single installed package record.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct InstalledPackage {
+    pub name: String,
+    pub version: String,
+    pub kind: PackageKind,
+    pub source: String,
+    #[serde(default)]
+    pub installed_at: Option<String>,
+    #[serde(default)]
+    pub files: Vec<String>,
+}
+
+pub fn load_package_manifest(path: &Path) -> anyhow::Result<PackageManifestFile> {
+    let contents = std::fs::read_to_string(path)?;
+    let manifest: PackageManifestFile = serde_yaml::from_str(&contents)?;
+    Ok(manifest)
+}
+
+pub fn load_registry_index(path: &Path) -> anyhow::Result<RegistryIndex> {
+    let contents = std::fs::read_to_string(path)?;
+    let index: RegistryIndex = serde_yaml::from_str(&contents)?;
+    Ok(index)
+}
+
+pub fn load_installed_packages(path: &Path) -> anyhow::Result<InstalledPackages> {
+    if !path.exists() {
+        return Ok(InstalledPackages { packages: vec![] });
+    }
+    let contents = std::fs::read_to_string(path)?;
+    let installed: InstalledPackages = serde_yaml::from_str(&contents)?;
+    Ok(installed)
+}
+
+pub fn save_installed_packages(path: &Path, installed: &InstalledPackages) -> anyhow::Result<()> {
+    let contents = serde_yaml::to_string(installed)?;
+    std::fs::write(path, contents)?;
+    Ok(())
 }

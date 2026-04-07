@@ -1,5 +1,6 @@
 agent:
   id: research-agent
+  enabled: true
   description: Deep research and analysis agent
   prompt: ./prompts/research.md
   tools:

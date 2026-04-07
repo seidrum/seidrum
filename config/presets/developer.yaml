@@ -1,0 +1,26 @@
+preset:
+  id: developer
+  name: Developer Assistant
+  description: Code review agent with CLI access. Reviews PRs, answers architecture questions, executes code.
+  icon: code
+  plugins:
+    required:
+      - cli
+      - content-ingester
+      - llm-router
+      - response-formatter
+      - code-executor
+    recommended:
+      - entity-extractor
+      - fact-extractor
+      - tool-dispatcher
+  agents:
+    required:
+      - personal-assistant
+      - code-review-agent
+    recommended: []
+  env_required:
+    - key: GOOGLE_API_KEY
+      label: Google AI API Key
+      help: "Get one at https://aistudio.google.com/apikey"
+  llm_provider: llm-google

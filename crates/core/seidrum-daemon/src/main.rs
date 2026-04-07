@@ -4,13 +4,14 @@ mod daemon;
 pub mod infra;
 mod install;
 mod paths;
+mod pkg;
 mod setup;
 mod status;
 
 use anyhow::Result;
 use clap::Parser;
 
-use cli::{Cli, Commands, PluginAction, ServiceAction};
+use cli::{Cli, Commands, PkgAction, PluginAction, RegistryAction, ServiceAction};
 use paths::SeidrumPaths;
 
 #[tokio::main]
@@ -95,6 +96,36 @@ async fn main() -> Result<()> {
         Commands::Service { action } => match action {
             ServiceAction::Install => install::install(&paths),
             ServiceAction::Uninstall => install::uninstall(&paths),
+        },
+        Commands::Pkg { action } => match action {
+            PkgAction::Search { query } => pkg::search::search(&query, &paths),
+            PkgAction::Install { package, yes } => {
+                pkg::install::install(&package, yes, &paths).await
+            }
+            PkgAction::Uninstall { name, yes } => pkg::uninstall::uninstall(&name, yes, &paths),
+            PkgAction::List => pkg::list::list_packages(&paths),
+            PkgAction::Info { name } => pkg::list::show_package_info(&name, &paths),
+            PkgAction::Update { name } => {
+                if let Some(n) = name {
+                    println!("Updating package: {}", n);
+                    println!("Update functionality not yet implemented");
+                } else {
+                    println!("Updating all packages...");
+                    println!("Update functionality not yet implemented");
+                }
+                Ok(())
+            }
+            PkgAction::Publish { registry } => pkg::publish::publish(&registry, &paths),
+            PkgAction::Registry { action } => match action {
+                RegistryAction::Add { name, url } => {
+                    pkg::registry::add_registry(&name, &url, &paths)
+                }
+                RegistryAction::List => pkg::registry::list_registries(&paths),
+                RegistryAction::Remove { name } => pkg::registry::remove_registry(&name, &paths),
+                RegistryAction::Sync { name } => {
+                    pkg::registry::sync_registry(name.as_deref(), &paths)
+                }
+            },
         },
     }
 }

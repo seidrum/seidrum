@@ -1,0 +1,71 @@
+# Example: Plugin Package Manifest
+#
+# This example demonstrates how to package a Seidrum plugin for distribution.
+# Plugins are independent processes that connect via NATS and declare consumed/produced event types.
+
+package:
+  name: seidrum-example-plugin
+  version: 0.1.0
+  kind: plugin
+  description: An example plugin that demonstrates the package format
+  author: seidrum
+  license: MIT
+  repository: https://github.com/seidrum/example-plugin
+  min_seidrum_version: "0.5.0"
+
+plugin:
+  # Binary name or URL to download from
+  binary: seidrum-example-plugin
+
+  # NATS subjects this plugin subscribes to (consumes)
+  consumes:
+    - channel.*.inbound
+    - orchestrator.agent.*
+
+  # NATS subjects this plugin publishes to (produces)
+  produces:
+    - channel.*.outbound
+    - plugin.register
+    - plugin.deregister
+
+  # Capabilities (tools/commands) the plugin provides
+  capabilities:
+    - name: example-capability
+      kind: tool
+      description: An example tool capability that agents can use
+      output_schema:
+        type: object
+        properties:
+          result:
+            type: string
+            description: The result of the operation
+    - name: example-command
+      kind: command
+      description: A command that can be manually triggered
+
+  # Environment variables required or optional
+  env:
+    - key: EXAMPLE_API_KEY
+      label: Example API Key
+      required: false
+      help: "Set this to enable the example feature (optional)"
+    - key: EXAMPLE_TIMEOUT
+      label: Request Timeout (seconds)
+      required: false
+      help: "Timeout for API requests, defaults to 30"
+
+  # Binary artifacts for different platforms
+  # Generate checksums with: sha256sum <binary>
+  artifacts:
+    - target: x86_64-apple-darwin
+      url: https://github.com/seidrum/example-plugin/releases/download/v0.1.0/seidrum-example-plugin-darwin-amd64.tar.gz
+      sha256: "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    - target: aarch64-apple-darwin
+      url: https://github.com/seidrum/example-plugin/releases/download/v0.1.0/seidrum-example-plugin-darwin-arm64.tar.gz
+      sha256: "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    - target: x86_64-unknown-linux-gnu
+      url: https://github.com/seidrum/example-plugin/releases/download/v0.1.0/seidrum-example-plugin-linux-amd64.tar.gz
+      sha256: "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    - target: aarch64-unknown-linux-gnu
+      url: https://github.com/seidrum/example-plugin/releases/download/v0.1.0/seidrum-example-plugin-linux-arm64.tar.gz
+      sha256: "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"

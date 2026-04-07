@@ -31,11 +31,13 @@ use super::guardrails::{self, GuardrailState};
 /// The consciousness service manages agent event streams and built-in capabilities.
 pub struct ConsciousnessService {
     nats: async_nats::Client,
-    agents: HashMap<String, AgentDefinition>,
+    agents: Arc<RwLock<HashMap<String, AgentDefinition>>>,
     system_prompt: String,
     runtime_subs: Arc<RwLock<HashMap<String, Vec<RuntimeSubscription>>>>,
     /// Cached identity prompts: agent_id -> rendered prompt text.
-    identity_prompts: HashMap<String, String>,
+    identity_prompts: Arc<RwLock<HashMap<String, String>>>,
+    /// Path to agents directory, used for reloading agents at runtime
+    agents_dir: String,
 }
 
 impl ConsciousnessService {
@@ -55,10 +57,11 @@ impl ConsciousnessService {
         }
 
         Ok(Self {
+            agents_dir: agents_dir.to_string(),
             nats,
-            agents,
+            agents: Arc::new(RwLock::new(agents)),
             system_prompt,
-            identity_prompts,
+            identity_prompts: Arc::new(RwLock::new(identity_prompts)),
             runtime_subs: Arc::new(RwLock::new(HashMap::new())),
         })
     }
@@ -69,7 +72,8 @@ impl ConsciousnessService {
         self.register_builtin_capabilities().await?;
 
         // Create event subscriptions for each agent's `subscribe` patterns
-        for (agent_id, agent) in &self.agents {
+        let agents_read = self.agents.read().await;
+        for (agent_id, agent) in agents_read.iter() {
             for pattern in &agent.subscribe {
                 // I1: Skip channel inbound patterns — handled by the workflow engine
                 // to prevent duplicate LLM calls.
@@ -147,6 +151,7 @@ impl ConsciousnessService {
                 });
             }
         }
+        drop(agents_read);
 
         // -----------------------------------------------------------------
         // Consciousness event processing loop (one mpsc channel per agent)
@@ -154,7 +159,8 @@ impl ConsciousnessService {
         // Each agent gets a dedicated tokio::mpsc channel so that events are
         // processed SEQUENTIALLY — preventing concurrent conversation mutations.
 
-        for (agent_id, agent_def) in &self.agents {
+        let agents_read = self.agents.read().await;
+        for (agent_id, agent_def) in agents_read.iter() {
             let (tx, mut rx) = tokio::sync::mpsc::channel::<ConsciousnessEvent>(256);
 
             // Spawn NATS subscriber → mpsc forwarder
@@ -205,16 +211,19 @@ impl ConsciousnessService {
             let system_prompt = self.system_prompt.clone();
             let agent_def = agent_def.clone();
             let agent_id_proc = agent_id.clone();
-            let cached_identity = self
-                .identity_prompts
-                .get(agent_id)
-                .cloned()
-                .unwrap_or_default();
+            let identity_prompts = self.identity_prompts.clone();
 
             tokio::spawn(async move {
                 info!(agent_id = %agent_id_proc, "Consciousness processor started");
 
                 while let Some(event) = rx.recv().await {
+                    let cached_identity = identity_prompts
+                        .read()
+                        .await
+                        .get(&agent_id_proc)
+                        .cloned()
+                        .unwrap_or_default();
+
                     if let Err(e) = process_consciousness_event(
                         &nats_proc,
                         &agent_id_proc,
@@ -237,6 +246,7 @@ impl ConsciousnessService {
                 info!(agent_id = %agent_id_proc, "Consciousness processor stopped");
             });
         }
+        drop(agents_read);
 
         // -----------------------------------------------------------------
         // Feedback handler (Phase 2.3): Subscribe to agent.feedback events
@@ -277,6 +287,13 @@ impl ConsciousnessService {
             }
         });
 
+        // Subscribe to agent reload events
+        let mut reload_sub = self
+            .nats
+            .subscribe("kernel.agents.reload".to_string())
+            .await
+            .context("subscribe kernel.agents.reload")?;
+
         // Subscribe to capability.call.consciousness for built-in capability handling
         let mut capability_sub = self
             .nats
@@ -286,35 +303,48 @@ impl ConsciousnessService {
 
         let nats = self.nats.clone();
         let runtime_subs = self.runtime_subs.clone();
+        let agents = self.agents.clone();
+        let identity_prompts = self.identity_prompts.clone();
+        let agents_dir = self.agents_dir.clone();
 
         let handle = tokio::spawn(async move {
-            info!(
-                agent_count = self.agents.len(),
-                "Consciousness service started"
-            );
+            let agent_count = agents.read().await.len();
+            info!(agent_count = agent_count, "Consciousness service started");
 
-            while let Some(msg) = capability_sub.next().await {
-                let reply = match msg.reply {
-                    Some(ref r) => r.clone(),
-                    None => continue,
-                };
-
-                let request: ToolCallRequest = match serde_json::from_slice(&msg.payload) {
-                    Ok(r) => r,
-                    Err(e) => {
-                        warn!(%e, "Failed to parse capability call for consciousness");
-                        continue;
+            loop {
+                tokio::select! {
+                    Some(_msg) = reload_sub.next() => {
+                        // Agent reload request from management API
+                        info!("Reloading agent definitions from disk");
+                        if let Err(e) = reload_agents_internal(&agents, &identity_prompts, &agents_dir).await {
+                            error!(error = %e, "Failed to reload agents");
+                        } else {
+                            let count = agents.read().await.len();
+                            info!(count = count, "Agents reloaded successfully");
+                        }
                     }
-                };
+                    Some(msg) = capability_sub.next() => {
+                        let reply = match msg.reply {
+                            Some(ref r) => r.clone(),
+                            None => continue,
+                        };
 
-                let response = handle_builtin_call(&nats, &request, &runtime_subs).await;
+                        let request: ToolCallRequest = match serde_json::from_slice(&msg.payload) {
+                            Ok(r) => r,
+                            Err(e) => {
+                                warn!(%e, "Failed to parse capability call for consciousness");
+                                continue;
+                            }
+                        };
 
-                if let Ok(bytes) = serde_json::to_vec(&response) {
-                    let _ = nats.publish(reply, bytes.into()).await;
+                        let response = handle_builtin_call(&nats, &request, &runtime_subs).await;
+
+                        if let Ok(bytes) = serde_json::to_vec(&response) {
+                            let _ = nats.publish(reply, bytes.into()).await;
+                        }
+                    }
                 }
             }
-
-            info!("Consciousness service stopped");
         });
 
         Ok(handle)
@@ -1524,6 +1554,47 @@ struct ListConversationsArgs {
 // Helpers
 // ---------------------------------------------------------------------------
 
+/// Reload agent definitions from disk into Arc<RwLock<HashMap>>.
+/// Called when `kernel.agents.reload` is received. Updates the shared agents map
+/// and re-caches identity prompts. This allows runtime enable/disable without restart.
+async fn reload_agents_internal(
+    agents: &Arc<RwLock<HashMap<String, AgentDefinition>>>,
+    identity_prompts: &Arc<RwLock<HashMap<String, String>>>,
+    agents_dir: &str,
+) -> Result<()> {
+    // TODO: Full reload should reconcile NATS subscriptions and per-agent tasks.
+    // Currently only the in-memory agent definitions are updated. Agents that are
+    // newly enabled won't receive events, and agents that are disabled will continue
+    // processing until restart. A full fix requires tracking per-agent subscriptions
+    // and spawning/stopping forwarder tasks on reload.
+    tracing::warn!(
+        "Agent reload updated definitions only. New/removed agents require restart to take full effect."
+    );
+
+    // Use the agents directory path passed at initialization
+
+    let fresh_agents = load_agents(agents_dir)?;
+
+    // Update the shared agents map
+    {
+        let mut agents_write = agents.write().await;
+        *agents_write = fresh_agents.clone();
+    }
+
+    // Rebuild identity prompts cache
+    {
+        let mut prompts_write = identity_prompts.write().await;
+        prompts_write.clear();
+
+        for (agent_id, agent_def) in &fresh_agents {
+            let prompt = load_agent_identity_prompt(&agent_def.prompt);
+            prompts_write.insert(agent_id.clone(), prompt);
+        }
+    }
+
+    Ok(())
+}
+
 fn load_agents(agents_dir: &str) -> Result<HashMap<String, AgentDefinition>> {
     let mut agents = HashMap::new();
     let dir = Path::new(agents_dir);
@@ -1543,6 +1614,13 @@ fn load_agents(agents_dir: &str) -> Result<HashMap<String, AgentDefinition>> {
 
         match load_agent_definition(&path) {
             Ok(def) => {
+                if !def.agent.enabled {
+                    info!(
+                        agent_id = %def.agent.id,
+                        "Consciousness: agent disabled, skipping"
+                    );
+                    continue;
+                }
                 info!(
                     agent_id = %def.agent.id,
                     subscriptions = def.agent.subscribe.len(),

@@ -89,9 +89,9 @@ Temporal knowledge claims with confidence, provenance, and decay.
 ```json
 {
   "_key": "fact_001",
-  "subject": "entity_luis",
+  "subject": "entity_alex",
   "predicate": "works_at",
-  "object": "entity_mindspa",
+  "object": "entity_acme_corp",
   "value": null,
   "valid_from": "2022-03-01T00:00:00Z",
   "valid_to": "2025-12-31T00:00:00Z",
@@ -140,7 +140,7 @@ scope_root (identity — always accessible)
 │   ├── scope_job_search
 │   └── scope_acme
 ├── scope_projects
-│   ├── scope_talk_careers
+│   ├── scope_webapp_alpha
 │   └── scope_seidrum
 ├── scope_personal
 └── scope_finance
@@ -164,8 +164,8 @@ Persistent task objects that survive agent sessions.
   "callback_channel": "telegram",
   "subtasks": ["task_001a", "task_001b"],
   "context": {
-    "scope": "scope_mindspa",
-    "related_entities": ["entity_mindspa", "entity_hetzner"]
+    "scope": "scope_acme_corp",
+    "related_entities": ["entity_acme_corp", "entity_cloudhost"]
   },
   "created_at": "2026-03-08T09:20:00Z",
   "updated_at": "2026-03-08T14:00:00Z"
@@ -365,7 +365,7 @@ only a hash is persisted.
 ```json
 {
   "_from": "tasks/task_001",
-  "_to": "entities/entity_hetzner",
+  "_to": "entities/entity_cloudhost",
   "relation": "involves"
 }
 ```
