@@ -1,6 +1,6 @@
 agent:
   id: code-review-agent
-  enabled: false
+  enabled: true
   description: Specialized agent for code review tasks delegated by the personal assistant
   prompt: ./prompts/code-review.md
   tools:
