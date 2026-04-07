@@ -5,10 +5,8 @@
 
 use anyhow::{Context, Result};
 use dialoguer::{Confirm, Input};
-use rand::Rng;
-use tracing::{info, warn};
+use tracing::warn;
 
-use crate::config::{load_plugins_config, save_plugins_config};
 use crate::infra::{
     ArangoConfig, ArangoMode, ContainerRuntime, InfraConfig, InfraManager, NatsConfig, NatsMode,
 };
@@ -55,7 +53,7 @@ pub async fn run(paths: &SeidrumPaths, use_defaults: bool) -> Result<()> {
         http_port: 8222,
     };
 
-    // 3. Prompt for credentials
+    // 3. Prompt for ArangoDB password only
     let arango_password = if use_defaults {
         generate_password(16)
     } else {
@@ -65,38 +63,6 @@ pub async fn run(paths: &SeidrumPaths, use_defaults: bool) -> Result<()> {
             .default(default_pw)
             .interact_text()?
     };
-
-    let google_api_key = if use_defaults {
-        String::new()
-    } else {
-        Input::new()
-            .with_prompt("Google API key (blank to skip)")
-            .allow_empty(true)
-            .default(String::new())
-            .interact_text()?
-    };
-
-    let openai_api_key = if use_defaults {
-        String::new()
-    } else {
-        Input::new()
-            .with_prompt("OpenAI API key (blank to skip)")
-            .allow_empty(true)
-            .default(String::new())
-            .interact_text()?
-    };
-
-    let telegram_token = if use_defaults {
-        String::new()
-    } else {
-        Input::new()
-            .with_prompt("Telegram Bot token (blank to skip)")
-            .allow_empty(true)
-            .default(String::new())
-            .interact_text()?
-    };
-
-    let gateway_api_key = generate_hex_key(32);
 
     // 4. Build infra config
     let arango_config = ArangoConfig {
@@ -137,24 +103,10 @@ pub async fn run(paths: &SeidrumPaths, use_defaults: bool) -> Result<()> {
         if !overwrite {
             println!("Keeping existing .env file");
         } else {
-            write_env_file(
-                &env_path,
-                &arango_password,
-                &google_api_key,
-                &openai_api_key,
-                &telegram_token,
-                &gateway_api_key,
-            )?;
+            write_env_file(&env_path, &arango_password)?;
         }
     } else {
-        write_env_file(
-            &env_path,
-            &arango_password,
-            &google_api_key,
-            &openai_api_key,
-            &telegram_token,
-            &gateway_api_key,
-        )?;
+        write_env_file(&env_path, &arango_password)?;
     }
 
     // 8. Start infrastructure temporarily for DB init
@@ -170,33 +122,9 @@ pub async fn run(paths: &SeidrumPaths, use_defaults: bool) -> Result<()> {
         println!("  Warning: Database init failed. Run 'seidrum init' after building the kernel.");
     }
 
-    // 10. Enable api-gateway, auto-disable plugins without keys
-    let plugins_yaml = paths.plugins_yaml();
-    if plugins_yaml.exists() {
-        let mut config = load_plugins_config(&plugins_yaml)?;
-
-        // Enable api-gateway
-        if let Some(gw) = config.plugins.get_mut("api-gateway") {
-            gw.enabled = true;
-            info!("Enabled api-gateway plugin");
-        }
-
-        // Disable plugins that need missing API keys
-        if telegram_token.is_empty() {
-            if let Some(tg) = config.plugins.get_mut("telegram") {
-                tg.enabled = false;
-                info!("Disabled telegram plugin (no token provided)");
-            }
-        }
-        if google_api_key.is_empty() {
-            if let Some(llm) = config.plugins.get_mut("llm-google") {
-                llm.enabled = false;
-                info!("Disabled llm-google plugin (no API key provided)");
-            }
-        }
-
-        save_plugins_config(&plugins_yaml, &config)?;
-    }
+    // 10. All plugins and agents start disabled by default.
+    // The user enables what they need via the dashboard or CLI.
+    // No auto-enable logic — the user is in control.
 
     // 11. Stop infrastructure (user will use `seidrum start`)
     infra.stop_nats()?;
@@ -207,13 +135,14 @@ pub async fn run(paths: &SeidrumPaths, use_defaults: bool) -> Result<()> {
 
     // 13. Print summary
     println!();
-    println!("  ╔══════════════════════════════════════╗");
-    println!("  ║          Setup Complete!             ║");
-    println!("  ╚══════════════════════════════════════╝");
+    println!("╔══════════════════════════════════════╗");
+    println!("║       Infrastructure Ready!          ║");
+    println!("╚══════════════════════════════════════╝");
     println!();
-    println!("  Run:       seidrum start");
-    println!("  Dashboard: http://localhost:8080/dashboard");
-    println!("  API key:   {}", gateway_api_key);
+    println!("Next steps:");
+    println!("  1. seidrum start");
+    println!("  2. Open http://localhost:3030/dashboard");
+    println!("  3. Follow the setup wizard to configure your first channel");
     println!();
 
     Ok(())
@@ -229,22 +158,11 @@ fn generate_password(len: usize) -> String {
         .collect()
 }
 
-/// Generate a random hex string.
-fn generate_hex_key(len: usize) -> String {
-    let mut rng = rand::thread_rng();
-    (0..len)
-        .map(|_| format!("{:x}", rng.gen::<u8>() % 16))
-        .collect()
-}
 
-/// Write the .env file with provided values.
+/// Write the .env file with infrastructure secrets only.
 fn write_env_file(
     path: &std::path::Path,
     arango_password: &str,
-    google_api_key: &str,
-    openai_api_key: &str,
-    telegram_token: &str,
-    gateway_api_key: &str,
 ) -> Result<()> {
     let content = format!(
         r#"# Seidrum environment configuration
@@ -253,18 +171,7 @@ fn write_env_file(
 # ArangoDB
 ARANGO_PASSWORD={arango_password}
 
-# LLM Providers
-GOOGLE_API_KEY={google_api_key}
-OPENAI_API_KEY={openai_api_key}
-EMBEDDING_PROVIDER=openai
-
-# Telegram
-TELEGRAM_TOKEN={telegram_token}
-TELEGRAM_ALLOWED_USERS=
-
-# API Gateway
-GATEWAY_API_KEY={gateway_api_key}
-GATEWAY_LISTEN_ADDR=0.0.0.0:8080
+# Additional secrets and API keys are configured via the dashboard
 "#
     );
 

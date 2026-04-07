@@ -1,0 +1,60 @@
+# Example: Bundle Package Manifest
+#
+# Bundles package multiple plugins + agents together as a cohesive preset.
+# Useful for distributing complete intelligence packages (e.g., "Customer Support Suite").
+
+package:
+  name: example-intelligence-bundle
+  version: 0.1.0
+  kind: bundle
+  description: An example bundle that demonstrates how to package plugins with agents and presets
+  author: seidrum
+  license: MIT
+  repository: https://github.com/seidrum/example-bundle
+
+bundle:
+  # Preset configuration shown in the dashboard
+  preset:
+    name: Example Intelligence
+    description: Demonstrates bundling a plugin with an agent and a complete preset
+    icon: sparkles
+
+    # Required and recommended plugins for this preset
+    plugins:
+      required:
+        - seidrum-example-plugin
+      recommended: []
+
+    # Required and recommended agents
+    agents:
+      required:
+        - example-agent
+      recommended: []
+
+    # Environment variables required to activate the preset
+    env_required:
+      - key: EXAMPLE_API_KEY
+        label: Example API Key
+        help: "Required for the example plugin to function"
+
+  # What packages this bundle includes (can reference registry or inline)
+  includes:
+    - package: seidrum-example-plugin@0.1.0
+    - agent: example-agent
+
+  # Inline agent definitions (alternative to registry reference)
+  agents:
+    - id: example-agent
+      prompt: ./prompts/example-agent.md
+      tools:
+        - example-capability
+        - brain-query
+        - send-notification
+      scope: scope_root
+      subscribe:
+        - agent.example-agent.wake
+        - content.stored
+
+  # Inline prompt files (relative paths from bundle root)
+  prompts:
+    - example-agent.md

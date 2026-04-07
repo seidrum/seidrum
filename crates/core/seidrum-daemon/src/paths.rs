@@ -45,6 +45,8 @@ impl SeidrumPaths {
         std::fs::create_dir_all(&self.log_dir)?;
         std::fs::create_dir_all(self.managed_bin_dir())?;
         std::fs::create_dir_all(self.nats_data_dir())?;
+        std::fs::create_dir_all(self.packages_dir())?;
+        std::fs::create_dir_all(self.registries_dir())?;
         Ok(())
     }
 
@@ -103,9 +105,34 @@ impl SeidrumPaths {
         self.log_dir.join(format!("{}.log", name))
     }
 
-    /// Resolve a plugin binary path.
+    /// Resolve a plugin binary path. Checks the daemon's own directory first
+    /// (for built-in plugins), then ~/.seidrum/bin/ (for installed packages).
     pub fn plugin_binary(&self, binary_name: &str) -> PathBuf {
-        self.bin_dir.join(binary_name)
+        let builtin = self.bin_dir.join(binary_name);
+        if builtin.exists() {
+            return builtin;
+        }
+        let installed = self.managed_bin_dir().join(binary_name);
+        if installed.exists() {
+            return installed;
+        }
+        // Fall back to built-in path (will fail at spawn time with clear error)
+        builtin
+    }
+
+    /// Directory for packages (~/.seidrum/packages/).
+    pub fn packages_dir(&self) -> PathBuf {
+        self.seidrum_home.join("packages")
+    }
+
+    /// Directory for registries (~/.seidrum/registries/).
+    pub fn registries_dir(&self) -> PathBuf {
+        self.seidrum_home.join("registries")
+    }
+
+    /// Path to installed.yaml (~/.seidrum/installed.yaml).
+    pub fn installed_yaml(&self) -> PathBuf {
+        self.seidrum_home.join("installed.yaml")
     }
 
     /// Path to plugins.yaml.

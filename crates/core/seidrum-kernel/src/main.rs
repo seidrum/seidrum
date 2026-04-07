@@ -11,6 +11,7 @@ use registry::service::RegistryService;
 mod brain;
 mod consciousness;
 mod embedding;
+mod management;
 mod orchestrator;
 mod plugin_storage;
 mod registry;
@@ -189,7 +190,25 @@ async fn run_serve() -> anyhow::Result<()> {
     let trace_collector_handle = trace_collector.spawn().await?;
     info!("trace collector service started");
 
-    // 9. Load system skills from YAML files.
+    // 9. Spawn the management HTTP server.
+    let config_dir_path = std::path::PathBuf::from("config/");
+    let agents_dir_path = std::path::PathBuf::from(&agents_dir);
+    let workflows_dir_path = std::path::PathBuf::from(&workflows_dir);
+    let env_file = std::path::PathBuf::from(".env");
+    let mgmt_listen_addr = std::env::var("MGMT_LISTEN_ADDR")
+        .unwrap_or_else(|_| "0.0.0.0:3030".to_string());
+
+    let management_server = management::server::ManagementServer::new(
+        nats_client.clone(),
+        config_dir_path,
+        agents_dir_path,
+        workflows_dir_path,
+        env_file,
+    );
+    let management_handle = management_server.spawn(&mgmt_listen_addr).await?;
+    info!("management API server started");
+
+    // 10. Load system skills from YAML files.
     let embedding_service = embedding::service::EmbeddingService::from_env()?;
     let skills_arango =
         brain::client::ArangoClient::new(&arango_url, &arango_database, &arango_password)?;
@@ -201,7 +220,7 @@ async fn run_serve() -> anyhow::Result<()> {
         warn!(error = %e, "Failed to load system skills (non-fatal)");
     }
 
-    // 10. Wait for all services.
+    // 11. Wait for all services.
     tokio::select! {
         _ = registry_handle => {
             warn!("registry service exited unexpectedly");
@@ -226,6 +245,9 @@ async fn run_serve() -> anyhow::Result<()> {
         }
         _ = trace_collector_handle => {
             warn!("trace collector service exited unexpectedly");
+        }
+        _ = management_handle => {
+            warn!("management API server exited unexpectedly");
         }
         _ = tokio::signal::ctrl_c() => {
             info!("received Ctrl-C, shutting down...");

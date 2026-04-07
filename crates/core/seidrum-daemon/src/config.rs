@@ -25,6 +25,17 @@ pub struct PluginEntry {
     /// Plugin-specific environment variables
     #[serde(default)]
     pub env: BTreeMap<String, String>,
+    /// Package tracking — set when this plugin was installed via `seidrum pkg install`
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub package: Option<PluginPackageRef>,
+}
+
+/// Reference to a package this plugin was installed from.
+#[derive(Debug, Serialize, Deserialize, Clone)]
+pub struct PluginPackageRef {
+    pub name: String,
+    pub version: String,
+    pub source: String,
 }
 
 /// Load plugins.yaml from the config directory.

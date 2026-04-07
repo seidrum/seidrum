@@ -1,5 +1,6 @@
 agent:
   id: proactive-monitor
+  enabled: false
   description: Background agent that monitors events and proactively surfaces insights
   prompt: ./prompts/proactive.md
   tools:

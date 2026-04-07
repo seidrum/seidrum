@@ -1,0 +1,13 @@
+agent:
+  id: email-triage-agent
+  enabled: false
+  description: Monitors incoming emails, categorizes by urgency, and drafts responses
+  prompt: ./prompts/email-triage.md
+  tools:
+    - brain-query
+    - send-notification
+    - schedule-wake
+  scope: scope_root
+  subscribe:
+    - content.stored
+    - agent.feedback

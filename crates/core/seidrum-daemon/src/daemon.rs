@@ -1,5 +1,5 @@
 //! Process supervisor: spawn, monitor, restart, and gracefully shut down
-//! the kernel and all enabled plugins.
+//! the kernel and all enabled plugins. Supports NATS-based plugin lifecycle control.
 
 #[cfg(not(unix))]
 compile_error!("seidrum-daemon requires a Unix system (Linux or macOS)");
@@ -9,6 +9,8 @@ use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result};
 use chrono::Utc;
+use futures::StreamExt;
+use serde::{Deserialize, Serialize};
 use tokio::process::Command;
 use tracing::{error, info, warn};
 
@@ -22,6 +24,25 @@ const MAX_RESTARTS: u32 = 5;
 const BACKOFF_WINDOW: Duration = Duration::from_secs(300);
 /// Grace period for SIGTERM before SIGKILL.
 const SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(10);
+
+/// NATS request to start a plugin.
+#[derive(Debug, Serialize, Deserialize, Clone)]
+struct PluginStartCommand {
+    plugin: String,
+}
+
+/// NATS request to stop a plugin.
+#[derive(Debug, Serialize, Deserialize, Clone)]
+struct PluginStopCommand {
+    plugin: String,
+}
+
+/// Response to a plugin control command.
+#[derive(Debug, Serialize, Deserialize, Clone)]
+struct PluginCommandResponse {
+    success: bool,
+    message: String,
+}
 
 /// Send SIGTERM to a process by PID. Returns true if the signal was sent.
 fn send_sigterm(pid: u32) -> bool {
@@ -212,10 +233,9 @@ pub async fn start(paths: &SeidrumPaths) -> Result<()> {
 
     // 2. Load plugins.yaml and start enabled plugins
     let plugins_yaml = paths.plugins_yaml();
-    if plugins_yaml.exists() {
-        let config = load_plugins_config(&plugins_yaml)?;
-
-        for (name, entry) in &config.plugins {
+    let config = if plugins_yaml.exists() {
+        let cfg = load_plugins_config(&plugins_yaml)?;
+        for (name, entry) in &cfg.plugins {
             if !entry.enabled {
                 info!(name = %name, "Plugin disabled, skipping");
                 continue;
@@ -234,19 +254,53 @@ pub async fn start(paths: &SeidrumPaths) -> Result<()> {
                 Err(e) => error!(name = %name, error = %e, "Failed to start plugin"),
             }
         }
+        Some(cfg)
     } else {
         warn!(
             "No plugins.yaml found at {}. Only the kernel will run.",
             plugins_yaml.display()
         );
-    }
+        None
+    };
 
     info!(
         count = processes.len(),
         "All processes started, entering monitoring loop"
     );
 
-    // 3. Monitoring loop — handle both SIGINT and SIGTERM
+    // 3. Connect to NATS and subscribe to plugin control subjects
+    let nats_url = std::env::var("NATS_URL").unwrap_or_else(|_| "nats://localhost:4222".to_string());
+    let nats_client = match async_nats::connect(&nats_url).await {
+        Ok(client) => {
+            info!("Connected to NATS for plugin lifecycle control");
+            Some(client)
+        }
+        Err(e) => {
+            warn!("Failed to connect to NATS ({}), plugin lifecycle control via NATS unavailable", e);
+            None
+        }
+    };
+
+    let mut start_sub = None;
+    let mut stop_sub = None;
+
+    if let Some(ref client) = nats_client {
+        if let Ok(sub) = client.subscribe("daemon.plugin.start".to_string()).await {
+            info!("Subscribed to daemon.plugin.start");
+            start_sub = Some(sub);
+        } else {
+            warn!("Failed to subscribe to daemon.plugin.start");
+        }
+
+        if let Ok(sub) = client.subscribe("daemon.plugin.stop".to_string()).await {
+            info!("Subscribed to daemon.plugin.stop");
+            stop_sub = Some(sub);
+        } else {
+            warn!("Failed to subscribe to daemon.plugin.stop");
+        }
+    }
+
+    // 4. Monitoring loop — handle SIGINT, SIGTERM, process checks, and NATS commands
     let mut sigterm = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
         .context("Failed to register SIGTERM handler")?;
 
@@ -263,10 +317,30 @@ pub async fn start(paths: &SeidrumPaths) -> Result<()> {
             _ = check_processes(&mut processes, paths) => {
                 // A process exited and was handled
             }
+            msg = async {
+                match &mut start_sub {
+                    Some(sub) => sub.next().await,
+                    None => futures::future::pending().await,
+                }
+            } => {
+                if let Some(msg) = msg {
+                    handle_plugin_start(&msg, &mut processes, paths, &config).await;
+                }
+            }
+            msg = async {
+                match &mut stop_sub {
+                    Some(sub) => sub.next().await,
+                    None => futures::future::pending().await,
+                }
+            } => {
+                if let Some(msg) = msg {
+                    handle_plugin_stop(&msg, &mut processes, paths).await;
+                }
+            }
         }
     }
 
-    // 4. Graceful shutdown
+    // 5. Graceful shutdown
     shutdown(&mut processes, paths).await;
 
     // Clean up daemon PID
@@ -433,6 +507,214 @@ pub async fn stop(paths: &SeidrumPaths) -> Result<()> {
 
     println!("Daemon killed");
     Ok(())
+}
+
+/// Handle a plugin start request from NATS.
+async fn handle_plugin_start(
+    msg: &async_nats::Message,
+    processes: &mut Vec<ManagedProcess>,
+    paths: &SeidrumPaths,
+    config: &Option<crate::config::PluginsConfig>,
+) {
+    // Parse the command
+    let cmd: PluginStartCommand = match serde_json::from_slice(&msg.payload) {
+        Ok(c) => c,
+        Err(e) => {
+            error!("Failed to parse plugin start command: {}", e);
+            if let Some(reply) = &msg.reply {
+                let response = PluginCommandResponse {
+                    success: false,
+                    message: format!("Failed to parse command: {}", e),
+                };
+                let _ = msg.client.publish(reply.clone(), serde_json::to_vec(&response).unwrap_or_default().into()).await;
+            }
+            return;
+        }
+    };
+
+    let plugin_name = &cmd.plugin;
+
+    // Check if plugin exists in config
+    let config = match config {
+        Some(cfg) => cfg,
+        None => {
+            let response = PluginCommandResponse {
+                success: false,
+                message: "No plugins.yaml configured".to_string(),
+            };
+            if let Some(reply) = &msg.reply {
+                let _ = msg.client.publish(reply.clone(), serde_json::to_vec(&response).unwrap_or_default().into()).await;
+            }
+            return;
+        }
+    };
+
+    let entry = match config.plugins.get(plugin_name) {
+        Some(e) => e,
+        None => {
+            let response = PluginCommandResponse {
+                success: false,
+                message: format!("Plugin '{}' not found in plugins.yaml", plugin_name),
+            };
+            if let Some(reply) = &msg.reply {
+                let _ = msg.client.publish(reply.clone(), serde_json::to_vec(&response).unwrap_or_default().into()).await;
+            }
+            return;
+        }
+    };
+
+    // Check if already running
+    if let Ok(pid_str) = std::fs::read_to_string(paths.plugin_pid_file(plugin_name)) {
+        if let Ok(pid) = pid_str.trim().parse::<i32>() {
+            if is_process_alive(pid) {
+                let response = PluginCommandResponse {
+                    success: false,
+                    message: format!("Plugin '{}' is already running (PID {})", plugin_name, pid),
+                };
+                if let Some(reply) = &msg.reply {
+                    let _ = msg.client.publish(reply.clone(), serde_json::to_vec(&response).unwrap_or_default().into()).await;
+                }
+                return;
+            }
+        }
+    }
+
+    // Remove stopped marker
+    let _ = std::fs::remove_file(paths.plugin_stopped_file(plugin_name));
+
+    // Resolve env vars
+    let env = crate::config::resolve_plugin_env(entry);
+
+    // Create and spawn process
+    let mut proc = ManagedProcess::new(plugin_name.clone(), entry.binary.clone(), vec![], env);
+
+    match proc.spawn(paths) {
+        Ok(()) => {
+            info!(name = %plugin_name, "Plugin started via NATS");
+            processes.push(proc);
+            let response = PluginCommandResponse {
+                success: true,
+                message: format!("Plugin '{}' started", plugin_name),
+            };
+            if let Some(reply) = &msg.reply {
+                let _ = msg.client.publish(reply.clone(), serde_json::to_vec(&response).unwrap_or_default().into()).await;
+            }
+        }
+        Err(e) => {
+            error!(name = %plugin_name, error = %e, "Failed to start plugin via NATS");
+            let response = PluginCommandResponse {
+                success: false,
+                message: format!("Failed to start plugin: {}", e),
+            };
+            if let Some(reply) = &msg.reply {
+                let _ = msg.client.publish(reply.clone(), serde_json::to_vec(&response).unwrap_or_default().into()).await;
+            }
+        }
+    }
+}
+
+/// Handle a plugin stop request from NATS.
+async fn handle_plugin_stop(
+    msg: &async_nats::Message,
+    processes: &mut Vec<ManagedProcess>,
+    paths: &SeidrumPaths,
+) {
+    // Parse the command
+    let cmd: PluginStopCommand = match serde_json::from_slice(&msg.payload) {
+        Ok(c) => c,
+        Err(e) => {
+            error!("Failed to parse plugin stop command: {}", e);
+            if let Some(reply) = &msg.reply {
+                let response = PluginCommandResponse {
+                    success: false,
+                    message: format!("Failed to parse command: {}", e),
+                };
+                let _ = msg.client.publish(reply.clone(), serde_json::to_vec(&response).unwrap_or_default().into()).await;
+            }
+            return;
+        }
+    };
+
+    let plugin_name = &cmd.plugin;
+
+    // Find the process by name
+    let pid_file = paths.plugin_pid_file(plugin_name);
+    let pid_str = match std::fs::read_to_string(&pid_file) {
+        Ok(s) => s,
+        Err(_) => {
+            let response = PluginCommandResponse {
+                success: false,
+                message: format!("Plugin '{}' does not appear to be running", plugin_name),
+            };
+            if let Some(reply) = &msg.reply {
+                let _ = msg.client.publish(reply.clone(), serde_json::to_vec(&response).unwrap_or_default().into()).await;
+            }
+            return;
+        }
+    };
+
+    let pid: i32 = match pid_str.trim().parse() {
+        Ok(p) => p,
+        Err(_) => {
+            let response = PluginCommandResponse {
+                success: false,
+                message: "Invalid PID file".to_string(),
+            };
+            if let Some(reply) = &msg.reply {
+                let _ = msg.client.publish(reply.clone(), serde_json::to_vec(&response).unwrap_or_default().into()).await;
+            }
+            return;
+        }
+    };
+
+    if !is_process_alive(pid) {
+        let _ = std::fs::remove_file(&pid_file);
+        let response = PluginCommandResponse {
+            success: false,
+            message: format!("Plugin '{}' is not running (stale PID file cleaned up)", plugin_name),
+        };
+        if let Some(reply) = &msg.reply {
+            let _ = msg.client.publish(reply.clone(), serde_json::to_vec(&response).unwrap_or_default().into()).await;
+        }
+        return;
+    }
+
+    // Write stopped marker so daemon doesn't restart it
+    let _ = std::fs::write(paths.plugin_stopped_file(plugin_name), "");
+
+    info!(name = %plugin_name, %pid, "Sending SIGTERM to plugin via NATS");
+    send_sigterm(pid as u32);
+
+    // Wait for graceful shutdown
+    for _ in 0..10 {
+        tokio::time::sleep(Duration::from_millis(500)).await;
+        if !is_process_alive(pid) {
+            let _ = std::fs::remove_file(&pid_file);
+            let response = PluginCommandResponse {
+                success: true,
+                message: format!("Plugin '{}' stopped", plugin_name),
+            };
+            if let Some(reply) = &msg.reply {
+                let _ = msg.client.publish(reply.clone(), serde_json::to_vec(&response).unwrap_or_default().into()).await;
+            }
+            info!(name = %plugin_name, "Plugin stopped via NATS");
+            return;
+        }
+    }
+
+    // Force kill if it didn't stop
+    warn!(name = %plugin_name, "Plugin did not stop after 5s, sending SIGKILL");
+    send_sigkill(pid as u32);
+    let _ = std::fs::remove_file(&pid_file);
+
+    let response = PluginCommandResponse {
+        success: true,
+        message: format!("Plugin '{}' killed", plugin_name),
+    };
+    if let Some(reply) = &msg.reply {
+        let _ = msg.client.publish(reply.clone(), serde_json::to_vec(&response).unwrap_or_default().into()).await;
+    }
+    info!(name = %plugin_name, "Plugin killed via NATS");
 }
 
 /// Delegate a subcommand to the seidrum-kernel binary.
