@@ -138,9 +138,10 @@ fn install_agent(resolved: &super::ResolvedPackage, paths: &SeidrumPaths) -> Res
     let agents_dir = paths.config_dir.join("agents");
     fs::create_dir_all(&agents_dir)?;
 
-    // Create a basic agent YAML
+    // Create a basic agent YAML with all required fields
     let agent_yaml = format!(
-        "name: {}\nversion: {}\ndescription: {}\nprompt: {}_prompt\n",
+        "agent:\n  id: {}\n  name: {}\n  version: {}\n  description: {}\n  enabled: false\n  scope: \"default\"\n  subscribe:\n    - \"channel.*.inbound\"\n  prompt: \"{}_prompt\"\n  tools: []\n",
+        manifest.name,
         manifest.name,
         manifest.version,
         manifest.description.as_deref().unwrap_or(""),

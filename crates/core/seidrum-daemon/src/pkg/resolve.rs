@@ -71,62 +71,14 @@ fn resolve_from_local(path: &PathBuf) -> Result<ResolvedPackage> {
 fn resolve_from_registry(reference: &str, paths: &SeidrumPaths) -> Result<ResolvedPackage> {
     info!("Resolving package from registry: {}", reference);
 
-    // Parse name@version
-    let (name, version) = if let Some(at_pos) = reference.find('@') {
-        let (n, v) = reference.split_at(at_pos);
-        (n, Some(&v[1..]))
-    } else {
-        (reference, None)
-    };
-
-    // Load registries config
-    let registries_yaml = paths.seidrum_home.join("registries.yaml");
-    let registries_config: RegistriesConfig = if registries_yaml.exists() {
-        let content = std::fs::read_to_string(&registries_yaml)?;
-        serde_yaml::from_str(&content).unwrap_or_default()
-    } else {
-        RegistriesConfig::default()
-    };
-
-    // Use the first available registry (or default)
-    let registry = registries_config
-        .registries
-        .first()
-        .ok_or_else(|| anyhow!("No registries configured. Run 'seidrum pkg registry add' first."))?;
-
-    // Look for package in registry index
-    // This is a placeholder - in real implementation, would search registry index
-    let resolved_version = version.unwrap_or("latest").to_string();
-
-    debug!(
-        "Found package {} version {} in registry {}",
-        name, resolved_version, registry.name
-    );
-
-    // Return placeholder manifest
-    let manifest = PackageManifest {
-        name: name.to_string(),
-        version: resolved_version.clone(),
-        description: None,
-        author: None,
-        kind: super::PackageKind::Plugin,
-        artifacts: vec![],
-        events: vec![],
-        env_vars: Default::default(),
-        dependencies: vec![],
-    };
-
-    Ok(ResolvedPackage {
-        source: PackageSource::Registry {
-            name: registry.name.clone(),
-            version: resolved_version,
-        },
-        manifest_url: format!(
-            "{}/packages/{}/seidrum-pkg.yaml",
-            registry.url, name
-        ),
-        manifest,
-    })
+    // Registry-based package resolution is not yet implemented.
+    // TODO: Implement registry index searching, package metadata fetching, and manifest loading.
+    // This would involve:
+    // 1. Loading the registry index (index.yaml)
+    // 2. Searching for the package by name and version
+    // 3. Fetching the package manifest from the registry
+    // 4. Validating SHA-256 hashes before download
+    anyhow::bail!("Registry-based package resolution not yet implemented. Use direct URL or local path install instead: seidrum pkg install /path/to/package")
 }
 
 #[cfg(test)]

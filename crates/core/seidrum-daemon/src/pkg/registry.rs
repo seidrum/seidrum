@@ -20,7 +20,10 @@ pub fn add_registry(name: &str, url: &str, paths: &SeidrumPaths) -> Result<()> {
     let registries_yaml = paths.seidrum_home.join("registries.yaml");
     let mut registries: RegistriesConfig = if registries_yaml.exists() {
         let content = fs::read_to_string(&registries_yaml)?;
-        serde_yaml::from_str(&content).unwrap_or_default()
+        serde_yaml::from_str(&content).map_err(|e| {
+            tracing::warn!("Failed to parse registries config: {}", e);
+            anyhow::anyhow!("Failed to parse registries config: {}", e)
+        })?
     } else {
         RegistriesConfig::default()
     };
@@ -138,7 +141,10 @@ pub fn sync_registry(name: Option<&str>, paths: &SeidrumPaths) -> Result<()> {
     }
 
     let content = fs::read_to_string(&registries_yaml)?;
-    let mut registries: RegistriesConfig = serde_yaml::from_str(&content)?;
+    let mut registries: RegistriesConfig = serde_yaml::from_str(&content).map_err(|e| {
+        tracing::warn!("Failed to parse registries config: {}", e);
+        anyhow::anyhow!("Failed to parse registries config: {}", e)
+    })?;
 
     let registries_to_sync = if let Some(n) = name {
         vec![n.to_string()]

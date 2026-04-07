@@ -196,7 +196,7 @@ async fn run_serve() -> anyhow::Result<()> {
     let workflows_dir_path = std::path::PathBuf::from(&workflows_dir);
     let env_file = std::path::PathBuf::from(".env");
     let mgmt_listen_addr = std::env::var("MGMT_LISTEN_ADDR")
-        .unwrap_or_else(|_| "0.0.0.0:3030".to_string());
+        .unwrap_or_else(|_| "127.0.0.1:3030".to_string());
 
     let management_server = management::server::ManagementServer::new(
         nats_client.clone(),

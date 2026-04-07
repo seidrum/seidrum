@@ -769,12 +769,10 @@ fn default_capability_kind() -> String {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PackageArtifact {
     pub target: String,
-    #[serde(default)]
-    pub url: Option<String>,
+    pub url: String,
     #[serde(default)]
     pub image: Option<String>,
-    #[serde(default)]
-    pub sha256: Option<String>,
+    pub sha256: String,
 }
 
 /// Agent-specific package spec (used when kind=agent or inside bundles).

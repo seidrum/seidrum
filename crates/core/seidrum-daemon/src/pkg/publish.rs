@@ -33,7 +33,10 @@ pub fn publish(registry_name: &str, paths: &SeidrumPaths) -> Result<()> {
     let registries_yaml = paths.seidrum_home.join("registries.yaml");
     let registries_config: RegistriesConfig = if registries_yaml.exists() {
         let content = fs::read_to_string(&registries_yaml)?;
-        serde_yaml::from_str(&content).unwrap_or_default()
+        serde_yaml::from_str(&content).map_err(|e| {
+            tracing::warn!("Failed to parse registries config: {}", e);
+            anyhow::anyhow!("Failed to parse registries config: {}", e)
+        })?
     } else {
         RegistriesConfig::default()
     };

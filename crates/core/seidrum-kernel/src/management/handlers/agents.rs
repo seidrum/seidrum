@@ -137,10 +137,13 @@ pub async fn enable_agent(
     info!("Agent '{}' enabled", id);
 
     // Publish reload signal to NATS
-    let _ = state
+    if let Err(e) = state
         .nats
         .publish("kernel.agents.reload".to_string(), "".into())
-        .await;
+        .await
+    {
+        tracing::error!("Failed to publish agent reload signal: {}", e);
+    }
 
     get_agent(State(state), Path(id))
         .await
@@ -158,10 +161,13 @@ pub async fn disable_agent(
     info!("Agent '{}' disabled", id);
 
     // Publish reload signal to NATS
-    let _ = state
+    if let Err(e) = state
         .nats
         .publish("kernel.agents.reload".to_string(), "".into())
-        .await;
+        .await
+    {
+        tracing::error!("Failed to publish agent reload signal: {}", e);
+    }
 
     get_agent(State(state), Path(id))
         .await

@@ -262,8 +262,12 @@ async fn query_running_plugins(state: &ManagementState) -> anyhow::Result<std::c
                 serde_json::from_slice(&reply.payload).unwrap_or_default();
             Ok(response)
         }
-        Ok(Err(_)) | Err(_) => {
-            // If registry doesn't respond, return empty set (all appear offline)
+        Err(_) => {
+            tracing::warn!("Failed to query plugin registry: timeout");
+            Ok(std::collections::HashSet::new())
+        }
+        Ok(Err(e)) => {
+            tracing::warn!("Failed to query plugin registry: {}", e);
             Ok(std::collections::HashSet::new())
         }
     }

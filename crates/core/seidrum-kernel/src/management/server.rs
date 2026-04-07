@@ -3,7 +3,8 @@ use std::path::PathBuf;
 
 use anyhow::{Context, Result};
 use axum::Router;
-use tower_http::cors::{Any, CorsLayer};
+use tower_http::cors::{CorsLayer, AllowOrigin, AllowMethods, AllowHeaders};
+use http::header;
 use tracing::info;
 
 use super::routes;
@@ -32,9 +33,27 @@ impl ManagementServer {
             .with_context(|| format!("Invalid management listen address: {}", listen_addr))?;
 
         let cors = CorsLayer::new()
-            .allow_origin(Any)
-            .allow_methods(Any)
-            .allow_headers(Any);
+            .allow_origin(
+                [
+                    "http://localhost:3030".parse().unwrap(),
+                    "http://127.0.0.1:3030".parse().unwrap(),
+                    "http://localhost:5173".parse().unwrap(),
+                    "http://127.0.0.1:5173".parse().unwrap(),
+                ]
+                .into_iter()
+                .collect::<AllowOrigin>()
+            )
+            .allow_methods(AllowMethods::list([
+                http::Method::GET,
+                http::Method::POST,
+                http::Method::PUT,
+                http::Method::DELETE,
+                http::Method::OPTIONS,
+            ]))
+            .allow_headers(AllowHeaders::list([
+                header::CONTENT_TYPE,
+                header::AUTHORIZATION,
+            ]));
 
         let app = routes::build_router(self.state).layer(cors);
 

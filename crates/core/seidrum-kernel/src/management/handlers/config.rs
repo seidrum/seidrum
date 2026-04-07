@@ -30,6 +30,27 @@ pub struct SetEnvResponse {
 }
 
 // ============================================================================
+// Helper functions
+// ============================================================================
+
+/// Escape environment variable values for safe .env file writing
+fn escape_env_value(value: &str) -> String {
+    if value.contains(' ') || value.contains('"') || value.contains('\'')
+        || value.contains('\n') || value.contains('#') || value.contains('$')
+    {
+        format!(
+            "\"{}\"",
+            value
+                .replace('\\', "\\\\")
+                .replace('"', "\\\"")
+                .replace('\n', "\\n")
+        )
+    } else {
+        value.to_string()
+    }
+}
+
+// ============================================================================
 // Handlers
 // ============================================================================
 
@@ -87,16 +108,16 @@ pub async fn set_env(
     for line in &mut lines {
         let line_trimmed = line.trim();
         if line_trimmed.starts_with(&format!("{}=", key)) {
-            // Replace existing key
-            *line = format!("{}={}", key, req.value);
+            // Replace existing key with properly escaped value
+            *line = format!("{}={}", key, escape_env_value(&req.value));
             found = true;
             break;
         }
     }
 
     if !found {
-        // Add new key at the end
-        lines.push(format!("{}={}", key, req.value));
+        // Add new key at the end with properly escaped value
+        lines.push(format!("{}={}", key, escape_env_value(&req.value)));
     }
 
     // Write back to file

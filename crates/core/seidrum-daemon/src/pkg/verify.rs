@@ -7,6 +7,22 @@ use tracing::info;
 
 /// Verify SHA-256 checksum of a file
 pub fn verify_sha256(file_path: &Path, expected: &str) -> Result<bool> {
+    // Validate SHA-256 format: must be exactly 64 hex characters
+    if expected.is_empty() {
+        anyhow::bail!("SHA-256 hash cannot be empty");
+    }
+
+    if expected.len() != 64 {
+        anyhow::bail!(
+            "Invalid SHA-256 format: expected 64 hex characters, got {}",
+            expected.len()
+        );
+    }
+
+    if !expected.chars().all(|c| c.is_ascii_hexdigit()) {
+        anyhow::bail!("SHA-256 hash contains invalid characters: must be hex digits only");
+    }
+
     info!(
         "Verifying SHA-256 of {} against {}",
         file_path.display(),
