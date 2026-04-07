@@ -37,8 +37,11 @@ pub fn add_registry(name: &str, url: &str, paths: &SeidrumPaths) -> Result<()> {
     println!("Cloning registry from: {}", url);
     fs::create_dir_all(paths.registries_dir())?;
 
+    let registry_str = registry_path
+        .to_str()
+        .ok_or_else(|| anyhow::anyhow!("Invalid registry path: contains non-UTF8 characters"))?;
     let output = Command::new("git")
-        .args(&["clone", url, registry_path.to_str().unwrap()])
+        .args(&["clone", url, registry_str])
         .output()?;
 
     if !output.status.success() {
