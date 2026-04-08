@@ -85,8 +85,9 @@ mod tests {
         let store = Arc::new(InMemoryEventStore::new());
         let bus = EventBusBuilder::new().storage(store).build().await.unwrap();
 
-        assert!(!bus.list_subscriptions(None).await.unwrap().is_empty() || true);
-        // Just verify it works
+        // Verify the bus is operational — no subscriptions exist yet
+        let subs = bus.list_subscriptions(None).await.unwrap();
+        assert!(subs.is_empty());
     }
 
     #[tokio::test]
