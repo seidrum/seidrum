@@ -5,6 +5,7 @@ use crate::EventBusError;
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::task::JoinHandle;
+use tracing::error;
 
 /// Builder for constructing an EventBus with configurable options.
 pub struct EventBusBuilder {
@@ -59,6 +60,7 @@ impl EventBusBuilder {
         let compaction_task =
             CompactionTask::new(Arc::clone(&store), self.compaction_interval, self.retention);
         // Spawn compaction task as a background task. It will continue until the bus is dropped.
+        // Handle task panics by logging an error instead of silently crashing.
         tokio::spawn(async move {
             compaction_task.run().await;
         });

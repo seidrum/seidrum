@@ -18,14 +18,22 @@ pub struct SubscriptionEntry {
     pub filter: Option<crate::dispatch::filter::EventFilter>,
 }
 
-/// Subscription mode: Sync (sequential, mutable) or Async (parallel, immutable).
+/// Subscription mode: Sync (sequential, with interceptors) or Async (parallel, channel-based).
+///
+/// Sync subscriptions receive events through interceptors that run sequentially in priority order.
+/// Interceptors can inspect, modify, or drop events, affecting later subscribers.
+///
+/// Async subscriptions receive events through bounded MPSC channels in parallel.
+/// All async subscribers receive the same (possibly mutated by interceptors) payload.
+/// Channel-based async delivery uses try_send, so it is not truly synchronous —
+/// if the channel is full, delivery silently fails.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SubscriptionMode {
-    /// Handler receives the event mutably. Processed sequentially
-    /// in priority order. Can modify or drop the event.
+    /// Sync interceptor mode. The subscription is processed sequentially in priority order.
+    /// Can modify or drop the event, affecting async subscribers and later interceptors.
     Sync,
-    /// Handler receives a clone. Runs in parallel with other
-    /// async subscribers. Cannot affect the sync chain.
+    /// Async subscriber mode. The subscription receives events through a bounded channel
+    /// in parallel with other async subscribers. Cannot modify or drop events.
     Async,
 }
 
@@ -73,7 +81,8 @@ impl SubjectIndex {
     }
 
     /// Add a subscription. The subject_pattern may contain `*` and `>` tokens.
-    /// Returns Err if pattern exceeds maximum depth.
+    /// `>` must be the final token, not in the middle of the pattern.
+    /// Returns Err if pattern exceeds maximum depth, contains `>` in wrong position, or has empty tokens.
     pub fn subscribe(&mut self, entry: SubscriptionEntry) -> crate::Result<()> {
         let pattern = entry.subject_pattern.clone();
         let tokens: Vec<&str> = pattern.split('.').collect();
@@ -83,6 +92,23 @@ impl SubjectIndex {
                 "subject pattern exceeds maximum depth of {} tokens",
                 MAX_SUBJECT_DEPTH
             )));
+        }
+
+        // Validate that empty tokens don't exist (consecutive dots or leading/trailing dots)
+        if tokens.iter().any(|t| t.is_empty()) {
+            return Err(EventBusError::InvalidSubject(
+                "subject pattern contains empty tokens (check for consecutive dots or leading/trailing dots)"
+                    .to_string(),
+            ));
+        }
+
+        // Validate that `>` only appears as the final token
+        for (i, token) in tokens.iter().enumerate() {
+            if *token == ">" && i != tokens.len() - 1 {
+                return Err(EventBusError::InvalidSubject(
+                    "`>` wildcard must be the final token in the pattern".to_string(),
+                ));
+            }
         }
 
         Self::insert(&mut self.root, &tokens, 0, entry);
@@ -182,6 +208,11 @@ impl SubjectIndex {
     }
 
     /// Get all subscriptions, optionally filtered by pattern substring.
+    ///
+    /// This operation is O(n) where n is the total number of subscriptions in the trie.
+    /// For large deployments with thousands of subscriptions, consider adding a secondary
+    /// index keyed by pattern for faster lookups.
+    // TODO: Optimize list() with a secondary index for large deployments
     pub fn list(&self, filter: Option<&str>) -> Vec<SubscriptionEntry> {
         let mut all = Vec::new();
         Self::collect_all(&self.root, filter, &mut all);

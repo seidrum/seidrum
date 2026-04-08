@@ -105,7 +105,7 @@ impl DispatchEngine {
     /// Validate payload size.
     fn validate_payload(payload: &[u8]) -> crate::Result<()> {
         if payload.len() > MAX_PAYLOAD_SIZE {
-            return Err(EventBusError::InvalidSubject(format!(
+            return Err(EventBusError::PayloadTooLarge(format!(
                 "payload exceeds maximum size of {} bytes",
                 MAX_PAYLOAD_SIZE
             )));
@@ -113,6 +113,29 @@ impl DispatchEngine {
         Ok(())
     }
 
+    /// Publish an event to a subject.
+    ///
+    /// The publish pipeline:
+    /// 1. **PERSIST**: Event is written durably to storage via write-ahead logging.
+    /// 2. **RESOLVE**: All subscriptions matching the subject pattern are looked up.
+    /// 3. **FILTER**: EventFilter is applied to the original payload. Filters are evaluated before
+    ///    interceptors, so interceptors see the unfiltered payload but modifications from interceptors
+    ///    are applied to the final delivery.
+    /// 4. **SYNC CHAIN**: Sync interceptors run sequentially in priority order (lower = first).
+    ///    Each can Pass, Modify, or Drop the event. Modifications propagate to later subscribers.
+    /// 5. **ASYNC FAN-OUT**: Async subscribers receive the (possibly mutated) payload in parallel.
+    /// 6. **FINALIZE**: Delivery status is recorded (Delivered, PartiallyDelivered, etc.).
+    ///
+    /// ## Store Operation Failures
+    /// Storage errors during delivery recording are logged as warnings but do not cause publish to fail.
+    /// This implements best-effort persistence: the event is delivered even if recording fails.
+    /// Operators should monitor warn-level logs for `failed to record` messages to detect issues.
+    ///
+    /// ## Sync vs Async Delivery
+    /// - **Sync mode**: Uses try_send on bounded channels. Not truly synchronous — if the channel
+    ///   is full, delivery silently fails. Only interceptors (with timeout enforcement) provide
+    ///   true synchronous processing.
+    /// - **Async mode**: Parallel delivery with the same channel limitations as Sync.
     pub async fn publish(&self, subject: &str, payload: &[u8]) -> crate::Result<u64> {
         Self::validate_subject(subject)?;
         Self::validate_payload(payload)?;
@@ -282,65 +305,63 @@ impl DispatchEngine {
         }
 
         // 5. ASYNC FAN-OUT: deliver the (possibly mutated) payload to all async subscribers
-        let mut any_failed = false;
-        {
+        // Collect senders while holding the lock, then release before trying to send
+        let async_senders: Vec<(String, Option<mpsc::Sender<Vec<u8>>>)> = {
             let state = self.state.read().await;
-            for entry in &async_entries {
-                match &entry.channel {
-                    ChannelConfig::InProcess => {
-                        if let Some(tx) = state.senders.get(&entry.id) {
-                            match tx.try_send(current_payload.clone()) {
-                                Ok(()) => {
-                                    if let Err(e) = self
-                                        .store
-                                        .record_delivery(seq, &entry.id, DeliveryStatus::Delivered)
-                                        .await
-                                    {
-                                        warn!(seq = seq, subscriber = entry.id, error = %e, "failed to record delivery");
-                                    }
-                                }
-                                Err(mpsc::error::TrySendError::Full(_)) => {
-                                    warn!(subscriber = entry.id, "delivery failed: channel full");
-                                    any_failed = true;
-                                    if let Err(e) = self
-                                        .store
-                                        .record_delivery(seq, &entry.id, DeliveryStatus::Failed)
-                                        .await
-                                    {
-                                        warn!(seq = seq, subscriber = entry.id, error = %e, "failed to record failed delivery");
-                                    }
-                                }
-                                Err(mpsc::error::TrySendError::Closed(_)) => {
-                                    debug!(
-                                        subscriber = entry.id,
-                                        "delivery failed: channel closed"
-                                    );
-                                    any_failed = true;
-                                    if let Err(e) = self
-                                        .store
-                                        .record_delivery(seq, &entry.id, DeliveryStatus::Failed)
-                                        .await
-                                    {
-                                        warn!(seq = seq, subscriber = entry.id, error = %e, "failed to record failed delivery");
-                                    }
-                                }
-                            }
-                        } else {
-                            debug!(subscriber = entry.id, "no sender found");
-                            any_failed = true;
-                            if let Err(e) = self
-                                .store
-                                .record_delivery(seq, &entry.id, DeliveryStatus::Failed)
-                                .await
-                            {
-                                warn!(seq = seq, subscriber = entry.id, error = %e, "failed to record failed delivery");
-                            }
+            async_entries
+                .iter()
+                .map(|entry| {
+                    let tx = state.senders.get(&entry.id).cloned();
+                    (entry.id.clone(), tx)
+                })
+                .collect()
+        };
+
+        let mut any_failed = false;
+        for (entry_id, tx_opt) in async_senders {
+            if let Some(tx) = tx_opt {
+                match tx.try_send(current_payload.clone()) {
+                    Ok(()) => {
+                        if let Err(e) = self
+                            .store
+                            .record_delivery(seq, &entry_id, DeliveryStatus::Delivered)
+                            .await
+                        {
+                            warn!(seq = seq, subscriber = entry_id, error = %e, "failed to record delivery");
                         }
                     }
-                    _ => {
-                        error!("unsupported channel type in Phase 2");
+                    Err(mpsc::error::TrySendError::Full(_)) => {
+                        warn!(subscriber = entry_id, "delivery failed: channel full");
                         any_failed = true;
+                        if let Err(e) = self
+                            .store
+                            .record_delivery(seq, &entry_id, DeliveryStatus::Failed)
+                            .await
+                        {
+                            warn!(seq = seq, subscriber = entry_id, error = %e, "failed to record failed delivery");
+                        }
                     }
+                    Err(mpsc::error::TrySendError::Closed(_)) => {
+                        debug!(subscriber = entry_id, "delivery failed: channel closed");
+                        any_failed = true;
+                        if let Err(e) = self
+                            .store
+                            .record_delivery(seq, &entry_id, DeliveryStatus::Failed)
+                            .await
+                        {
+                            warn!(seq = seq, subscriber = entry_id, error = %e, "failed to record failed delivery");
+                        }
+                    }
+                }
+            } else {
+                debug!(subscriber = entry_id, "no sender found");
+                any_failed = true;
+                if let Err(e) = self
+                    .store
+                    .record_delivery(seq, &entry_id, DeliveryStatus::Failed)
+                    .await
+                {
+                    warn!(seq = seq, subscriber = entry_id, error = %e, "failed to record failed delivery");
                 }
             }
         }
@@ -390,7 +411,7 @@ impl DispatchEngine {
     }
 
     /// Register a sync interceptor. Returns the subscription ID.
-    /// Returns an error if there are already too many interceptors for this subject.
+    /// Returns an error if there are already too many interceptors for this specific subject pattern.
     pub async fn intercept(
         &self,
         subject_pattern: &str,
@@ -414,12 +435,19 @@ impl DispatchEngine {
 
         let mut state = self.state.write().await;
 
-        // Check if we're adding too many interceptors for this pattern
-        let existing_count = state.interceptors.values().count();
-        if existing_count >= MAX_INTERCEPTORS_PER_SUBJECT {
+        // Check if we're adding too many interceptors for this specific pattern
+        let existing_for_pattern = state
+            .index
+            .list(Some(subject_pattern))
+            .iter()
+            .filter(|e| {
+                e.subject_pattern == subject_pattern && state.interceptors.contains_key(&e.id)
+            })
+            .count();
+        if existing_for_pattern >= MAX_INTERCEPTORS_PER_SUBJECT {
             return Err(EventBusError::Internal(format!(
-                "too many interceptors registered (max: {})",
-                MAX_INTERCEPTORS_PER_SUBJECT
+                "too many interceptors registered for pattern '{}' (max: {})",
+                subject_pattern, MAX_INTERCEPTORS_PER_SUBJECT
             )));
         }
 

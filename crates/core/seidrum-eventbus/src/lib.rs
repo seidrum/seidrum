@@ -30,6 +30,10 @@ pub enum EventBusError {
     #[error("invalid subject: {0}")]
     InvalidSubject(String),
 
+    /// Payload size exceeded the maximum allowed.
+    #[error("payload too large: {0}")]
+    PayloadTooLarge(String),
+
     /// Configuration or builder error.
     #[error("configuration error: {0}")]
     Config(String),

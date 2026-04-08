@@ -1,14 +1,18 @@
 use async_trait::async_trait;
 
 /// The result of an interceptor processing an event.
+///
+/// An interceptor can pass the event through unchanged, modify it in place,
+/// or drop it entirely. Modifications propagate to subsequent interceptors and
+/// finally to async subscribers.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum InterceptResult {
-    /// Event was modified in place. Continue the chain.
+    /// Event was modified in place. The modified payload propagates to the next interceptor.
     Modified,
-    /// Event passes through unchanged. Continue the chain.
+    /// Event passes through unchanged. Continue to the next interceptor.
     Pass,
-    /// Event is dropped. Abort the chain, do not deliver to
-    /// async subscribers.
+    /// Event is dropped. The sync chain is aborted and async subscribers do not receive it.
+    /// The event is still recorded as delivered (intentionally dropped).
     Drop,
 }
 
@@ -16,13 +20,17 @@ pub enum InterceptResult {
 /// as they pass through the dispatch pipeline.
 ///
 /// Interceptors are called sequentially in priority order (lower number = first).
+/// Interceptors with equal priority execute in insertion order.
 /// Each interceptor gets mutable access to the payload and can:
 /// - Return `Pass` to continue unchanged
-/// - Mutate `payload` in place and return `Modified` to propagate changes
-/// - Return `Drop` to abort the entire dispatch chain
+/// - Mutate `payload` in place and return `Modified` to propagate changes to later subscribers
+/// - Return `Drop` to abort the entire dispatch chain, preventing async subscribers from receiving the event
+///
+/// Interceptors are the only subscribers that provide true synchronous processing with timeout enforcement.
 #[async_trait]
 pub trait Interceptor: Send + Sync + 'static {
     /// Process the event. The payload can be mutated in place.
+    /// The interceptor must complete within the configured timeout or be skipped.
     async fn intercept(&self, subject: &str, payload: &mut Vec<u8>) -> InterceptResult;
 }
 

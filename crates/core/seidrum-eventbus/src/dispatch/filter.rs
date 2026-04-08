@@ -1,10 +1,19 @@
 use serde::{Deserialize, Serialize};
+use tracing::debug;
 
-/// An event filter narrows which events a subscription receives beyond
-/// subject matching. Filters operate on the serialized JSON payload.
+/// An event filter narrows which events a subscription receives beyond subject matching.
 ///
-/// Non-JSON payloads pass through all filters (filters are advisory, not hard gates).
-/// Empty filter lists: All([]) matches everything, Any([]) matches nothing.
+/// Filters operate on the serialized JSON payload. They apply to the original payload
+/// before any interceptor modifications. Non-JSON payloads pass through all filters
+/// (filters are advisory, not hard gates — subscribers can handle non-JSON formats).
+///
+/// Empty filter lists: `All([])` matches everything, `Any([])` matches nothing.
+///
+/// # Variants
+/// - `FieldEquals { path, value }`: Match a top-level or nested JSON field against an exact value.
+/// - `FieldContains { path, substring }`: Match a field containing a substring.
+/// - `All(filters)`: Logical AND — all sub-filters must match.
+/// - `Any(filters)`: Logical OR — any sub-filter must match.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum EventFilter {
     /// Match a top-level JSON field against an exact value.
@@ -24,10 +33,14 @@ impl EventFilter {
     /// Evaluate the filter against a raw payload (bytes).
     /// Returns true if the payload matches the filter or if the payload
     /// is not valid JSON (filters are best-effort; non-JSON payloads pass through).
+    ///
+    /// Non-JSON payloads (those that fail to deserialize as JSON) are logged at debug level
+    /// and pass through all filters. This allows subscribers to handle non-JSON event formats.
     pub fn matches(&self, payload: &[u8]) -> bool {
         let Ok(value) = serde_json::from_slice::<serde_json::Value>(payload) else {
             // Non-JSON payloads pass through filters (filter is a narrowing hint,
             // not a hard gate — the subscriber decides how to handle non-JSON).
+            debug!("non-JSON payload encountered, passing through all filters");
             return true;
         };
         self.matches_value(&value)

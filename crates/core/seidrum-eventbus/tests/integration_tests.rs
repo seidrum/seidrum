@@ -1,3 +1,4 @@
+use async_trait::async_trait;
 use seidrum_eventbus::storage::memory_store::InMemoryEventStore;
 use seidrum_eventbus::{
     ChannelConfig, EventBusBuilder, EventFilter, EventStore, InterceptResult, Interceptor,
@@ -353,4 +354,89 @@ async fn test_event_filter_field_equals() {
 
     let result = tokio::time::timeout(Duration::from_millis(200), sub.rx.recv()).await;
     assert!(result.is_err());
+}
+
+// --- Issue #13 tests: Integration tests for fixed issues ---
+
+#[tokio::test]
+async fn test_wildcard_gt_not_allowed_in_middle() {
+    let store = Arc::new(InMemoryEventStore::new());
+    let bus = EventBusBuilder::new().storage(store).build().await.unwrap();
+
+    // `>` in the middle of the pattern should be rejected
+    let result = bus.subscribe("brain.>.content", default_opts()).await;
+    assert!(
+        result.is_err(),
+        "pattern with > in middle should be rejected"
+    );
+}
+
+#[tokio::test]
+async fn test_empty_token_rejection() {
+    let store = Arc::new(InMemoryEventStore::new());
+    let bus = EventBusBuilder::new().storage(store).build().await.unwrap();
+
+    // Double dots create empty tokens
+    let result = bus.subscribe("test..subject", default_opts()).await;
+    assert!(
+        result.is_err(),
+        "pattern with empty tokens should be rejected"
+    );
+
+    // Leading dot
+    let result = bus.subscribe(".test.subject", default_opts()).await;
+    assert!(
+        result.is_err(),
+        "pattern with leading dot should be rejected"
+    );
+
+    // Trailing dot
+    let result = bus.subscribe("test.subject.", default_opts()).await;
+    assert!(
+        result.is_err(),
+        "pattern with trailing dot should be rejected"
+    );
+}
+
+struct TimeoutInterceptor;
+
+#[async_trait::async_trait]
+impl Interceptor for TimeoutInterceptor {
+    async fn intercept(&self, _subject: &str, _payload: &mut Vec<u8>) -> InterceptResult {
+        // Sleep longer than the timeout
+        tokio::time::sleep(Duration::from_secs(2)).await;
+        InterceptResult::Pass
+    }
+}
+
+#[tokio::test]
+async fn test_interceptor_timeout_behavior() {
+    let store = Arc::new(InMemoryEventStore::new());
+    let bus = EventBusBuilder::new().storage(store).build().await.unwrap();
+
+    // Register an interceptor with a short timeout
+    bus.intercept(
+        "test",
+        5,
+        Arc::new(TimeoutInterceptor),
+        Some(Duration::from_millis(100)),
+    )
+    .await
+    .unwrap();
+
+    // Register async subscriber
+    let mut sub = bus.subscribe("test", default_opts()).await.unwrap();
+
+    // Publish event
+    bus.publish("test", b"hello").await.unwrap();
+
+    // Subscriber should still receive the event (interceptor timed out and was skipped)
+    let msg = tokio::time::timeout(Duration::from_secs(1), sub.rx.recv())
+        .await
+        .unwrap();
+    assert_eq!(
+        msg,
+        Some(b"hello".to_vec()),
+        "event should be delivered despite interceptor timeout"
+    );
 }
