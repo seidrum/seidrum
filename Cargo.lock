@@ -286,6 +286,39 @@ dependencies = [
 
 [[package]]
 name = "async-nats"
+version = "0.35.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "ab8df97cb8fc4a884af29ab383e9292ea0939cfcdd7d2a17179086dc6c427e7f"
+dependencies = [
+ "base64 0.22.1",
+ "bytes",
+ "futures",
+ "memchr",
+ "nkeys",
+ "nuid",
+ "once_cell",
+ "portable-atomic",
+ "rand 0.8.5",
+ "regex",
+ "ring",
+ "rustls-native-certs 0.7.3",
+ "rustls-pemfile 2.2.0",
+ "rustls-webpki 0.102.8",
+ "serde",
+ "serde_json",
+ "serde_nanos",
+ "serde_repr",
+ "thiserror 1.0.69",
+ "time",
+ "tokio",
+ "tokio-rustls",
+ "tracing",
+ "tryhard",
+ "url",
+]
+
+[[package]]
+name = "async-nats"
 version = "0.38.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "76433c4de73442daedb3a59e991d94e85c14ebfc33db53dfcd347a21cd6ef4f8"
@@ -1149,7 +1182,16 @@ version = "5.0.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "44c45a9d03d6676652bcb5e724c7e988de1acad23a711b5217ab9cbecbec2225"
 dependencies = [
- "dirs-sys",
+ "dirs-sys 0.4.1",
+]
+
+[[package]]
+name = "dirs"
+version = "6.0.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "c3e8aa94d75141228480295a7d0e7feb620b1a5ad9f12bc40be62411e38cce4e"
+dependencies = [
+ "dirs-sys 0.5.0",
 ]
 
 [[package]]
@@ -1160,8 +1202,20 @@ checksum = "520f05a5cbd335fae5a99ff7a6ab8627577660ee5cfd6a94a6a929b52ff0321c"
 dependencies = [
  "libc",
  "option-ext",
- "redox_users",
+ "redox_users 0.4.6",
  "windows-sys 0.48.0",
+]
+
+[[package]]
+name = "dirs-sys"
+version = "0.5.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "e01a3366d27ee9890022452ee61b2b63a67e6f13f58900b651ff5665f0bb1fab"
+dependencies = [
+ "libc",
+ "option-ext",
+ "redox_users 0.5.2",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -1341,6 +1395,17 @@ name = "fiat-crypto"
 version = "0.2.9"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "28dea519a9695b9977216879a3ebfddf92f1c08c05d984f8996aecd6ecdc811d"
+
+[[package]]
+name = "filetime"
+version = "0.2.27"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "f98844151eee8917efc50bd9e8318cb963ae8b297431495d3f758616ea5c57db"
+dependencies = [
+ "cfg-if",
+ "libc",
+ "libredox",
+]
 
 [[package]]
 name = "find-msvc-tools"
@@ -2283,7 +2348,10 @@ version = "0.1.14"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "1744e39d1d6a9948f4f388969627434e31128196de472883b39f148769bfe30a"
 dependencies = [
+ "bitflags 2.11.0",
  "libc",
+ "plain",
+ "redox_syscall 0.7.3",
 ]
 
 [[package]]
@@ -2723,7 +2791,7 @@ checksum = "2621685985a2ebf1c516881c026032ac7deafcda1a2c9b7850dc81e3dfcb64c1"
 dependencies = [
  "cfg-if",
  "libc",
- "redox_syscall",
+ "redox_syscall 0.5.18",
  "smallvec",
  "windows-link",
 ]
@@ -2928,6 +2996,12 @@ name = "pkg-config"
 version = "0.3.32"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "7edddbd0b52d732b21ad9a5fab5c704c14cd949e5e9a1ec5929a24fded1b904c"
+
+[[package]]
+name = "plain"
+version = "0.2.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "b4596b6d070b27117e987119b4dac604f3c58cfb0b191112e24771b2faeac1a6"
 
 [[package]]
 name = "polling"
@@ -3199,10 +3273,28 @@ dependencies = [
 ]
 
 [[package]]
+name = "redb"
+version = "2.6.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "8eca1e9d98d5a7e9002d0013e18d5a9b000aee942eb134883a82f06ebffb6c01"
+dependencies = [
+ "libc",
+]
+
+[[package]]
 name = "redox_syscall"
 version = "0.5.18"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "ed2bf2547551a7053d6fdfafda3f938979645c44812fbfcda098faae3f1a362d"
+dependencies = [
+ "bitflags 2.11.0",
+]
+
+[[package]]
+name = "redox_syscall"
+version = "0.7.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "6ce70a74e890531977d37e532c34d45e9055d2409ed08ddba14529471ed0be16"
 dependencies = [
  "bitflags 2.11.0",
 ]
@@ -3216,6 +3308,17 @@ dependencies = [
  "getrandom 0.2.17",
  "libredox",
  "thiserror 1.0.69",
+]
+
+[[package]]
+name = "redox_users"
+version = "0.5.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "a4e608c6638b9c18977b00b475ac1f28d14e84b27d8d42f70e0bf1e3dec127ac"
+dependencies = [
+ "getrandom 0.2.17",
+ "libredox",
+ "thiserror 2.0.18",
 ]
 
 [[package]]
@@ -3643,7 +3746,7 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "argon2",
- "async-nats",
+ "async-nats 0.38.0",
  "axum",
  "base64 0.22.1",
  "chrono",
@@ -3671,10 +3774,10 @@ name = "seidrum-calendar"
 version = "0.1.0"
 dependencies = [
  "anyhow",
- "async-nats",
+ "async-nats 0.38.0",
  "chrono",
  "clap",
- "dirs",
+ "dirs 5.0.1",
  "futures",
  "reqwest 0.12.28",
  "seidrum-common",
@@ -3690,7 +3793,7 @@ name = "seidrum-claude-code"
 version = "0.1.0"
 dependencies = [
  "anyhow",
- "async-nats",
+ "async-nats 0.38.0",
  "clap",
  "futures",
  "seidrum-common",
@@ -3706,7 +3809,7 @@ name = "seidrum-cli"
 version = "0.1.0"
 dependencies = [
  "anyhow",
- "async-nats",
+ "async-nats 0.38.0",
  "clap",
  "futures",
  "seidrum-common",
@@ -3721,7 +3824,7 @@ name = "seidrum-code-executor"
 version = "0.1.0"
 dependencies = [
  "anyhow",
- "async-nats",
+ "async-nats 0.38.0",
  "clap",
  "futures",
  "seidrum-common",
@@ -3737,7 +3840,7 @@ name = "seidrum-common"
 version = "0.1.0"
 dependencies = [
  "anyhow",
- "async-nats",
+ "async-nats 0.38.0",
  "chrono",
  "clap",
  "serde",
@@ -3755,7 +3858,7 @@ name = "seidrum-content-ingester"
 version = "0.1.0"
 dependencies = [
  "anyhow",
- "async-nats",
+ "async-nats 0.38.0",
  "chrono",
  "clap",
  "futures",
@@ -3773,9 +3876,12 @@ name = "seidrum-daemon"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "async-nats 0.35.1",
  "chrono",
  "clap",
  "dialoguer",
+ "flate2",
+ "futures",
  "futures-util",
  "indicatif",
  "libc",
@@ -3784,7 +3890,10 @@ dependencies = [
  "serde",
  "serde_json",
  "serde_yaml",
+ "sha2",
  "tabled",
+ "tar",
+ "tempfile",
  "tokio",
  "tokio-util",
  "tracing",
@@ -3797,7 +3906,7 @@ name = "seidrum-e2e"
 version = "0.1.0"
 dependencies = [
  "anyhow",
- "async-nats",
+ "async-nats 0.38.0",
  "chrono",
  "seidrum-common",
  "serde",
@@ -3813,7 +3922,7 @@ dependencies = [
  "anyhow",
  "async-imap",
  "async-native-tls",
- "async-nats",
+ "async-nats 0.38.0",
  "chrono",
  "clap",
  "futures",
@@ -3833,10 +3942,10 @@ name = "seidrum-entity-extractor"
 version = "0.1.0"
 dependencies = [
  "anyhow",
- "async-nats",
+ "async-nats 0.38.0",
  "chrono",
  "clap",
- "dirs",
+ "dirs 5.0.1",
  "futures",
  "reqwest 0.12.28",
  "seidrum-common",
@@ -3852,7 +3961,7 @@ name = "seidrum-event-emitter"
 version = "0.1.0"
 dependencies = [
  "anyhow",
- "async-nats",
+ "async-nats 0.38.0",
  "chrono",
  "clap",
  "futures",
@@ -3865,14 +3974,30 @@ dependencies = [
 ]
 
 [[package]]
+name = "seidrum-eventbus"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "chrono",
+ "redb",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "thiserror 1.0.69",
+ "tokio",
+ "tracing",
+ "ulid",
+]
+
+[[package]]
 name = "seidrum-fact-extractor"
 version = "0.1.0"
 dependencies = [
  "anyhow",
- "async-nats",
+ "async-nats 0.38.0",
  "chrono",
  "clap",
- "dirs",
+ "dirs 5.0.1",
  "futures",
  "reqwest 0.12.28",
  "seidrum-common",
@@ -3888,7 +4013,7 @@ name = "seidrum-feedback-extractor"
 version = "0.1.0"
 dependencies = [
  "anyhow",
- "async-nats",
+ "async-nats 0.38.0",
  "chrono",
  "clap",
  "futures",
@@ -3907,7 +4032,7 @@ name = "seidrum-graph-context-loader"
 version = "0.1.0"
 dependencies = [
  "anyhow",
- "async-nats",
+ "async-nats 0.38.0",
  "chrono",
  "clap",
  "futures",
@@ -3926,13 +4051,16 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "arangors",
- "async-nats",
+ "async-nats 0.38.0",
+ "axum",
  "base64 0.22.1",
  "chrono",
  "clap",
  "config",
+ "dirs 6.0.0",
  "futures",
  "garde",
+ "http 1.4.0",
  "reqwest 0.12.28",
  "seidrum-common",
  "serde",
@@ -3942,6 +4070,8 @@ dependencies = [
  "tiktoken-rs",
  "tokio",
  "tokio-cron-scheduler",
+ "tower",
+ "tower-http",
  "tracing",
  "tracing-subscriber",
  "ulid",
@@ -3952,7 +4082,7 @@ name = "seidrum-llm-anthropic"
 version = "0.1.0"
 dependencies = [
  "anyhow",
- "async-nats",
+ "async-nats 0.38.0",
  "chrono",
  "clap",
  "futures",
@@ -3970,10 +4100,10 @@ name = "seidrum-llm-google"
 version = "0.1.0"
 dependencies = [
  "anyhow",
- "async-nats",
+ "async-nats 0.38.0",
  "chrono",
  "clap",
- "dirs",
+ "dirs 5.0.1",
  "futures",
  "reqwest 0.12.28",
  "seidrum-common",
@@ -3989,7 +4119,7 @@ name = "seidrum-llm-ollama"
 version = "0.1.0"
 dependencies = [
  "anyhow",
- "async-nats",
+ "async-nats 0.38.0",
  "chrono",
  "clap",
  "futures",
@@ -4007,7 +4137,7 @@ name = "seidrum-llm-openai"
 version = "0.1.0"
 dependencies = [
  "anyhow",
- "async-nats",
+ "async-nats 0.38.0",
  "chrono",
  "clap",
  "futures",
@@ -4025,7 +4155,7 @@ name = "seidrum-llm-router"
 version = "0.2.0"
 dependencies = [
  "anyhow",
- "async-nats",
+ "async-nats 0.38.0",
  "chrono",
  "clap",
  "futures",
@@ -4044,7 +4174,7 @@ name = "seidrum-notification"
 version = "0.1.0"
 dependencies = [
  "anyhow",
- "async-nats",
+ "async-nats 0.38.0",
  "chrono",
  "clap",
  "futures",
@@ -4061,7 +4191,7 @@ name = "seidrum-response-formatter"
 version = "0.1.0"
 dependencies = [
  "anyhow",
- "async-nats",
+ "async-nats 0.38.0",
  "chrono",
  "clap",
  "futures",
@@ -4078,10 +4208,10 @@ name = "seidrum-scope-classifier"
 version = "0.1.0"
 dependencies = [
  "anyhow",
- "async-nats",
+ "async-nats 0.38.0",
  "chrono",
  "clap",
- "dirs",
+ "dirs 5.0.1",
  "futures",
  "reqwest 0.12.28",
  "seidrum-common",
@@ -4097,10 +4227,10 @@ name = "seidrum-task-detector"
 version = "0.1.0"
 dependencies = [
  "anyhow",
- "async-nats",
+ "async-nats 0.38.0",
  "chrono",
  "clap",
- "dirs",
+ "dirs 5.0.1",
  "futures",
  "reqwest 0.12.28",
  "seidrum-common",
@@ -4116,7 +4246,7 @@ name = "seidrum-telegram"
 version = "0.1.0"
 dependencies = [
  "anyhow",
- "async-nats",
+ "async-nats 0.38.0",
  "base64 0.22.1",
  "chrono",
  "clap",
@@ -4138,7 +4268,7 @@ name = "seidrum-tool-dispatcher"
 version = "0.1.0"
 dependencies = [
  "anyhow",
- "async-nats",
+ "async-nats 0.38.0",
  "clap",
  "futures",
  "seidrum-common",
@@ -4632,6 +4762,17 @@ name = "takecell"
 version = "0.1.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "20f34339676cdcab560c9a82300c4c2581f68b9369aedf0fae86f2ff9565ff3e"
+
+[[package]]
+name = "tar"
+version = "0.4.45"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "22692a6476a21fa75fdfc11d452fda482af402c008cdbaf3476414e122040973"
+dependencies = [
+ "filetime",
+ "libc",
+ "xattr",
+]
 
 [[package]]
 name = "teloxide"
@@ -5937,6 +6078,16 @@ name = "writeable"
 version = "0.6.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "9edde0db4769d2dc68579893f2306b26c6ecfbe0ef499b013d731b7b9247e0b9"
+
+[[package]]
+name = "xattr"
+version = "1.6.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "32e45ad4206f6d2479085147f02bc2ef834ac85886624a23575ae137c8aa8156"
+dependencies = [
+ "libc",
+ "rustix",
+]
 
 [[package]]
 name = "xz2"
