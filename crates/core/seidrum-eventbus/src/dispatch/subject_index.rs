@@ -11,61 +11,187 @@ pub struct SubscriptionEntry {
     pub mode: SubscriptionMode,
     pub channel: ChannelConfig,
     pub timeout: Duration,
+    pub filter: Option<crate::dispatch::filter::EventFilter>,
 }
 
 /// Subscription mode: Sync (sequential, mutable) or Async (parallel, immutable).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SubscriptionMode {
+    /// Handler receives the event mutably. Processed sequentially
+    /// in priority order. Can modify or drop the event.
     Sync,
+    /// Handler receives a clone. Runs in parallel with other
+    /// async subscribers. Cannot affect the sync chain.
     Async,
 }
 
-/// A simple subject index for Phase 1. Phase 2 will upgrade to a trie.
-/// For now, we do exact matching only.
+/// Trie-based subject index supporting exact match, `*` single-token wildcard,
+/// and `>` terminal wildcard. Lookup is O(depth) where depth is the number of
+/// tokens in the published subject.
 pub struct SubjectIndex {
-    subscriptions: HashMap<String, Vec<SubscriptionEntry>>,
+    root: TrieNode,
+}
+
+struct TrieNode {
+    /// Subscriptions attached at this exact position.
+    subscriptions: Vec<SubscriptionEntry>,
+    /// Children keyed by literal token.
+    children: HashMap<String, TrieNode>,
+    /// Subscriptions using `*` at this position (matches exactly one token).
+    wildcard: Option<Box<TrieNode>>,
+    /// Subscriptions using `>` at this position (matches one or more trailing tokens).
+    terminal_wildcard: Vec<SubscriptionEntry>,
+}
+
+impl TrieNode {
+    fn new() -> Self {
+        Self {
+            subscriptions: Vec::new(),
+            children: HashMap::new(),
+            wildcard: None,
+            terminal_wildcard: Vec::new(),
+        }
+    }
+
+    fn is_empty(&self) -> bool {
+        self.subscriptions.is_empty()
+            && self.children.is_empty()
+            && self.wildcard.is_none()
+            && self.terminal_wildcard.is_empty()
+    }
 }
 
 impl SubjectIndex {
     pub fn new() -> Self {
         Self {
-            subscriptions: HashMap::new(),
+            root: TrieNode::new(),
         }
     }
 
-    /// Add a subscription.
+    /// Add a subscription. The subject_pattern may contain `*` and `>` tokens.
     pub fn subscribe(&mut self, entry: SubscriptionEntry) {
         let pattern = entry.subject_pattern.clone();
-        self.subscriptions.entry(pattern).or_default().push(entry);
+        let tokens: Vec<&str> = pattern.split('.').collect();
+        Self::insert(&mut self.root, &tokens, 0, entry);
     }
 
-    /// Remove a subscription by ID.
-    pub fn unsubscribe(&mut self, id: &str) {
-        for entries in self.subscriptions.values_mut() {
-            entries.retain(|e| e.id != id);
+    fn insert(node: &mut TrieNode, tokens: &[&str], depth: usize, entry: SubscriptionEntry) {
+        if depth == tokens.len() {
+            node.subscriptions.push(entry);
+            return;
         }
+
+        let token = tokens[depth];
+
+        if token == ">" {
+            // Terminal wildcard: matches one or more trailing tokens.
+            node.terminal_wildcard.push(entry);
+            return;
+        }
+
+        if token == "*" {
+            // Single-token wildcard: matches exactly one token at this position.
+            let child = node
+                .wildcard
+                .get_or_insert_with(|| Box::new(TrieNode::new()));
+            Self::insert(child, tokens, depth + 1, entry);
+            return;
+        }
+
+        // Literal token.
+        let child = node
+            .children
+            .entry(token.to_string())
+            .or_insert_with(TrieNode::new);
+        Self::insert(child, tokens, depth + 1, entry);
     }
 
-    /// Find all subscriptions matching a subject (exact match only in Phase 1).
-    pub fn lookup(&self, subject: &str) -> Vec<SubscriptionEntry> {
-        self.subscriptions.get(subject).cloned().unwrap_or_default()
+    /// Remove a subscription by ID from the entire trie.
+    pub fn unsubscribe(&mut self, id: &str) {
+        Self::remove(&mut self.root, id);
     }
 
-    /// Get all subscriptions, optionally filtered by pattern.
-    pub fn list(&self, filter: Option<&str>) -> Vec<SubscriptionEntry> {
-        let mut all = Vec::new();
-        for entries in self.subscriptions.values() {
-            for entry in entries {
-                if let Some(f) = filter {
-                    if entry.subject_pattern.contains(f) {
-                        all.push(entry.clone());
-                    }
-                } else {
-                    all.push(entry.clone());
-                }
+    fn remove(node: &mut TrieNode, id: &str) {
+        node.subscriptions.retain(|e| e.id != id);
+        node.terminal_wildcard.retain(|e| e.id != id);
+
+        for child in node.children.values_mut() {
+            Self::remove(child, id);
+        }
+        node.children.retain(|_, child| !child.is_empty());
+
+        if let Some(ref mut wildcard) = node.wildcard {
+            Self::remove(wildcard, id);
+            if wildcard.is_empty() {
+                node.wildcard = None;
             }
         }
+    }
+
+    /// Find all subscriptions matching a concrete subject (no wildcards in lookup).
+    /// Results are sorted by priority (ascending = highest priority first).
+    pub fn lookup(&self, subject: &str) -> Vec<SubscriptionEntry> {
+        let tokens: Vec<&str> = subject.split('.').collect();
+        let mut results = Vec::new();
+        Self::collect(&self.root, &tokens, 0, &mut results);
+        results.sort_by_key(|e| e.priority);
+        results
+    }
+
+    fn collect(
+        node: &TrieNode,
+        tokens: &[&str],
+        depth: usize,
+        results: &mut Vec<SubscriptionEntry>,
+    ) {
+        // Terminal wildcard at this node matches any remaining tokens (1 or more).
+        if depth < tokens.len() {
+            results.extend(node.terminal_wildcard.iter().cloned());
+        }
+
+        if depth == tokens.len() {
+            results.extend(node.subscriptions.iter().cloned());
+            return;
+        }
+
+        let token = tokens[depth];
+
+        // Follow literal child.
+        if let Some(child) = node.children.get(token) {
+            Self::collect(child, tokens, depth + 1, results);
+        }
+
+        // Follow `*` wildcard child (matches this one token, then continue).
+        if let Some(ref wildcard) = node.wildcard {
+            Self::collect(wildcard, tokens, depth + 1, results);
+        }
+    }
+
+    /// Get all subscriptions, optionally filtered by pattern substring.
+    pub fn list(&self, filter: Option<&str>) -> Vec<SubscriptionEntry> {
+        let mut all = Vec::new();
+        Self::collect_all(&self.root, filter, &mut all);
         all
+    }
+
+    fn collect_all(node: &TrieNode, filter: Option<&str>, results: &mut Vec<SubscriptionEntry>) {
+        for entry in &node.subscriptions {
+            if filter.is_none() || entry.subject_pattern.contains(filter.unwrap_or("")) {
+                results.push(entry.clone());
+            }
+        }
+        for entry in &node.terminal_wildcard {
+            if filter.is_none() || entry.subject_pattern.contains(filter.unwrap_or("")) {
+                results.push(entry.clone());
+            }
+        }
+
+        for child in node.children.values() {
+            Self::collect_all(child, filter, results);
+        }
+        if let Some(ref wildcard) = node.wildcard {
+            Self::collect_all(wildcard, filter, results);
+        }
     }
 }
 
@@ -78,21 +204,23 @@ impl Default for SubjectIndex {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::time::Duration;
+
+    fn make_entry(id: &str, pattern: &str, priority: u32) -> SubscriptionEntry {
+        SubscriptionEntry {
+            id: id.to_string(),
+            subject_pattern: pattern.to_string(),
+            priority,
+            mode: SubscriptionMode::Async,
+            channel: ChannelConfig::InProcess,
+            timeout: Duration::from_secs(5),
+            filter: None,
+        }
+    }
 
     #[test]
     fn test_exact_match() {
         let mut index = SubjectIndex::new();
-        let entry = SubscriptionEntry {
-            id: "sub1".to_string(),
-            subject_pattern: "test.subject".to_string(),
-            priority: 10,
-            mode: SubscriptionMode::Async,
-            channel: ChannelConfig::InProcess,
-            timeout: Duration::from_secs(5),
-        };
-        index.subscribe(entry);
-
+        index.subscribe(make_entry("sub1", "test.subject", 10));
         let matches = index.lookup("test.subject");
         assert_eq!(matches.len(), 1);
         assert_eq!(matches[0].id, "sub1");
@@ -101,51 +229,82 @@ mod tests {
     #[test]
     fn test_no_match() {
         let index = SubjectIndex::new();
-        let matches = index.lookup("nonexistent");
-        assert!(matches.is_empty());
+        assert!(index.lookup("nonexistent").is_empty());
     }
 
     #[test]
-    fn test_multiple_subs_same_pattern() {
+    fn test_star_wildcard_single_token() {
         let mut index = SubjectIndex::new();
-        for i in 0..3 {
-            let entry = SubscriptionEntry {
-                id: format!("sub{}", i),
-                subject_pattern: "test".to_string(),
-                priority: i as u32,
-                mode: SubscriptionMode::Async,
-                channel: ChannelConfig::InProcess,
-                timeout: Duration::from_secs(5),
-            };
-            index.subscribe(entry);
-        }
+        index.subscribe(make_entry("sub1", "channel.*.inbound", 10));
+        assert_eq!(index.lookup("channel.telegram.inbound").len(), 1);
+        assert_eq!(index.lookup("channel.email.inbound").len(), 1);
+    }
 
-        let matches = index.lookup("test");
+    #[test]
+    fn test_star_wildcard_no_match_multi_token() {
+        let mut index = SubjectIndex::new();
+        index.subscribe(make_entry("sub1", "channel.*.inbound", 10));
+        assert!(index.lookup("channel.telegram.sub.inbound").is_empty());
+    }
+
+    #[test]
+    fn test_star_wildcard_no_match_missing_token() {
+        let mut index = SubjectIndex::new();
+        index.subscribe(make_entry("sub1", "channel.*.inbound", 10));
+        assert!(index.lookup("channel.inbound").is_empty());
+    }
+
+    #[test]
+    fn test_gt_wildcard_one_token() {
+        let mut index = SubjectIndex::new();
+        index.subscribe(make_entry("sub1", "brain.>", 10));
+        assert_eq!(index.lookup("brain.content").len(), 1);
+    }
+
+    #[test]
+    fn test_gt_wildcard_multiple_tokens() {
+        let mut index = SubjectIndex::new();
+        index.subscribe(make_entry("sub1", "brain.>", 10));
+        assert_eq!(index.lookup("brain.content.store").len(), 1);
+        assert_eq!(index.lookup("brain.entity.upsert.batch").len(), 1);
+    }
+
+    #[test]
+    fn test_gt_wildcard_no_match_exact_prefix() {
+        let mut index = SubjectIndex::new();
+        index.subscribe(make_entry("sub1", "brain.>", 10));
+        assert!(index.lookup("brain").is_empty());
+    }
+
+    #[test]
+    fn test_combined_exact_star_gt() {
+        let mut index = SubjectIndex::new();
+        index.subscribe(make_entry("exact", "channel.telegram.inbound", 10));
+        index.subscribe(make_entry("star", "channel.*.inbound", 20));
+        index.subscribe(make_entry("gt", "channel.>", 30));
+
+        let matches = index.lookup("channel.telegram.inbound");
         assert_eq!(matches.len(), 3);
+        assert_eq!(matches[0].id, "exact");
+        assert_eq!(matches[1].id, "star");
+        assert_eq!(matches[2].id, "gt");
+    }
+
+    #[test]
+    fn test_gt_catches_star_misses() {
+        let mut index = SubjectIndex::new();
+        index.subscribe(make_entry("star", "channel.*.inbound", 10));
+        index.subscribe(make_entry("gt", "channel.>", 20));
+        let matches = index.lookup("channel.telegram.sub.inbound");
+        assert_eq!(matches.len(), 1);
+        assert_eq!(matches[0].id, "gt");
     }
 
     #[test]
     fn test_unsubscribe() {
         let mut index = SubjectIndex::new();
-        let entry1 = SubscriptionEntry {
-            id: "sub1".to_string(),
-            subject_pattern: "test".to_string(),
-            priority: 10,
-            mode: SubscriptionMode::Async,
-            channel: ChannelConfig::InProcess,
-            timeout: Duration::from_secs(5),
-        };
-        let entry2 = SubscriptionEntry {
-            id: "sub2".to_string(),
-            subject_pattern: "test".to_string(),
-            priority: 20,
-            mode: SubscriptionMode::Async,
-            channel: ChannelConfig::InProcess,
-            timeout: Duration::from_secs(5),
-        };
-        index.subscribe(entry1);
-        index.subscribe(entry2);
-
+        index.subscribe(make_entry("sub1", "test", 10));
+        index.subscribe(make_entry("sub2", "test", 20));
         index.unsubscribe("sub1");
         let matches = index.lookup("test");
         assert_eq!(matches.len(), 1);
@@ -153,43 +312,33 @@ mod tests {
     }
 
     #[test]
+    fn test_unsubscribe_terminal_wildcard() {
+        let mut index = SubjectIndex::new();
+        index.subscribe(make_entry("sub1", "brain.>", 10));
+        index.unsubscribe("sub1");
+        assert!(index.lookup("brain.content.store").is_empty());
+    }
+
+    #[test]
     fn test_priority_ordering() {
         let mut index = SubjectIndex::new();
-        for priority in &[30, 10, 20] {
-            let entry = SubscriptionEntry {
-                id: format!("sub{}", priority),
-                subject_pattern: "test".to_string(),
-                priority: *priority,
-                mode: SubscriptionMode::Async,
-                channel: ChannelConfig::InProcess,
-                timeout: Duration::from_secs(5),
-            };
-            index.subscribe(entry);
-        }
-
+        index.subscribe(make_entry("low", "test", 30));
+        index.subscribe(make_entry("high", "test", 10));
+        index.subscribe(make_entry("mid", "test", 20));
         let matches = index.lookup("test");
-        assert_eq!(matches.len(), 3);
-        // Note: Phase 1 doesn't sort; that comes in Phase 2
+        assert_eq!(matches[0].id, "high");
+        assert_eq!(matches[1].id, "mid");
+        assert_eq!(matches[2].id, "low");
     }
 
     #[test]
     fn test_list_all() {
         let mut index = SubjectIndex::new();
-        for i in 0..3 {
-            let entry = SubscriptionEntry {
-                id: format!("sub{}", i),
-                subject_pattern: format!("test.{}", i),
-                priority: i as u32,
-                mode: SubscriptionMode::Async,
-                channel: ChannelConfig::InProcess,
-                timeout: Duration::from_secs(5),
-            };
-            index.subscribe(entry);
-        }
-
+        index.subscribe(make_entry("sub0", "test.0", 0));
+        index.subscribe(make_entry("sub1", "test.1", 1));
+        index.subscribe(make_entry("sub2", "brain.>", 2));
         let all = index.list(None);
         assert_eq!(all.len(), 3);
-
         let filtered = index.list(Some("test.1"));
         assert_eq!(filtered.len(), 1);
     }

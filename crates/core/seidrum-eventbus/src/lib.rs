@@ -12,7 +12,7 @@ pub mod storage;
 pub use builder::EventBusBuilder;
 pub use bus::{BusMetrics, EventBus, EventBusImpl, SubscribeOpts, Subscription};
 pub use delivery::{ChannelConfig, DeliveryChannel, DeliveryReceipt};
-pub use dispatch::{SubscriptionInfo, SubscriptionMode};
+pub use dispatch::{EventFilter, InterceptResult, Interceptor, SubscriptionInfo, SubscriptionMode};
 pub use storage::{EventStatus, EventStore, StoredEvent};
 
 /// Errors that can occur in the event bus.
