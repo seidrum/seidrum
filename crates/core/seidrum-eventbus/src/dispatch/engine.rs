@@ -1,4 +1,4 @@
-use super::subject_index::{SubscriptionEntry, SubscriptionMode, SubjectIndex};
+use super::subject_index::{SubjectIndex, SubscriptionEntry, SubscriptionMode};
 use crate::delivery::ChannelConfig;
 use crate::storage::{DeliveryStatus, EventStatus, EventStore, StoredEvent};
 use std::collections::HashMap;
@@ -72,7 +72,11 @@ impl DispatchEngine {
                         match tx.send(payload.to_vec()) {
                             Ok(()) => {
                                 self.store
-                                    .record_delivery(seq, &subscription.id, DeliveryStatus::Delivered)
+                                    .record_delivery(
+                                        seq,
+                                        &subscription.id,
+                                        DeliveryStatus::Delivered,
+                                    )
                                     .await
                                     .ok();
                             }
@@ -154,7 +158,10 @@ impl DispatchEngine {
         Ok(())
     }
 
-    pub async fn list_subscriptions(&self, filter: Option<&str>) -> crate::Result<Vec<SubscriptionInfo>> {
+    pub async fn list_subscriptions(
+        &self,
+        filter: Option<&str>,
+    ) -> crate::Result<Vec<SubscriptionInfo>> {
         let index = self.index.read().await;
         let entries = index.list(filter);
         Ok(entries
@@ -212,12 +219,9 @@ mod tests {
         let seq = engine.publish("test.subject", b"hello").await.unwrap();
         assert!(seq > 0);
 
-        let msg = tokio::time::timeout(
-            std::time::Duration::from_secs(1),
-            rx.recv(),
-        )
-        .await
-        .unwrap();
+        let msg = tokio::time::timeout(std::time::Duration::from_secs(1), rx.recv())
+            .await
+            .unwrap();
         assert_eq!(msg, Some(b"hello".to_vec()));
     }
 
@@ -235,11 +239,7 @@ mod tests {
         engine.publish("test.b", b"message").await.unwrap();
 
         // Should not receive
-        let msg = tokio::time::timeout(
-            std::time::Duration::from_millis(100),
-            rx.recv(),
-        )
-        .await;
+        let msg = tokio::time::timeout(std::time::Duration::from_millis(100), rx.recv()).await;
         assert!(msg.is_err());
     }
 
@@ -256,14 +256,10 @@ mod tests {
         engine.unsubscribe(&id).await.unwrap();
         engine.publish("test.subject", b"message").await.unwrap();
 
-        let msg = tokio::time::timeout(
-            std::time::Duration::from_millis(100),
-            rx.recv(),
-        )
-        .await;
+        let msg = tokio::time::timeout(std::time::Duration::from_millis(100), rx.recv()).await;
         // Either timeout or channel closed (None)
         match msg {
-            Err(_) => {} // timeout, fine
+            Err(_) => {}   // timeout, fine
             Ok(None) => {} // channel closed, fine
             Ok(Some(_)) => panic!("should not have received message after unsubscribe"),
         }
@@ -285,18 +281,12 @@ mod tests {
 
         engine.publish("test.subject", b"message").await.unwrap();
 
-        let msg1 = tokio::time::timeout(
-            std::time::Duration::from_secs(1),
-            rx1.recv(),
-        )
-        .await
-        .unwrap();
-        let msg2 = tokio::time::timeout(
-            std::time::Duration::from_secs(1),
-            rx2.recv(),
-        )
-        .await
-        .unwrap();
+        let msg1 = tokio::time::timeout(std::time::Duration::from_secs(1), rx1.recv())
+            .await
+            .unwrap();
+        let msg2 = tokio::time::timeout(std::time::Duration::from_secs(1), rx2.recv())
+            .await
+            .unwrap();
 
         assert_eq!(msg1, Some(b"message".to_vec()));
         assert_eq!(msg2, Some(b"message".to_vec()));

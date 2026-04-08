@@ -1,9 +1,9 @@
 mod types;
 pub use types::*;
 
-pub mod redb_store;
-pub mod memory_store;
 pub mod compaction;
+pub mod memory_store;
+pub mod redb_store;
 
 use async_trait::async_trait;
 use std::time::Duration;
@@ -169,10 +169,7 @@ mod tests {
             .await
             .unwrap();
 
-        let results = store
-            .query_by_subject("test", None, 10)
-            .await
-            .unwrap();
+        let results = store.query_by_subject("test", None, 10).await.unwrap();
         assert_eq!(results.len(), 1);
         assert_eq!(results[0].deliveries.len(), 1);
         assert_eq!(results[0].deliveries[0].subscriber_id, "sub1");
@@ -243,10 +240,7 @@ mod tests {
         store.append(&event1).await.unwrap();
         store.append(&event2).await.unwrap();
 
-        let results = store
-            .query_by_subject("test.a", None, 10)
-            .await
-            .unwrap();
+        let results = store.query_by_subject("test.a", None, 10).await.unwrap();
         assert_eq!(results.len(), 1);
         assert_eq!(results[0].payload, b"1");
     }
@@ -284,16 +278,10 @@ mod tests {
         store.append(&new_event).await.unwrap();
 
         // Compact events older than 5 seconds (5000ms)
-        let removed = store
-            .compact(Duration::from_millis(5000))
-            .await
-            .unwrap();
+        let removed = store.compact(Duration::from_millis(5000)).await.unwrap();
         assert_eq!(removed, 1);
 
-        let remaining = store
-            .query_by_subject("test", None, 10)
-            .await
-            .unwrap();
+        let remaining = store.query_by_subject("test", None, 10).await.unwrap();
         assert_eq!(remaining.len(), 1);
         assert_eq!(remaining[0].payload, b"new");
     }

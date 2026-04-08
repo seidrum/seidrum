@@ -43,7 +43,10 @@ pub trait EventBus: Send + Sync + 'static {
     async fn unsubscribe(&self, id: &str) -> crate::Result<()>;
 
     /// List subscriptions, optionally filtered by pattern.
-    async fn list_subscriptions(&self, filter: Option<&str>) -> crate::Result<Vec<SubscriptionInfo>>;
+    async fn list_subscriptions(
+        &self,
+        filter: Option<&str>,
+    ) -> crate::Result<Vec<SubscriptionInfo>>;
 
     /// Get bus metrics.
     async fn metrics(&self) -> crate::Result<BusMetrics>;
@@ -80,7 +83,10 @@ impl EventBus for EventBusImpl {
         self.engine.unsubscribe(id).await
     }
 
-    async fn list_subscriptions(&self, filter: Option<&str>) -> crate::Result<Vec<SubscriptionInfo>> {
+    async fn list_subscriptions(
+        &self,
+        filter: Option<&str>,
+    ) -> crate::Result<Vec<SubscriptionInfo>> {
         self.engine.list_subscriptions(filter).await
     }
 
@@ -115,12 +121,9 @@ mod tests {
 
         bus.publish("test.subject", b"hello").await.unwrap();
 
-        let msg = tokio::time::timeout(
-            std::time::Duration::from_secs(1),
-            sub.rx.recv(),
-        )
-        .await
-        .unwrap();
+        let msg = tokio::time::timeout(std::time::Duration::from_secs(1), sub.rx.recv())
+            .await
+            .unwrap();
         assert_eq!(msg, Some(b"hello".to_vec()));
     }
 
@@ -141,18 +144,12 @@ mod tests {
 
         bus.publish("test.subject", b"message").await.unwrap();
 
-        let msg1 = tokio::time::timeout(
-            std::time::Duration::from_secs(1),
-            sub1.rx.recv(),
-        )
-        .await
-        .unwrap();
-        let msg2 = tokio::time::timeout(
-            std::time::Duration::from_secs(1),
-            sub2.rx.recv(),
-        )
-        .await
-        .unwrap();
+        let msg1 = tokio::time::timeout(std::time::Duration::from_secs(1), sub1.rx.recv())
+            .await
+            .unwrap();
+        let msg2 = tokio::time::timeout(std::time::Duration::from_secs(1), sub2.rx.recv())
+            .await
+            .unwrap();
 
         assert_eq!(msg1, Some(b"message".to_vec()));
         assert_eq!(msg2, Some(b"message".to_vec()));

@@ -36,10 +36,7 @@ impl SubjectIndex {
     /// Add a subscription.
     pub fn subscribe(&mut self, entry: SubscriptionEntry) {
         let pattern = entry.subject_pattern.clone();
-        self.subscriptions
-            .entry(pattern)
-            .or_default()
-            .push(entry);
+        self.subscriptions.entry(pattern).or_default().push(entry);
     }
 
     /// Remove a subscription by ID.
@@ -51,10 +48,7 @@ impl SubjectIndex {
 
     /// Find all subscriptions matching a subject (exact match only in Phase 1).
     pub fn lookup(&self, subject: &str) -> Vec<SubscriptionEntry> {
-        self.subscriptions
-            .get(subject)
-            .cloned()
-            .unwrap_or_default()
+        self.subscriptions.get(subject).cloned().unwrap_or_default()
     }
 
     /// Get all subscriptions, optionally filtered by pattern.

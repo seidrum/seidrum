@@ -1,4 +1,7 @@
-use super::{DeliveryRecord, DeliveryStatus, EventStatus, EventStore, RetryableDelivery, StorageResult, StoredEvent};
+use super::{
+    DeliveryRecord, DeliveryStatus, EventStatus, EventStore, RetryableDelivery, StorageResult,
+    StoredEvent,
+};
 use async_trait::async_trait;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
@@ -65,7 +68,11 @@ impl EventStore for InMemoryEventStore {
         let mut events = self.events.write().await;
         if let Some(event) = events.iter_mut().find(|e| e.seq == seq) {
             // Find existing delivery record or create a new one
-            if let Some(delivery) = event.deliveries.iter_mut().find(|d| d.subscriber_id == subscriber_id) {
+            if let Some(delivery) = event
+                .deliveries
+                .iter_mut()
+                .find(|d| d.subscriber_id == subscriber_id)
+            {
                 delivery.status = status;
                 delivery.attempts += 1;
                 delivery.last_attempt = Some(Self::current_time_ms());
@@ -108,9 +115,7 @@ impl EventStore for InMemoryEventStore {
         let events = self.events.read().await;
         Ok(events
             .iter()
-            .filter(|e| {
-                e.subject == subject && since.is_none_or(|s| e.seq >= s)
-            })
+            .filter(|e| e.subject == subject && since.is_none_or(|s| e.seq >= s))
             .take(limit)
             .cloned()
             .collect())

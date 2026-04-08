@@ -1,18 +1,14 @@
-use seidrum_eventbus::{
-    EventBusBuilder, EventStore, SubscribeOpts, SubscriptionMode, ChannelConfig,
-};
 use seidrum_eventbus::storage::memory_store::InMemoryEventStore;
+use seidrum_eventbus::{
+    ChannelConfig, EventBusBuilder, EventStore, SubscribeOpts, SubscriptionMode,
+};
 use std::sync::Arc;
 use std::time::Duration;
 
 #[tokio::test]
 async fn test_publish_deliver_end_to_end() {
     let store = Arc::new(InMemoryEventStore::new());
-    let bus = EventBusBuilder::new()
-        .storage(store)
-        .build()
-        .await
-        .unwrap();
+    let bus = EventBusBuilder::new().storage(store).build().await.unwrap();
 
     let opts = SubscribeOpts {
         priority: 10,
@@ -69,13 +65,19 @@ async fn test_crash_recovery_full() {
     // Reopen and verify events are still there (crash recovery)
     {
         let store = RedbEventStore::open(&path).unwrap();
-        let events = store.query_by_subject("test.subject", None, 10).await.unwrap();
+        let events = store
+            .query_by_subject("test.subject", None, 10)
+            .await
+            .unwrap();
         assert_eq!(events.len(), 2);
         assert_eq!(events[0].payload, b"event1");
         assert_eq!(events[1].payload, b"event2");
 
         // Events should still be in Pending status (not delivered, since we "crashed")
-        let pending = store.query_by_status(EventStatus::Pending, 10).await.unwrap();
+        let pending = store
+            .query_by_status(EventStatus::Pending, 10)
+            .await
+            .unwrap();
         assert_eq!(pending.len(), 2);
     }
 }
@@ -83,11 +85,7 @@ async fn test_crash_recovery_full() {
 #[tokio::test]
 async fn test_multi_subscriber() {
     let store = Arc::new(InMemoryEventStore::new());
-    let bus = EventBusBuilder::new()
-        .storage(store)
-        .build()
-        .await
-        .unwrap();
+    let bus = EventBusBuilder::new().storage(store).build().await.unwrap();
 
     let opts = SubscribeOpts {
         priority: 10,
@@ -115,11 +113,7 @@ async fn test_multi_subscriber() {
 #[tokio::test]
 async fn test_metrics() {
     let store = Arc::new(InMemoryEventStore::new());
-    let bus = EventBusBuilder::new()
-        .storage(store)
-        .build()
-        .await
-        .unwrap();
+    let bus = EventBusBuilder::new().storage(store).build().await.unwrap();
 
     let opts = SubscribeOpts {
         priority: 10,
@@ -137,11 +131,7 @@ async fn test_metrics() {
 #[tokio::test]
 async fn test_unsubscribe() {
     let store = Arc::new(InMemoryEventStore::new());
-    let bus = EventBusBuilder::new()
-        .storage(store)
-        .build()
-        .await
-        .unwrap();
+    let bus = EventBusBuilder::new().storage(store).build().await.unwrap();
 
     let opts = SubscribeOpts {
         priority: 10,

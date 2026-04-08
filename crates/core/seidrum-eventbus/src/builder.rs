@@ -76,13 +76,10 @@ mod tests {
     #[tokio::test]
     async fn test_builder_minimal() {
         let store = Arc::new(InMemoryEventStore::new());
-        let bus = EventBusBuilder::new()
-            .storage(store)
-            .build()
-            .await
-            .unwrap();
+        let bus = EventBusBuilder::new().storage(store).build().await.unwrap();
 
-        assert!(!bus.list_subscriptions(None).await.unwrap().is_empty() || true); // Just verify it works
+        assert!(!bus.list_subscriptions(None).await.unwrap().is_empty() || true);
+        // Just verify it works
     }
 
     #[tokio::test]
