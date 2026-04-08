@@ -1,3 +1,31 @@
+//! Dispatch engine: routes published events to matching subscriptions.
+//!
+//! ## Architecture
+//!
+//! The dispatch pipeline has 6 stages:
+//!
+//! 1. **PERSIST**: Write the event durably to the store (write-ahead logging).
+//! 2. **RESOLVE**: Look up all subscriptions matching the subject using the trie index.
+//! 3. **FILTER**: Apply EventFilter to narrow subscribers to those interested in the payload.
+//! 4. **SYNC CHAIN**: Process sync interceptors in priority order (lower = first).
+//!    - Interceptors can Pass, Modify, or Drop events.
+//!    - Mutations propagate to later subscribers.
+//!    - Drop aborts further processing.
+//! 5. **ASYNC FAN-OUT**: Deliver (possibly mutated) payload to async subscribers in parallel.
+//! 6. **FINALIZE**: Record final delivery status (Delivered, PartiallyDelivered, etc).
+//!
+//! ## Sync vs Async Subscriptions
+//!
+//! - **Sync**: Processed sequentially in priority order. Can modify or drop the event.
+//!   Mutations affect subsequent subscribers.
+//! - **Async**: Processed in parallel after all sync subscribers. Cannot affect event.
+//!   All async subscribers see the same (possibly mutated) payload.
+//!
+//! ## Concurrency & Locks
+//!
+//! The RwLock is held during trie lookup and delivery dispatch, but released
+//! between major stages to allow concurrent subscriptions/unsubscriptions.
+
 use super::filter::EventFilter;
 use super::interceptor::{InterceptResult, Interceptor};
 use super::subject_index::{SubjectIndex, SubscriptionEntry, SubscriptionMode};
@@ -17,8 +45,14 @@ const DEFAULT_CHANNEL_CAPACITY: usize = 8192;
 /// Maximum allowed subject length.
 const MAX_SUBJECT_LENGTH: usize = 512;
 
+/// Maximum allowed payload size (512 MiB).
+const MAX_PAYLOAD_SIZE: usize = 512 * 1024 * 1024;
+
 /// Default timeout for sync interceptors.
 const DEFAULT_INTERCEPTOR_TIMEOUT: Duration = Duration::from_secs(5);
+
+/// Maximum number of interceptors per subscription to prevent DoS.
+const MAX_INTERCEPTORS_PER_SUBJECT: usize = 100;
 
 /// The dispatch engine routes published events to matching subscribers.
 /// Implements the full pipeline: persist → resolve → filter → sync chain → async fan-out → finalize.
@@ -68,8 +102,20 @@ impl DispatchEngine {
         Ok(())
     }
 
+    /// Validate payload size.
+    fn validate_payload(payload: &[u8]) -> crate::Result<()> {
+        if payload.len() > MAX_PAYLOAD_SIZE {
+            return Err(EventBusError::InvalidSubject(format!(
+                "payload exceeds maximum size of {} bytes",
+                MAX_PAYLOAD_SIZE
+            )));
+        }
+        Ok(())
+    }
+
     pub async fn publish(&self, subject: &str, payload: &[u8]) -> crate::Result<u64> {
         Self::validate_subject(subject)?;
+        Self::validate_payload(payload)?;
 
         let event = StoredEvent {
             seq: 0,
@@ -84,12 +130,13 @@ impl DispatchEngine {
         // 1. PERSIST (write-ahead)
         let seq = self.store.append(&event).await?;
 
-        // 2. RESOLVE: find matching subscriptions
-        let state = self.state.read().await;
-        let mut matches = state.index.lookup(subject);
+        // 2. RESOLVE: find matching subscriptions (release lock after lookup)
+        let mut matches = {
+            let state = self.state.read().await;
+            state.index.lookup(subject)
+        };
 
         if matches.is_empty() {
-            drop(state);
             if let Err(e) = self.store.update_status(seq, EventStatus::Delivered).await {
                 warn!(seq = seq, error = %e, "failed to update status to Delivered (no subscribers)");
             }
@@ -115,7 +162,6 @@ impl DispatchEngine {
         });
 
         if matches.is_empty() {
-            drop(state);
             if let Err(e) = self.store.update_status(seq, EventStatus::Delivered).await {
                 warn!(seq = seq, error = %e, "failed to update status to Delivered (all filtered)");
             }
@@ -136,108 +182,70 @@ impl DispatchEngine {
 
         // 4. SYNC CHAIN: process interceptors sequentially in priority order
         let mut dropped = false;
-        for entry in &sync_entries {
-            if let Some(interceptor) = state.interceptors.get(&entry.id) {
-                let interceptor = Arc::clone(interceptor);
-                let timeout = entry.timeout;
+        {
+            let state = self.state.read().await;
+            for entry in &sync_entries {
+                if let Some(interceptor) = state.interceptors.get(&entry.id) {
+                    let interceptor = Arc::clone(interceptor);
+                    let timeout = entry.timeout;
 
-                // Execute interceptor with timeout enforcement
-                let result = tokio::time::timeout(
-                    timeout,
-                    interceptor.intercept(subject, &mut current_payload),
-                )
-                .await;
+                    // Execute interceptor with timeout enforcement
+                    let result = tokio::time::timeout(
+                        timeout,
+                        interceptor.intercept(subject, &mut current_payload),
+                    )
+                    .await;
 
-                match result {
-                    Ok(InterceptResult::Pass) => {
-                        if let Err(e) = self
-                            .store
-                            .record_delivery(seq, &entry.id, DeliveryStatus::Delivered)
-                            .await
-                        {
-                            warn!(seq = seq, subscriber = entry.id, error = %e, "failed to record interceptor delivery");
-                        }
-                    }
-                    Ok(InterceptResult::Modified) => {
-                        debug!(subscriber = entry.id, "interceptor modified payload");
-                        if let Err(e) = self
-                            .store
-                            .record_delivery(seq, &entry.id, DeliveryStatus::Delivered)
-                            .await
-                        {
-                            warn!(seq = seq, subscriber = entry.id, error = %e, "failed to record interceptor delivery");
-                        }
-                    }
-                    Ok(InterceptResult::Drop) => {
-                        debug!(subscriber = entry.id, "interceptor dropped event");
-                        if let Err(e) = self
-                            .store
-                            .record_delivery(seq, &entry.id, DeliveryStatus::Delivered)
-                            .await
-                        {
-                            warn!(seq = seq, subscriber = entry.id, error = %e, "failed to record interceptor delivery");
-                        }
-                        dropped = true;
-                        break;
-                    }
-                    Err(_timeout) => {
-                        warn!(
-                            subscriber = entry.id,
-                            timeout_ms = timeout.as_millis() as u64,
-                            "sync interceptor timed out, skipping"
-                        );
-                        // Timed-out interceptor is skipped, chain continues
-                        if let Err(e) = self
-                            .store
-                            .record_delivery(seq, &entry.id, DeliveryStatus::Failed)
-                            .await
-                        {
-                            warn!(seq = seq, subscriber = entry.id, error = %e, "failed to record timeout");
-                        }
-                    }
-                }
-            } else {
-                // Sync subscriber without an interceptor — deliver via channel
-                if let Some(tx) = state.senders.get(&entry.id) {
-                    match tx.try_send(current_payload.clone()) {
-                        Ok(()) => {
+                    match result {
+                        Ok(InterceptResult::Pass) => {
                             if let Err(e) = self
                                 .store
                                 .record_delivery(seq, &entry.id, DeliveryStatus::Delivered)
                                 .await
                             {
-                                warn!(seq = seq, subscriber = entry.id, error = %e, "failed to record delivery");
+                                warn!(seq = seq, subscriber = entry.id, error = %e, "failed to record interceptor delivery");
                             }
                         }
-                        Err(_) => {
-                            warn!(subscriber = entry.id, "sync channel delivery failed");
+                        Ok(InterceptResult::Modified) => {
+                            debug!(subscriber = entry.id, "interceptor modified payload");
+                            if let Err(e) = self
+                                .store
+                                .record_delivery(seq, &entry.id, DeliveryStatus::Delivered)
+                                .await
+                            {
+                                warn!(seq = seq, subscriber = entry.id, error = %e, "failed to record interceptor delivery");
+                            }
+                        }
+                        Ok(InterceptResult::Drop) => {
+                            debug!(subscriber = entry.id, "interceptor dropped event");
+                            if let Err(e) = self
+                                .store
+                                .record_delivery(seq, &entry.id, DeliveryStatus::Delivered)
+                                .await
+                            {
+                                warn!(seq = seq, subscriber = entry.id, error = %e, "failed to record interceptor delivery");
+                            }
+                            dropped = true;
+                            break;
+                        }
+                        Err(_timeout) => {
+                            warn!(
+                                subscriber = entry.id,
+                                timeout_ms = timeout.as_millis() as u64,
+                                "sync interceptor timed out, skipping"
+                            );
+                            // Timed-out interceptor is skipped, chain continues
                             if let Err(e) = self
                                 .store
                                 .record_delivery(seq, &entry.id, DeliveryStatus::Failed)
                                 .await
                             {
-                                warn!(seq = seq, subscriber = entry.id, error = %e, "failed to record failed delivery");
+                                warn!(seq = seq, subscriber = entry.id, error = %e, "failed to record timeout");
                             }
                         }
                     }
-                }
-            }
-        }
-
-        if dropped {
-            drop(state);
-            // Event was intentionally dropped by an interceptor — mark as Delivered.
-            if let Err(e) = self.store.update_status(seq, EventStatus::Delivered).await {
-                warn!(seq = seq, error = %e, "failed to update status after drop");
-            }
-            return Ok(seq);
-        }
-
-        // 5. ASYNC FAN-OUT: deliver the (possibly mutated) payload to all async subscribers
-        let mut any_failed = false;
-        for entry in &async_entries {
-            match &entry.channel {
-                ChannelConfig::InProcess => {
+                } else {
+                    // Sync subscriber without an interceptor — deliver via channel
                     if let Some(tx) = state.senders.get(&entry.id) {
                         match tx.try_send(current_payload.clone()) {
                             Ok(()) => {
@@ -249,9 +257,8 @@ impl DispatchEngine {
                                     warn!(seq = seq, subscriber = entry.id, error = %e, "failed to record delivery");
                                 }
                             }
-                            Err(mpsc::error::TrySendError::Full(_)) => {
-                                warn!(subscriber = entry.id, "delivery failed: channel full");
-                                any_failed = true;
+                            Err(_) => {
+                                warn!(subscriber = entry.id, "sync channel delivery failed");
                                 if let Err(e) = self
                                     .store
                                     .record_delivery(seq, &entry.id, DeliveryStatus::Failed)
@@ -260,37 +267,83 @@ impl DispatchEngine {
                                     warn!(seq = seq, subscriber = entry.id, error = %e, "failed to record failed delivery");
                                 }
                             }
-                            Err(mpsc::error::TrySendError::Closed(_)) => {
-                                debug!(subscriber = entry.id, "delivery failed: channel closed");
-                                any_failed = true;
-                                if let Err(e) = self
-                                    .store
-                                    .record_delivery(seq, &entry.id, DeliveryStatus::Failed)
-                                    .await
-                                {
-                                    warn!(seq = seq, subscriber = entry.id, error = %e, "failed to record failed delivery");
-                                }
-                            }
-                        }
-                    } else {
-                        debug!(subscriber = entry.id, "no sender found");
-                        any_failed = true;
-                        if let Err(e) = self
-                            .store
-                            .record_delivery(seq, &entry.id, DeliveryStatus::Failed)
-                            .await
-                        {
-                            warn!(seq = seq, subscriber = entry.id, error = %e, "failed to record failed delivery");
                         }
                     }
                 }
-                _ => {
-                    error!("unsupported channel type in Phase 2");
-                    any_failed = true;
+            }
+        }
+
+        if dropped {
+            // Event was intentionally dropped by an interceptor — mark as Delivered.
+            if let Err(e) = self.store.update_status(seq, EventStatus::Delivered).await {
+                warn!(seq = seq, error = %e, "failed to update status after drop");
+            }
+            return Ok(seq);
+        }
+
+        // 5. ASYNC FAN-OUT: deliver the (possibly mutated) payload to all async subscribers
+        let mut any_failed = false;
+        {
+            let state = self.state.read().await;
+            for entry in &async_entries {
+                match &entry.channel {
+                    ChannelConfig::InProcess => {
+                        if let Some(tx) = state.senders.get(&entry.id) {
+                            match tx.try_send(current_payload.clone()) {
+                                Ok(()) => {
+                                    if let Err(e) = self
+                                        .store
+                                        .record_delivery(seq, &entry.id, DeliveryStatus::Delivered)
+                                        .await
+                                    {
+                                        warn!(seq = seq, subscriber = entry.id, error = %e, "failed to record delivery");
+                                    }
+                                }
+                                Err(mpsc::error::TrySendError::Full(_)) => {
+                                    warn!(subscriber = entry.id, "delivery failed: channel full");
+                                    any_failed = true;
+                                    if let Err(e) = self
+                                        .store
+                                        .record_delivery(seq, &entry.id, DeliveryStatus::Failed)
+                                        .await
+                                    {
+                                        warn!(seq = seq, subscriber = entry.id, error = %e, "failed to record failed delivery");
+                                    }
+                                }
+                                Err(mpsc::error::TrySendError::Closed(_)) => {
+                                    debug!(
+                                        subscriber = entry.id,
+                                        "delivery failed: channel closed"
+                                    );
+                                    any_failed = true;
+                                    if let Err(e) = self
+                                        .store
+                                        .record_delivery(seq, &entry.id, DeliveryStatus::Failed)
+                                        .await
+                                    {
+                                        warn!(seq = seq, subscriber = entry.id, error = %e, "failed to record failed delivery");
+                                    }
+                                }
+                            }
+                        } else {
+                            debug!(subscriber = entry.id, "no sender found");
+                            any_failed = true;
+                            if let Err(e) = self
+                                .store
+                                .record_delivery(seq, &entry.id, DeliveryStatus::Failed)
+                                .await
+                            {
+                                warn!(seq = seq, subscriber = entry.id, error = %e, "failed to record failed delivery");
+                            }
+                        }
+                    }
+                    _ => {
+                        error!("unsupported channel type in Phase 2");
+                        any_failed = true;
+                    }
                 }
             }
         }
-        drop(state);
 
         // 6. FINALIZE
         let final_status = if any_failed {
@@ -330,13 +383,14 @@ impl DispatchEngine {
         };
 
         let mut state = self.state.write().await;
-        state.index.subscribe(entry);
+        state.index.subscribe(entry)?;
         state.senders.insert(subscription_id.clone(), tx);
 
         Ok((subscription_id, rx))
     }
 
     /// Register a sync interceptor. Returns the subscription ID.
+    /// Returns an error if there are already too many interceptors for this subject.
     pub async fn intercept(
         &self,
         subject_pattern: &str,
@@ -359,7 +413,17 @@ impl DispatchEngine {
         };
 
         let mut state = self.state.write().await;
-        state.index.subscribe(entry);
+
+        // Check if we're adding too many interceptors for this pattern
+        let existing_count = state.interceptors.values().count();
+        if existing_count >= MAX_INTERCEPTORS_PER_SUBJECT {
+            return Err(EventBusError::Internal(format!(
+                "too many interceptors registered (max: {})",
+                MAX_INTERCEPTORS_PER_SUBJECT
+            )));
+        }
+
+        state.index.subscribe(entry)?;
         state
             .interceptors
             .insert(subscription_id.clone(), interceptor);
@@ -813,6 +877,15 @@ mod tests {
         let store = Arc::new(InMemoryEventStore::new());
         let engine = DispatchEngine::new(store);
         assert!(engine.publish("test\0subject", b"payload").await.is_err());
+    }
+
+    #[tokio::test]
+    async fn test_payload_size_limit() {
+        let store = Arc::new(InMemoryEventStore::new());
+        let engine = DispatchEngine::new(store);
+        // Create a payload that exceeds the limit (512 MiB)
+        let oversized = vec![0u8; MAX_PAYLOAD_SIZE + 1];
+        assert!(engine.publish("test", &oversized).await.is_err());
     }
 
     #[tokio::test]

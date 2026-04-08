@@ -2,6 +2,9 @@ use serde::{Deserialize, Serialize};
 
 /// An event filter narrows which events a subscription receives beyond
 /// subject matching. Filters operate on the serialized JSON payload.
+///
+/// Non-JSON payloads pass through all filters (filters are advisory, not hard gates).
+/// Empty filter lists: All([]) matches everything, Any([]) matches nothing.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum EventFilter {
     /// Match a top-level JSON field against an exact value.
@@ -11,9 +14,9 @@ pub enum EventFilter {
     },
     /// Match a top-level JSON field containing a substring.
     FieldContains { path: String, substring: String },
-    /// All sub-filters must match (logical AND).
+    /// All sub-filters must match (logical AND). Empty list matches everything.
     All(Vec<EventFilter>),
-    /// Any sub-filter must match (logical OR).
+    /// Any sub-filter must match (logical OR). Empty list matches nothing.
     Any(Vec<EventFilter>),
 }
 

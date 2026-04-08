@@ -45,7 +45,9 @@ impl EventBusBuilder {
         self
     }
 
-    /// Build the EventBus. Returns the bus and a JoinHandle for the compaction task.
+    /// Build the EventBus.
+    /// Note: The compaction task is spawned as a background task and runs for the lifetime
+    /// of the bus. To stop it, drop the returned bus.
     pub async fn build(self) -> crate::Result<Arc<dyn EventBus>> {
         let store = self
             .store
@@ -56,7 +58,8 @@ impl EventBusBuilder {
         // Start compaction task using the configured interval
         let compaction_task =
             CompactionTask::new(Arc::clone(&store), self.compaction_interval, self.retention);
-        let _handle: JoinHandle<()> = tokio::spawn(async move {
+        // Spawn compaction task as a background task. It will continue until the bus is dropped.
+        tokio::spawn(async move {
             compaction_task.run().await;
         });
 

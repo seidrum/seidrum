@@ -1,6 +1,10 @@
 use crate::delivery::ChannelConfig;
+use crate::EventBusError;
 use std::collections::HashMap;
 use std::time::Duration;
+
+/// Maximum nesting depth for subject patterns to prevent stack overflow and DoS attacks.
+const MAX_SUBJECT_DEPTH: usize = 256;
 
 /// A subscription entry in the subject index.
 #[derive(Debug, Clone)]
@@ -69,10 +73,20 @@ impl SubjectIndex {
     }
 
     /// Add a subscription. The subject_pattern may contain `*` and `>` tokens.
-    pub fn subscribe(&mut self, entry: SubscriptionEntry) {
+    /// Returns Err if pattern exceeds maximum depth.
+    pub fn subscribe(&mut self, entry: SubscriptionEntry) -> crate::Result<()> {
         let pattern = entry.subject_pattern.clone();
         let tokens: Vec<&str> = pattern.split('.').collect();
+
+        if tokens.len() > MAX_SUBJECT_DEPTH {
+            return Err(EventBusError::InvalidSubject(format!(
+                "subject pattern exceeds maximum depth of {} tokens",
+                MAX_SUBJECT_DEPTH
+            )));
+        }
+
         Self::insert(&mut self.root, &tokens, 0, entry);
+        Ok(())
     }
 
     fn insert(node: &mut TrieNode, tokens: &[&str], depth: usize, entry: SubscriptionEntry) {
@@ -220,7 +234,9 @@ mod tests {
     #[test]
     fn test_exact_match() {
         let mut index = SubjectIndex::new();
-        index.subscribe(make_entry("sub1", "test.subject", 10));
+        index
+            .subscribe(make_entry("sub1", "test.subject", 10))
+            .unwrap();
         let matches = index.lookup("test.subject");
         assert_eq!(matches.len(), 1);
         assert_eq!(matches[0].id, "sub1");
@@ -235,7 +251,9 @@ mod tests {
     #[test]
     fn test_star_wildcard_single_token() {
         let mut index = SubjectIndex::new();
-        index.subscribe(make_entry("sub1", "channel.*.inbound", 10));
+        index
+            .subscribe(make_entry("sub1", "channel.*.inbound", 10))
+            .unwrap();
         assert_eq!(index.lookup("channel.telegram.inbound").len(), 1);
         assert_eq!(index.lookup("channel.email.inbound").len(), 1);
     }
@@ -243,28 +261,32 @@ mod tests {
     #[test]
     fn test_star_wildcard_no_match_multi_token() {
         let mut index = SubjectIndex::new();
-        index.subscribe(make_entry("sub1", "channel.*.inbound", 10));
+        index
+            .subscribe(make_entry("sub1", "channel.*.inbound", 10))
+            .unwrap();
         assert!(index.lookup("channel.telegram.sub.inbound").is_empty());
     }
 
     #[test]
     fn test_star_wildcard_no_match_missing_token() {
         let mut index = SubjectIndex::new();
-        index.subscribe(make_entry("sub1", "channel.*.inbound", 10));
+        index
+            .subscribe(make_entry("sub1", "channel.*.inbound", 10))
+            .unwrap();
         assert!(index.lookup("channel.inbound").is_empty());
     }
 
     #[test]
     fn test_gt_wildcard_one_token() {
         let mut index = SubjectIndex::new();
-        index.subscribe(make_entry("sub1", "brain.>", 10));
+        index.subscribe(make_entry("sub1", "brain.>", 10)).unwrap();
         assert_eq!(index.lookup("brain.content").len(), 1);
     }
 
     #[test]
     fn test_gt_wildcard_multiple_tokens() {
         let mut index = SubjectIndex::new();
-        index.subscribe(make_entry("sub1", "brain.>", 10));
+        index.subscribe(make_entry("sub1", "brain.>", 10)).unwrap();
         assert_eq!(index.lookup("brain.content.store").len(), 1);
         assert_eq!(index.lookup("brain.entity.upsert.batch").len(), 1);
     }
@@ -272,16 +294,20 @@ mod tests {
     #[test]
     fn test_gt_wildcard_no_match_exact_prefix() {
         let mut index = SubjectIndex::new();
-        index.subscribe(make_entry("sub1", "brain.>", 10));
+        index.subscribe(make_entry("sub1", "brain.>", 10)).unwrap();
         assert!(index.lookup("brain").is_empty());
     }
 
     #[test]
     fn test_combined_exact_star_gt() {
         let mut index = SubjectIndex::new();
-        index.subscribe(make_entry("exact", "channel.telegram.inbound", 10));
-        index.subscribe(make_entry("star", "channel.*.inbound", 20));
-        index.subscribe(make_entry("gt", "channel.>", 30));
+        index
+            .subscribe(make_entry("exact", "channel.telegram.inbound", 10))
+            .unwrap();
+        index
+            .subscribe(make_entry("star", "channel.*.inbound", 20))
+            .unwrap();
+        index.subscribe(make_entry("gt", "channel.>", 30)).unwrap();
 
         let matches = index.lookup("channel.telegram.inbound");
         assert_eq!(matches.len(), 3);
@@ -293,8 +319,10 @@ mod tests {
     #[test]
     fn test_gt_catches_star_misses() {
         let mut index = SubjectIndex::new();
-        index.subscribe(make_entry("star", "channel.*.inbound", 10));
-        index.subscribe(make_entry("gt", "channel.>", 20));
+        index
+            .subscribe(make_entry("star", "channel.*.inbound", 10))
+            .unwrap();
+        index.subscribe(make_entry("gt", "channel.>", 20)).unwrap();
         let matches = index.lookup("channel.telegram.sub.inbound");
         assert_eq!(matches.len(), 1);
         assert_eq!(matches[0].id, "gt");
@@ -303,8 +331,8 @@ mod tests {
     #[test]
     fn test_unsubscribe() {
         let mut index = SubjectIndex::new();
-        index.subscribe(make_entry("sub1", "test", 10));
-        index.subscribe(make_entry("sub2", "test", 20));
+        index.subscribe(make_entry("sub1", "test", 10)).unwrap();
+        index.subscribe(make_entry("sub2", "test", 20)).unwrap();
         index.unsubscribe("sub1");
         let matches = index.lookup("test");
         assert_eq!(matches.len(), 1);
@@ -314,7 +342,7 @@ mod tests {
     #[test]
     fn test_unsubscribe_terminal_wildcard() {
         let mut index = SubjectIndex::new();
-        index.subscribe(make_entry("sub1", "brain.>", 10));
+        index.subscribe(make_entry("sub1", "brain.>", 10)).unwrap();
         index.unsubscribe("sub1");
         assert!(index.lookup("brain.content.store").is_empty());
     }
@@ -322,9 +350,9 @@ mod tests {
     #[test]
     fn test_priority_ordering() {
         let mut index = SubjectIndex::new();
-        index.subscribe(make_entry("low", "test", 30));
-        index.subscribe(make_entry("high", "test", 10));
-        index.subscribe(make_entry("mid", "test", 20));
+        index.subscribe(make_entry("low", "test", 30)).unwrap();
+        index.subscribe(make_entry("high", "test", 10)).unwrap();
+        index.subscribe(make_entry("mid", "test", 20)).unwrap();
         let matches = index.lookup("test");
         assert_eq!(matches[0].id, "high");
         assert_eq!(matches[1].id, "mid");
@@ -334,12 +362,23 @@ mod tests {
     #[test]
     fn test_list_all() {
         let mut index = SubjectIndex::new();
-        index.subscribe(make_entry("sub0", "test.0", 0));
-        index.subscribe(make_entry("sub1", "test.1", 1));
-        index.subscribe(make_entry("sub2", "brain.>", 2));
+        index.subscribe(make_entry("sub0", "test.0", 0)).unwrap();
+        index.subscribe(make_entry("sub1", "test.1", 1)).unwrap();
+        index.subscribe(make_entry("sub2", "brain.>", 2)).unwrap();
         let all = index.list(None);
         assert_eq!(all.len(), 3);
         let filtered = index.list(Some("test.1"));
         assert_eq!(filtered.len(), 1);
+    }
+
+    #[test]
+    fn test_subject_depth_limit() {
+        let mut index = SubjectIndex::new();
+        let deep_pattern = (0..257)
+            .map(|i| format!("level{}", i))
+            .collect::<Vec<_>>()
+            .join(".");
+        let result = index.subscribe(make_entry("sub1", &deep_pattern, 10));
+        assert!(result.is_err());
     }
 }
