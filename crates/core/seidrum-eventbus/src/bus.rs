@@ -18,7 +18,7 @@ pub struct BusMetrics {
 #[derive(Debug)]
 pub struct Subscription {
     pub id: String,
-    pub rx: tokio::sync::mpsc::UnboundedReceiver<Vec<u8>>,
+    pub rx: tokio::sync::mpsc::Receiver<Vec<u8>>,
 }
 
 /// Options for subscribing.
@@ -33,16 +33,18 @@ pub struct SubscribeOpts {
 /// The EventBus trait is the public API for the entire event bus.
 #[async_trait]
 pub trait EventBus: Send + Sync + 'static {
-    /// Publish an event to a subject.
+    /// Publish an event to a subject. The event is persisted durably
+    /// before dispatch begins. Returns the assigned sequence number.
     async fn publish(&self, subject: &str, payload: &[u8]) -> crate::Result<u64>;
 
-    /// Subscribe to a subject pattern.
+    /// Subscribe to a subject pattern with the given options.
+    /// Returns a Subscription handle for receiving events.
     async fn subscribe(&self, pattern: &str, opts: SubscribeOpts) -> crate::Result<Subscription>;
 
-    /// Unsubscribe from a subscription.
+    /// Remove a subscription by ID.
     async fn unsubscribe(&self, id: &str) -> crate::Result<()>;
 
-    /// List subscriptions, optionally filtered by pattern.
+    /// List active subscriptions, optionally filtered by pattern.
     async fn list_subscriptions(
         &self,
         filter: Option<&str>,
@@ -74,7 +76,7 @@ impl EventBus for EventBusImpl {
     async fn subscribe(&self, pattern: &str, opts: SubscribeOpts) -> crate::Result<Subscription> {
         let (id, rx) = self
             .engine
-            .subscribe(pattern, opts.priority, opts.mode)
+            .subscribe(pattern, opts.priority, opts.mode, opts.timeout)
             .await?;
         Ok(Subscription { id, rx })
     }
@@ -91,7 +93,7 @@ impl EventBus for EventBusImpl {
     }
 
     async fn metrics(&self) -> crate::Result<BusMetrics> {
-        // Placeholder: Phase 1 doesn't track detailed metrics
+        // TODO: Phase 2 will track detailed publish/deliver counters
         Ok(BusMetrics {
             events_published: 0,
             events_delivered: 0,

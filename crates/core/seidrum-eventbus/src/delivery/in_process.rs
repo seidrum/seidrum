@@ -33,7 +33,7 @@ impl DeliveryChannel for InProcessChannel {
     ) -> DeliveryResult<DeliveryReceipt> {
         let now = SystemTime::now()
             .duration_since(UNIX_EPOCH)
-            .unwrap()
+            .unwrap_or_default()
             .as_millis() as u64;
 
         self.tx

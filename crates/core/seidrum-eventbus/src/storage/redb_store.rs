@@ -65,15 +65,19 @@ impl EventStore for RedbEventStore {
         let event = event.clone();
 
         tokio::task::spawn_blocking(move || {
-            // Get next seq
+            // Use a single write transaction for atomic seq generation + insert.
+            // This prevents race conditions where two concurrent appends could
+            // read the same last_seq from separate read transactions.
+            let write_txn = db.begin_write().map_err(|e| {
+                StorageError::DatabaseError(format!("failed to begin write: {}", e))
+            })?;
+
+            // Get next seq inside the write transaction (serialized by redb)
             let next_seq = {
-                let read_txn = db.begin_read().map_err(|e| {
-                    StorageError::DatabaseError(format!("failed to begin read: {}", e))
-                })?;
-                let table = read_txn.open_table(EVENTS_TABLE).map_err(|e| {
+                let events_table = write_txn.open_table(EVENTS_TABLE).map_err(|e| {
                     StorageError::DatabaseError(format!("failed to open events table: {}", e))
                 })?;
-                let last_seq: u64 = table
+                let last_seq: u64 = events_table
                     .last()
                     .map_err(|e| StorageError::DatabaseError(format!("failed to get last: {}", e)))?
                     .map(|(k, _)| k.value())
@@ -89,9 +93,6 @@ impl EventStore for RedbEventStore {
                 StorageError::OperationFailed(format!("failed to serialize event: {}", e))
             })?;
 
-            let write_txn = db.begin_write().map_err(|e| {
-                StorageError::DatabaseError(format!("failed to begin write: {}", e))
-            })?;
             {
                 let mut events_table = write_txn.open_table(EVENTS_TABLE).map_err(|e| {
                     StorageError::DatabaseError(format!("failed to open events table: {}", e))
@@ -389,6 +390,8 @@ impl EventStore for RedbEventStore {
     ) -> StorageResult<Vec<RetryableDelivery>> {
         let db = Arc::clone(&self.db);
 
+        // TODO(Phase 2): Add a delivery_idx table keyed by (subscriber_id, seq) → DeliveryStatus
+        // to avoid this full-table scan. Currently O(n) over all events.
         tokio::task::spawn_blocking(move || {
             let read_txn = db
                 .begin_read()

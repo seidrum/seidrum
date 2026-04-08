@@ -247,19 +247,13 @@ mod tests {
 
     #[tokio::test]
     async fn test_compaction_delivered() {
-        use std::time::{SystemTime, UNIX_EPOCH};
-
         let store = InMemoryEventStore::new();
-        let now_ms = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap()
-            .as_millis() as u64;
 
         let old_event = StoredEvent {
             seq: 0,
             subject: "test".to_string(),
             payload: b"old".to_vec(),
-            stored_at: 1000, // ancient — should be compacted
+            stored_at: 0,
             status: EventStatus::Delivered,
             deliveries: vec![],
             reply_subject: None,
@@ -268,14 +262,23 @@ mod tests {
             seq: 0,
             subject: "test".to_string(),
             payload: b"new".to_vec(),
-            stored_at: now_ms, // recent — should survive
+            stored_at: 0,
             status: EventStatus::Delivered,
             deliveries: vec![],
             reply_subject: None,
         };
 
-        store.append(&old_event).await.unwrap();
+        // Both events get stored_at = now from the store's append().
+        let old_seq = store.append(&old_event).await.unwrap();
         store.append(&new_event).await.unwrap();
+
+        // Manually backdate the old event's stored_at to simulate age.
+        {
+            let mut events = store.events.write().await;
+            if let Some(e) = events.iter_mut().find(|e| e.seq == old_seq) {
+                e.stored_at = 1000; // ancient timestamp
+            }
+        }
 
         // Compact events older than 5 seconds (5000ms)
         let removed = store.compact(Duration::from_millis(5000)).await.unwrap();

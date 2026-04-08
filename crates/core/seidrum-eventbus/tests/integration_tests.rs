@@ -79,6 +79,25 @@ async fn test_crash_recovery_full() {
             .await
             .unwrap();
         assert_eq!(pending.len(), 2);
+
+        // Verify delivery records also survive crash
+        store
+            .record_delivery(
+                events[0].seq,
+                "sub1",
+                seidrum_eventbus::storage::DeliveryStatus::Delivered,
+            )
+            .await
+            .unwrap();
+        // Drop and reopen
+        drop(store);
+        let store2 = RedbEventStore::open(&path).unwrap();
+        let events2 = store2
+            .query_by_subject("test.subject", None, 10)
+            .await
+            .unwrap();
+        assert_eq!(events2[0].deliveries.len(), 1);
+        assert_eq!(events2[0].deliveries[0].subscriber_id, "sub1");
     }
 }
 
@@ -145,4 +164,16 @@ async fn test_unsubscribe() {
 
     let subs = bus.list_subscriptions(None).await.unwrap();
     assert_eq!(subs.len(), 0);
+}
+
+#[tokio::test]
+async fn test_invalid_subject_rejected() {
+    let store = Arc::new(InMemoryEventStore::new());
+    let bus = EventBusBuilder::new().storage(store).build().await.unwrap();
+
+    // Empty subject
+    assert!(bus.publish("", b"payload").await.is_err());
+
+    // Null byte
+    assert!(bus.publish("test\0subject", b"payload").await.is_err());
 }

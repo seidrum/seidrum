@@ -10,7 +10,8 @@ use tokio::sync::RwLock;
 
 /// An in-memory event store backed by a Vec. Useful for testing.
 pub struct InMemoryEventStore {
-    events: Arc<RwLock<Vec<StoredEvent>>>,
+    /// Internal events storage. `pub(crate)` for test access to simulate time manipulation.
+    pub(crate) events: Arc<RwLock<Vec<StoredEvent>>>,
     next_seq: AtomicU64,
 }
 
@@ -25,7 +26,7 @@ impl InMemoryEventStore {
     fn current_time_ms() -> u64 {
         SystemTime::now()
             .duration_since(SystemTime::UNIX_EPOCH)
-            .unwrap()
+            .unwrap_or_default()
             .as_millis() as u64
     }
 }
@@ -42,6 +43,7 @@ impl EventStore for InMemoryEventStore {
         let seq = self.next_seq.fetch_add(1, Ordering::SeqCst);
         let mut stored = event.clone();
         stored.seq = seq;
+        stored.stored_at = Self::current_time_ms();
 
         let mut events = self.events.write().await;
         events.push(stored);

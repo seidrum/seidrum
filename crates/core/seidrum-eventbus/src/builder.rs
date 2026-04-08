@@ -1,7 +1,10 @@
 use crate::bus::{EventBus, EventBusImpl};
+use crate::storage::compaction::CompactionTask;
 use crate::storage::EventStore;
+use crate::EventBusError;
 use std::sync::Arc;
 use std::time::Duration;
+use tokio::task::JoinHandle;
 
 /// Builder for constructing an EventBus with configurable options.
 pub struct EventBusBuilder {
@@ -10,12 +13,17 @@ pub struct EventBusBuilder {
     retention: Duration,
 }
 
+/// Default compaction interval: 1 hour.
+const DEFAULT_COMPACTION_INTERVAL: Duration = Duration::from_secs(3600);
+/// Default retention period for delivered events: 24 hours.
+const DEFAULT_RETENTION: Duration = Duration::from_secs(86400);
+
 impl EventBusBuilder {
     pub fn new() -> Self {
         Self {
             store: None,
-            compaction_interval: Duration::from_secs(3600),
-            retention: Duration::from_secs(86400),
+            compaction_interval: DEFAULT_COMPACTION_INTERVAL,
+            retention: DEFAULT_RETENTION,
         }
     }
 
@@ -37,25 +45,19 @@ impl EventBusBuilder {
         self
     }
 
-    /// Build the EventBus.
+    /// Build the EventBus. Returns the bus and a JoinHandle for the compaction task.
     pub async fn build(self) -> crate::Result<Arc<dyn EventBus>> {
         let store = self
             .store
-            .ok_or_else(|| "storage backend is required".to_string())?;
+            .ok_or_else(|| EventBusError::Config("storage backend is required".to_string()))?;
 
         let bus = Arc::new(EventBusImpl::new(Arc::clone(&store)));
 
-        // Start compaction task
-        let compaction_store = Arc::clone(&store);
-        let retention = self.retention;
-        tokio::spawn(async move {
-            let mut interval = tokio::time::interval(Duration::from_secs(3600));
-            loop {
-                interval.tick().await;
-                if let Err(e) = compaction_store.compact(retention).await {
-                    tracing::warn!("compaction failed: {}", e);
-                }
-            }
+        // Start compaction task using the configured interval
+        let compaction_task =
+            CompactionTask::new(Arc::clone(&store), self.compaction_interval, self.retention);
+        let _handle: JoinHandle<()> = tokio::spawn(async move {
+            compaction_task.run().await;
         });
 
         Ok(bus)

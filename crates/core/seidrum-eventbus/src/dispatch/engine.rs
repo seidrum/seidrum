@@ -1,31 +1,68 @@
 use super::subject_index::{SubjectIndex, SubscriptionEntry, SubscriptionMode};
 use crate::delivery::ChannelConfig;
 use crate::storage::{DeliveryStatus, EventStatus, EventStore, StoredEvent};
+use crate::EventBusError;
 use std::collections::HashMap;
 use std::sync::Arc;
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use tokio::sync::mpsc;
 use tokio::sync::RwLock;
-use tracing::{debug, error};
+use tracing::{debug, error, warn};
+
+/// Default channel buffer size for bounded channels.
+const DEFAULT_CHANNEL_CAPACITY: usize = 8192;
+
+/// Maximum allowed subject length.
+const MAX_SUBJECT_LENGTH: usize = 512;
 
 /// The dispatch engine routes published events to matching subscribers.
 pub struct DispatchEngine {
     store: Arc<dyn EventStore>,
-    index: Arc<RwLock<SubjectIndex>>,
-    /// Per-subscription senders for in-process delivery.
-    senders: Arc<RwLock<HashMap<String, mpsc::UnboundedSender<Vec<u8>>>>>,
+    /// Combined lock for index + senders to prevent desync.
+    /// Both data structures are always modified atomically together.
+    state: Arc<RwLock<DispatchState>>,
+}
+
+struct DispatchState {
+    index: SubjectIndex,
+    senders: HashMap<String, mpsc::Sender<Vec<u8>>>,
 }
 
 impl DispatchEngine {
     pub fn new(store: Arc<dyn EventStore>) -> Self {
         Self {
             store,
-            index: Arc::new(RwLock::new(SubjectIndex::new())),
-            senders: Arc::new(RwLock::new(HashMap::new())),
+            state: Arc::new(RwLock::new(DispatchState {
+                index: SubjectIndex::new(),
+                senders: HashMap::new(),
+            })),
         }
     }
 
+    /// Validate a subject string.
+    fn validate_subject(subject: &str) -> crate::Result<()> {
+        if subject.is_empty() {
+            return Err(EventBusError::InvalidSubject(
+                "subject must not be empty".to_string(),
+            ));
+        }
+        if subject.len() > MAX_SUBJECT_LENGTH {
+            return Err(EventBusError::InvalidSubject(format!(
+                "subject exceeds maximum length of {} bytes",
+                MAX_SUBJECT_LENGTH
+            )));
+        }
+        if subject.contains('\0') {
+            return Err(EventBusError::InvalidSubject(
+                "subject must not contain null bytes".to_string(),
+            ));
+        }
+        Ok(())
+    }
+
     pub async fn publish(&self, subject: &str, payload: &[u8]) -> crate::Result<u64> {
+        Self::validate_subject(subject)?;
+
         let event = StoredEvent {
             seq: 0,
             subject: subject.to_string(),
@@ -37,59 +74,93 @@ impl DispatchEngine {
         };
 
         // Write-ahead persist
-        let seq = self
-            .store
-            .append(&event)
-            .await
-            .map_err(|e| format!("failed to persist event: {}", e))?;
+        let seq = self.store.append(&event).await?;
 
         // Update status to Dispatching
-        self.store
+        if let Err(e) = self
+            .store
             .update_status(seq, EventStatus::Dispatching)
             .await
-            .ok();
+        {
+            warn!(seq = seq, error = %e, "failed to update event status to Dispatching");
+        }
 
-        // Find matching subscriptions
-        let index = self.index.read().await;
-        let matches = index.lookup(subject);
-        drop(index);
+        // Find matching subscriptions (hold read lock for lookup + delivery)
+        let state = self.state.read().await;
+        let matches = state.index.lookup(subject);
 
         if matches.is_empty() {
-            // No subscribers, mark as delivered
-            self.store
-                .update_status(seq, EventStatus::Delivered)
-                .await
-                .ok();
+            drop(state);
+            // No subscribers — mark as Delivered (vacuously true: all 0 subscribers received it).
+            // Note: this is semantically "no subscribers existed", not "delivered to all".
+            if let Err(e) = self.store.update_status(seq, EventStatus::Delivered).await {
+                warn!(seq = seq, error = %e, "failed to update event status to Delivered (no subscribers)");
+            }
             return Ok(seq);
         }
 
         // Deliver to all matching subscribers (async only in Phase 1)
-        let senders = self.senders.read().await;
+        let mut any_failed = false;
         for subscription in &matches {
             match &subscription.channel {
                 ChannelConfig::InProcess => {
-                    if let Some(tx) = senders.get(&subscription.id) {
-                        match tx.send(payload.to_vec()) {
+                    if let Some(tx) = state.senders.get(&subscription.id) {
+                        match tx.try_send(payload.to_vec()) {
                             Ok(()) => {
-                                self.store
+                                if let Err(e) = self
+                                    .store
                                     .record_delivery(
                                         seq,
                                         &subscription.id,
                                         DeliveryStatus::Delivered,
                                     )
                                     .await
-                                    .ok();
+                                {
+                                    warn!(
+                                        seq = seq,
+                                        subscriber = subscription.id,
+                                        error = %e,
+                                        "failed to record successful delivery"
+                                    );
+                                }
                             }
-                            Err(e) => {
+                            Err(mpsc::error::TrySendError::Full(_)) => {
+                                warn!(
+                                    subscriber = subscription.id,
+                                    "delivery failed: channel full (backpressure)"
+                                );
+                                any_failed = true;
+                                if let Err(e) = self
+                                    .store
+                                    .record_delivery(seq, &subscription.id, DeliveryStatus::Failed)
+                                    .await
+                                {
+                                    warn!(
+                                        seq = seq,
+                                        subscriber = subscription.id,
+                                        error = %e,
+                                        "failed to record failed delivery"
+                                    );
+                                }
+                            }
+                            Err(mpsc::error::TrySendError::Closed(_)) => {
                                 debug!(
-                                    error = %e,
                                     subscriber = subscription.id,
                                     "delivery failed: channel closed"
                                 );
-                                self.store
+                                any_failed = true;
+                                if let Err(e) = self
+                                    .store
                                     .record_delivery(seq, &subscription.id, DeliveryStatus::Failed)
                                     .await
-                                    .ok();
+                                {
+                                    warn!(
+                                        seq = seq,
+                                        subscriber = subscription.id,
+                                        error = %e,
+                                        "failed to record failed delivery"
+                                    );
+                                }
                             }
                         }
                     } else {
@@ -97,24 +168,38 @@ impl DispatchEngine {
                             subscriber = subscription.id,
                             "no sender found for subscription"
                         );
-                        self.store
+                        any_failed = true;
+                        if let Err(e) = self
+                            .store
                             .record_delivery(seq, &subscription.id, DeliveryStatus::Failed)
                             .await
-                            .ok();
+                        {
+                            warn!(
+                                seq = seq,
+                                subscriber = subscription.id,
+                                error = %e,
+                                "failed to record failed delivery (no sender)"
+                            );
+                        }
                     }
                 }
                 _ => {
                     error!("unsupported channel type in Phase 1");
+                    any_failed = true;
                 }
             }
         }
-        drop(senders);
+        drop(state);
 
-        // Mark as delivered
-        self.store
-            .update_status(seq, EventStatus::Delivered)
-            .await
-            .ok();
+        // Set final status based on delivery outcomes
+        let final_status = if any_failed {
+            EventStatus::PartiallyDelivered
+        } else {
+            EventStatus::Delivered
+        };
+        if let Err(e) = self.store.update_status(seq, final_status).await {
+            warn!(seq = seq, error = %e, "failed to update event final status");
+        }
 
         Ok(seq)
     }
@@ -124,9 +209,12 @@ impl DispatchEngine {
         subject_pattern: &str,
         priority: u32,
         mode: SubscriptionMode,
-    ) -> crate::Result<(String, mpsc::UnboundedReceiver<Vec<u8>>)> {
+        timeout: Duration,
+    ) -> crate::Result<(String, mpsc::Receiver<Vec<u8>>)> {
+        Self::validate_subject(subject_pattern)?;
+
         let subscription_id = ulid::Ulid::new().to_string();
-        let (tx, rx) = mpsc::unbounded_channel();
+        let (tx, rx) = mpsc::channel(DEFAULT_CHANNEL_CAPACITY);
 
         let entry = SubscriptionEntry {
             id: subscription_id.clone(),
@@ -134,26 +222,24 @@ impl DispatchEngine {
             priority,
             mode,
             channel: ChannelConfig::InProcess,
-            timeout: std::time::Duration::from_secs(5),
+            timeout,
         };
 
-        let mut index = self.index.write().await;
-        index.subscribe(entry);
-        drop(index);
-
-        let mut senders = self.senders.write().await;
-        senders.insert(subscription_id.clone(), tx);
+        // Acquire a single write lock to update both index and senders atomically.
+        // This prevents the desync window where a concurrent publish could see
+        // the subscription in the index but not find its sender (or vice versa).
+        let mut state = self.state.write().await;
+        state.index.subscribe(entry);
+        state.senders.insert(subscription_id.clone(), tx);
 
         Ok((subscription_id, rx))
     }
 
     pub async fn unsubscribe(&self, id: &str) -> crate::Result<()> {
-        let mut index = self.index.write().await;
-        index.unsubscribe(id);
-        drop(index);
-
-        let mut senders = self.senders.write().await;
-        senders.remove(id);
+        // Acquire a single write lock to remove from both atomically.
+        let mut state = self.state.write().await;
+        state.senders.remove(id);
+        state.index.unsubscribe(id);
 
         Ok(())
     }
@@ -162,8 +248,8 @@ impl DispatchEngine {
         &self,
         filter: Option<&str>,
     ) -> crate::Result<Vec<SubscriptionInfo>> {
-        let index = self.index.read().await;
-        let entries = index.list(filter);
+        let state = self.state.read().await;
+        let entries = state.index.list(filter);
         Ok(entries
             .into_iter()
             .map(|e| SubscriptionInfo {
@@ -212,7 +298,12 @@ mod tests {
         let engine = DispatchEngine::new(store);
 
         let (_id, mut rx) = engine
-            .subscribe("test.subject", 10, SubscriptionMode::Async)
+            .subscribe(
+                "test.subject",
+                10,
+                SubscriptionMode::Async,
+                Duration::from_secs(5),
+            )
             .await
             .unwrap();
 
@@ -231,7 +322,12 @@ mod tests {
         let engine = DispatchEngine::new(store);
 
         let (_id, mut rx) = engine
-            .subscribe("test.a", 10, SubscriptionMode::Async)
+            .subscribe(
+                "test.a",
+                10,
+                SubscriptionMode::Async,
+                Duration::from_secs(5),
+            )
             .await
             .unwrap();
 
@@ -249,7 +345,12 @@ mod tests {
         let engine = DispatchEngine::new(store);
 
         let (id, mut rx) = engine
-            .subscribe("test.subject", 10, SubscriptionMode::Async)
+            .subscribe(
+                "test.subject",
+                10,
+                SubscriptionMode::Async,
+                Duration::from_secs(5),
+            )
             .await
             .unwrap();
 
@@ -271,11 +372,21 @@ mod tests {
         let engine = DispatchEngine::new(store);
 
         let (_id1, mut rx1) = engine
-            .subscribe("test.subject", 10, SubscriptionMode::Async)
+            .subscribe(
+                "test.subject",
+                10,
+                SubscriptionMode::Async,
+                Duration::from_secs(5),
+            )
             .await
             .unwrap();
         let (_id2, mut rx2) = engine
-            .subscribe("test.subject", 20, SubscriptionMode::Async)
+            .subscribe(
+                "test.subject",
+                20,
+                SubscriptionMode::Async,
+                Duration::from_secs(5),
+            )
             .await
             .unwrap();
 
@@ -290,5 +401,51 @@ mod tests {
 
         assert_eq!(msg1, Some(b"message".to_vec()));
         assert_eq!(msg2, Some(b"message".to_vec()));
+    }
+
+    #[tokio::test]
+    async fn test_invalid_subject_empty() {
+        let store = Arc::new(InMemoryEventStore::new());
+        let engine = DispatchEngine::new(store);
+
+        let result = engine.publish("", b"payload").await;
+        assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn test_invalid_subject_null_byte() {
+        let store = Arc::new(InMemoryEventStore::new());
+        let engine = DispatchEngine::new(store);
+
+        let result = engine.publish("test\0subject", b"payload").await;
+        assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn test_partially_delivered_status() {
+        let store = Arc::new(InMemoryEventStore::new());
+        let engine = DispatchEngine::new(store.clone());
+
+        // Subscribe and immediately drop the receiver to simulate a closed channel
+        let (_id, rx) = engine
+            .subscribe(
+                "test.subject",
+                10,
+                SubscriptionMode::Async,
+                Duration::from_secs(5),
+            )
+            .await
+            .unwrap();
+        drop(rx);
+
+        let seq = engine.publish("test.subject", b"payload").await.unwrap();
+
+        // Event should be PartiallyDelivered since the channel was closed
+        let events = store
+            .query_by_status(EventStatus::PartiallyDelivered, 10)
+            .await
+            .unwrap();
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].seq, seq);
     }
 }

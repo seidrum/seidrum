@@ -15,8 +15,32 @@ pub use delivery::{ChannelConfig, DeliveryChannel, DeliveryReceipt};
 pub use dispatch::{SubscriptionInfo, SubscriptionMode};
 pub use storage::{EventStatus, EventStore, StoredEvent};
 
+/// Errors that can occur in the event bus.
+#[derive(Debug, thiserror::Error)]
+pub enum EventBusError {
+    /// The storage backend returned an error.
+    #[error("storage error: {0}")]
+    Storage(#[from] storage::StorageError),
+
+    /// A delivery channel returned an error.
+    #[error("delivery error: {0}")]
+    Delivery(#[from] delivery::DeliveryError),
+
+    /// Invalid subject pattern.
+    #[error("invalid subject: {0}")]
+    InvalidSubject(String),
+
+    /// Configuration or builder error.
+    #[error("configuration error: {0}")]
+    Config(String),
+
+    /// An internal error.
+    #[error("internal error: {0}")]
+    Internal(String),
+}
+
 /// Result type for eventbus operations.
-pub type Result<T> = std::result::Result<T, String>;
+pub type Result<T> = std::result::Result<T, EventBusError>;
 
 #[cfg(test)]
 pub mod test_utils {
