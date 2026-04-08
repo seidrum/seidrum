@@ -4,6 +4,7 @@ members = [
     "crates/core/seidrum-kernel",
     "crates/core/seidrum-daemon",
     "crates/core/seidrum-e2e",
+    "crates/core/seidrum-eventbus",
     "crates/plugins/seidrum-cli",
     "crates/plugins/seidrum-llm-router",
     "crates/plugins/seidrum-response-formatter",
