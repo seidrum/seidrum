@@ -177,14 +177,14 @@ mod tests {
         );
     }
 
-    /// Test WebhookRetryConfig implements Serialize/Deserialize.
+    /// Test RetryConfig implements Serialize/Deserialize.
     #[test]
-    fn test_webhook_retry_config_serde() {
-        use seidrum_eventbus::delivery::webhook::WebhookRetryConfig;
+    fn test_retry_config_serde() {
+        use seidrum_eventbus::delivery::RetryConfig;
 
-        let config = WebhookRetryConfig::default();
+        let config = RetryConfig::default();
         let json = serde_json::to_string(&config).expect("should serialize");
-        let parsed: WebhookRetryConfig = serde_json::from_str(&json).expect("should deserialize");
+        let parsed: RetryConfig = serde_json::from_str(&json).expect("should deserialize");
         assert_eq!(parsed.max_attempts, config.max_attempts);
         assert_eq!(parsed.initial_backoff_ms, config.initial_backoff_ms);
         assert_eq!(parsed.max_backoff_ms, config.max_backoff_ms);

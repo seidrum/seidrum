@@ -4,20 +4,22 @@
 //! managing subscriptions, and health checks.
 
 use crate::bus::{BusMetrics, EventBus, SubscribeOpts};
-use crate::delivery::ChannelRegistry;
+use crate::delivery::{ChannelConfig, ChannelRegistry, DeliveryChannel, WebhookChannel};
 use crate::dispatch::SubscriptionMode;
 use axum::{
-    extract::{Path, Query, State},
-    http::StatusCode,
+    extract::{Path, State},
+    http::{HeaderMap, StatusCode},
     routing::{delete, get, post},
     Json, Router,
 };
-use base64::Engine;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
+use std::collections::HashMap;
 use std::net::SocketAddr;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
+use tokio::sync::watch;
 use tower::ServiceBuilder;
 use tower_http::cors::CorsLayer;
 use tower_http::limit::RequestBodyLimitLayer;
@@ -27,8 +29,8 @@ use tracing::{debug, info, warn};
 /// with 413 Payload Too Large before the handler is invoked.
 const MAX_REQUEST_BODY_SIZE: usize = 2_097_152;
 
-/// Maximum base64-encoded payload size within a JSON body (1 MiB).
-const MAX_PAYLOAD_SIZE: usize = 1_048_576;
+/// Maximum number of webhook subscriptions managed by the HTTP server.
+const MAX_HTTP_SUBSCRIPTIONS: usize = 1024;
 
 /// Unified error response returned by all HTTP endpoints.
 #[derive(Debug, Serialize)]
@@ -68,11 +70,35 @@ fn http_error_with_code(
     (status, Json(ErrorResponse::with_code(message, code)))
 }
 
+/// Authentication trait for HTTP requests.
+///
+/// Implement this to add authentication to the HTTP transport server.
+/// The authenticator is called once per request before the handler runs.
+#[async_trait::async_trait]
+pub trait HttpAuthenticator: Send + Sync + 'static {
+    /// Authenticate a request from its headers.
+    /// Returns `Ok(())` if allowed, or `Err(reason)` if rejected.
+    async fn authenticate(&self, headers: &HeaderMap) -> Result<(), String>;
+}
+
+/// No-op authenticator that accepts all requests (development only).
+pub struct NoHttpAuth;
+
+#[async_trait::async_trait]
+impl HttpAuthenticator for NoHttpAuth {
+    async fn authenticate(&self, _headers: &HeaderMap) -> Result<(), String> {
+        Ok(())
+    }
+}
+
 /// Application state shared across handlers.
 #[derive(Clone)]
 pub struct AppState {
     pub bus: Arc<dyn EventBus>,
     pub registry: Arc<ChannelRegistry>,
+    pub webhook_channel: Arc<WebhookChannel>,
+    pub authenticator: Arc<dyn HttpAuthenticator>,
+    pub subscription_count: Arc<AtomicUsize>,
 }
 
 /// Request to publish an event.
@@ -100,7 +126,7 @@ pub struct RequestRequest {
 }
 
 fn default_timeout_ms() -> u64 {
-    5000
+    super::DEFAULT_TIMEOUT_MS
 }
 
 /// Response to request.
@@ -116,7 +142,7 @@ pub struct SubscribeRequest {
     pub pattern: String,
     pub url: String,
     #[serde(default)]
-    pub headers: std::collections::HashMap<String, String>,
+    pub headers: HashMap<String, String>,
     #[serde(default)]
     pub priority: u32,
 }
@@ -127,16 +153,30 @@ pub struct SubscribeResponse {
     pub id: String,
 }
 
-/// Query parameters for event retrieval.
-#[derive(Debug, Deserialize)]
-pub struct QueryParams {
-    pub since: Option<u64>,
-    #[serde(default = "default_limit")]
-    pub limit: usize,
+/// Validate and decode a base64 payload, mapping errors to HttpError.
+fn validate_and_decode_payload(payload: &str) -> Result<Vec<u8>, HttpError> {
+    super::validate_and_decode_payload(payload).map_err(|msg| {
+        if msg.contains("exceeds limit") {
+            http_error_with_code(StatusCode::PAYLOAD_TOO_LARGE, msg, "PAYLOAD_TOO_LARGE")
+        } else {
+            http_error(StatusCode::BAD_REQUEST, msg)
+        }
+    })
 }
 
-fn default_limit() -> usize {
-    100
+/// Axum middleware for authentication.
+async fn auth_middleware(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    request: axum::extract::Request,
+    next: axum::middleware::Next,
+) -> Result<axum::response::Response, HttpError> {
+    state
+        .authenticator
+        .authenticate(&headers)
+        .await
+        .map_err(|reason| http_error_with_code(StatusCode::UNAUTHORIZED, reason, "UNAUTHORIZED"))?;
+    Ok(next.run(request).await)
 }
 
 /// Create the HTTP router with all transport endpoints.
@@ -148,15 +188,14 @@ pub fn create_router(state: AppState) -> Router {
         .route("/request", post(make_request))
         .route("/subscribe", post(create_subscription))
         .route("/subscribe/:id", delete(remove_subscription))
-        .route("/events/:seq", get(get_event))
+        .layer(axum::middleware::from_fn_with_state(
+            state.clone(),
+            auth_middleware,
+        ))
         .with_state(state)
         .layer(
             ServiceBuilder::new()
-                // Reject request bodies larger than MAX_REQUEST_BODY_SIZE (High #6).
                 .layer(RequestBodyLimitLayer::new(MAX_REQUEST_BODY_SIZE))
-                // CORS: permissive is suitable for development. For production,
-                // configure explicit allowed origins, methods, and headers.
-                // TODO(production): Replace CorsLayer::permissive() with restricted policy.
                 .layer(CorsLayer::permissive()),
         )
 }
@@ -165,21 +204,50 @@ pub fn create_router(state: AppState) -> Router {
 pub struct HttpServer {
     bus: Arc<dyn EventBus>,
     registry: Arc<ChannelRegistry>,
+    authenticator: Arc<dyn HttpAuthenticator>,
+    shutdown_rx: watch::Receiver<bool>,
 }
 
 impl HttpServer {
-    /// Create a new HTTP server.
-    pub fn new(bus: Arc<dyn EventBus>, registry: Arc<ChannelRegistry>) -> Self {
-        Self { bus, registry }
+    /// Create a new HTTP server with no authentication (development only).
+    pub fn new(
+        bus: Arc<dyn EventBus>,
+        registry: Arc<ChannelRegistry>,
+        shutdown_rx: watch::Receiver<bool>,
+    ) -> Self {
+        Self {
+            bus,
+            registry,
+            authenticator: Arc::new(NoHttpAuth),
+            shutdown_rx,
+        }
+    }
+
+    /// Create a new HTTP server with a custom authenticator.
+    pub fn with_auth(
+        bus: Arc<dyn EventBus>,
+        registry: Arc<ChannelRegistry>,
+        authenticator: Arc<dyn HttpAuthenticator>,
+        shutdown_rx: watch::Receiver<bool>,
+    ) -> Self {
+        Self {
+            bus,
+            registry,
+            authenticator,
+            shutdown_rx,
+        }
     }
 
     /// Start the HTTP server on the given address.
     ///
-    /// Runs indefinitely until the process is shut down or an error occurs.
+    /// Runs until the shutdown signal is received or an error occurs.
     pub async fn start(&self, addr: SocketAddr) -> crate::Result<()> {
         let state = AppState {
             bus: Arc::clone(&self.bus),
             registry: Arc::clone(&self.registry),
+            webhook_channel: WebhookChannel::new(),
+            authenticator: Arc::clone(&self.authenticator),
+            subscription_count: Arc::new(AtomicUsize::new(0)),
         };
 
         let app = create_router(state);
@@ -190,35 +258,16 @@ impl HttpServer {
 
         info!("HTTP server listening on {}", addr);
 
+        let mut shutdown_rx = self.shutdown_rx.clone();
         axum::serve(listener, app)
+            .with_graceful_shutdown(async move {
+                let _ = shutdown_rx.wait_for(|&v| v).await;
+            })
             .await
             .map_err(|e| crate::EventBusError::Internal(format!("Server error: {}", e)))?;
 
         Ok(())
     }
-}
-
-/// Validate and decode a base64 payload, enforcing size limits.
-fn validate_and_decode_payload(payload: &str) -> Result<Vec<u8>, HttpError> {
-    if payload.len() > MAX_PAYLOAD_SIZE {
-        return Err(http_error_with_code(
-            StatusCode::PAYLOAD_TOO_LARGE,
-            format!(
-                "Encoded payload {} bytes exceeds limit of {} bytes",
-                payload.len(),
-                MAX_PAYLOAD_SIZE
-            ),
-            "PAYLOAD_TOO_LARGE",
-        ));
-    }
-    base64::engine::general_purpose::STANDARD
-        .decode(payload)
-        .map_err(|e| {
-            http_error(
-                StatusCode::BAD_REQUEST,
-                format!("Base64 decode error: {}", e),
-            )
-        })
 }
 
 /// Health check endpoint.
@@ -286,7 +335,10 @@ async fn make_request(
             }
         })?;
 
-    let payload_b64 = base64::engine::general_purpose::STANDARD.encode(&reply);
+    let payload_b64 = {
+        use base64::Engine;
+        base64::engine::general_purpose::STANDARD.encode(&reply)
+    };
 
     debug!("Request/reply completed for {}", req.subject);
 
@@ -296,11 +348,27 @@ async fn make_request(
 }
 
 /// Create a webhook subscription.
+///
+/// Spawns a background delivery task that reads events from the bus subscription
+/// and delivers them via HTTP POST to the webhook URL.
 async fn create_subscription(
     State(state): State<AppState>,
     Json(req): Json<SubscribeRequest>,
 ) -> Result<Json<SubscribeResponse>, HttpError> {
-    use crate::delivery::ChannelConfig;
+    // Atomically reserve a slot. If we exceed the limit, roll back.
+    let count = Arc::clone(&state.subscription_count);
+    let prev = count.fetch_add(1, Ordering::Relaxed);
+    if prev >= MAX_HTTP_SUBSCRIPTIONS {
+        count.fetch_sub(1, Ordering::Relaxed);
+        return Err(http_error_with_code(
+            StatusCode::TOO_MANY_REQUESTS,
+            format!(
+                "Subscription limit reached ({} max)",
+                MAX_HTTP_SUBSCRIPTIONS
+            ),
+            "SUBSCRIPTION_LIMIT",
+        ));
+    }
 
     let channel = ChannelConfig::Webhook {
         url: req.url.clone(),
@@ -310,25 +378,70 @@ async fn create_subscription(
     let opts = SubscribeOpts {
         priority: req.priority,
         mode: SubscriptionMode::Async,
-        channel,
+        channel: channel.clone(),
         timeout: Duration::from_secs(5),
         filter: None,
     };
 
-    let sub = state.bus.subscribe(&req.pattern, opts).await.map_err(|e| {
-        warn!(
-            "Subscription creation failed for pattern {}: {}",
-            req.pattern, e
+    let sub = match state.bus.subscribe(&req.pattern, opts).await {
+        Ok(sub) => sub,
+        Err(e) => {
+            count.fetch_sub(1, Ordering::Relaxed);
+            warn!(
+                "Subscription creation failed for pattern {}: {}",
+                req.pattern, e
+            );
+            return Err(http_error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!("{}", e),
+            ));
+        }
+    };
+
+    let sub_id = sub.id.clone();
+
+    // Spawn a delivery task that reads from the subscription receiver
+    // and delivers via the webhook channel.
+    let webhook = Arc::clone(&state.webhook_channel);
+    let delivery_config = channel;
+    let task_count = Arc::clone(&count);
+
+    let mut rx = sub.rx;
+    let sub_id_for_task = sub_id.clone();
+    tokio::spawn(async move {
+        debug!(
+            "Webhook delivery task started for subscription {}",
+            sub_id_for_task
         );
-        http_error(StatusCode::INTERNAL_SERVER_ERROR, format!("{}", e))
-    })?;
+        while let Some(event) = rx.recv().await {
+            if let Err(e) = webhook
+                .deliver(&event.payload, &event.subject, &delivery_config)
+                .await
+            {
+                warn!(
+                    subscription = sub_id_for_task,
+                    subject = event.subject,
+                    error = %e,
+                    "Webhook delivery failed"
+                );
+            }
+        }
+        // Decrement when the task exits. This happens when bus.unsubscribe()
+        // drops the sender (tx), causing rx.recv() to return None — so
+        // DELETE /subscribe/:id triggers cleanup via this path.
+        task_count.fetch_sub(1, Ordering::Relaxed);
+        debug!(
+            "Webhook delivery task ended for subscription {}",
+            sub_id_for_task
+        );
+    });
 
     debug!(
         "Created subscription {} for pattern {}",
-        sub.id, req.pattern
+        sub_id, req.pattern
     );
 
-    Ok(Json(SubscribeResponse { id: sub.id }))
+    Ok(Json(SubscribeResponse { id: sub_id }))
 }
 
 /// Remove a subscription.
@@ -343,20 +456,6 @@ async fn remove_subscription(
 
     debug!("Removed subscription {}", id);
     Ok(StatusCode::NO_CONTENT)
-}
-
-/// Get an event by sequence number (stub).
-async fn get_event(
-    Path(_seq): Path<u64>,
-    Query(_params): Query<QueryParams>,
-) -> Result<Json<Value>, HttpError> {
-    // In a real implementation, query the store for the event.
-    // For now, return a stub response.
-    Err(http_error_with_code(
-        StatusCode::NOT_IMPLEMENTED,
-        "Event retrieval not yet implemented",
-        "NOT_IMPLEMENTED",
-    ))
 }
 
 #[cfg(test)]
@@ -384,7 +483,7 @@ mod tests {
     fn test_request_request_default_timeout() {
         let json = r#"{"subject":"test","payload":"aGVsbG8="}"#;
         let req: RequestRequest = serde_json::from_str(json).unwrap();
-        assert_eq!(req.timeout_ms, 5000);
+        assert_eq!(req.timeout_ms, super::super::DEFAULT_TIMEOUT_MS);
     }
 
     #[test]
@@ -412,7 +511,7 @@ mod tests {
 
     #[test]
     fn test_validate_payload_too_large() {
-        let huge = "A".repeat(MAX_PAYLOAD_SIZE + 1);
+        let huge = "A".repeat(super::super::MAX_PAYLOAD_SIZE + 1);
         let result = validate_and_decode_payload(&huge);
         assert!(result.is_err());
     }

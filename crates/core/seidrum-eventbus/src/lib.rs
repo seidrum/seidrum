@@ -21,7 +21,7 @@ pub use delivery::{
 pub use dispatch::{EventFilter, InterceptResult, Interceptor, SubscriptionInfo, SubscriptionMode};
 pub use request_reply::{DispatchedEvent, Replier, RequestMessage, RequestSubscription};
 pub use storage::{EventStatus, EventStore, StoredEvent};
-pub use transport::{HttpServer, WebSocketServer};
+pub use transport::{HttpAuthenticator, HttpServer, NoHttpAuth, WebSocketServer};
 
 /// Errors that can occur in the event bus.
 #[derive(Debug, thiserror::Error)]

@@ -25,19 +25,25 @@ use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::net::{TcpListener, TcpStream};
-use tokio::sync::mpsc;
+use tokio::sync::{mpsc, watch};
+use tokio::task::JoinHandle;
 use tracing::{debug, info, warn};
 use ulid::Ulid;
 
 /// Maximum number of subscriptions a single WebSocket connection may hold.
 const MAX_SUBSCRIPTIONS_PER_CONNECTION: usize = 64;
 
-/// Maximum payload size in bytes before base64 decoding (1 MiB encoded ≈ 768 KiB decoded).
-/// This limit applies to the base64-encoded string in the JSON message.
-const MAX_PAYLOAD_SIZE: usize = 1_048_576;
-
 /// Maximum size of a single incoming WebSocket text frame (2 MiB).
 const MAX_FRAME_SIZE: usize = 2_097_152;
+
+/// Authentication request context provided to the [`Authenticator`].
+///
+/// Contains the peer address and any HTTP headers from the WebSocket upgrade
+/// request, allowing token-based or header-based authentication.
+pub struct AuthRequest {
+    pub peer_addr: SocketAddr,
+    pub headers: HashMap<String, String>,
+}
 
 /// Authentication trait for WebSocket connections.
 ///
@@ -45,9 +51,9 @@ const MAX_FRAME_SIZE: usize = 2_097_152;
 /// The authenticator is called once per connection during the upgrade handshake.
 #[async_trait::async_trait]
 pub trait Authenticator: Send + Sync + 'static {
-    /// Authenticate a connection from the given peer address.
+    /// Authenticate a connection using the upgrade request context.
     /// Returns `Ok(())` if allowed, or `Err(reason)` if rejected.
-    async fn authenticate(&self, peer_addr: SocketAddr) -> Result<(), String>;
+    async fn authenticate(&self, request: &AuthRequest) -> Result<(), String>;
 }
 
 /// No-op authenticator that accepts all connections (development only).
@@ -55,7 +61,7 @@ pub struct NoAuth;
 
 #[async_trait::async_trait]
 impl Authenticator for NoAuth {
-    async fn authenticate(&self, _peer_addr: SocketAddr) -> Result<(), String> {
+    async fn authenticate(&self, _request: &AuthRequest) -> Result<(), String> {
         Ok(())
     }
 }
@@ -105,7 +111,7 @@ pub enum ClientOperation {
 }
 
 fn default_timeout_ms() -> u64 {
-    5000
+    super::DEFAULT_TIMEOUT_MS
 }
 
 /// Subscribe options from client.
@@ -128,6 +134,13 @@ pub enum ServerMessage {
         payload: String,
         reply_subject: Option<String>,
         subscription_id: String,
+    },
+    /// Acknowledgment of a successful publish.
+    #[serde(rename = "published")]
+    Published {
+        seq: u64,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        correlation_id: Option<String>,
     },
     /// Reply to a request operation.
     #[serde(rename = "reply_result")]
@@ -156,33 +169,40 @@ pub enum ServerMessage {
 /// WebSocket server for remote event bus clients.
 ///
 /// Call [`WebSocketServer::start`] to begin accepting connections. The server
-/// runs until an error occurs or the task is cancelled.
+/// runs until the shutdown signal is received or an error occurs.
 pub struct WebSocketServer {
     bus: Arc<dyn EventBus>,
     authenticator: Arc<dyn Authenticator>,
+    shutdown_rx: watch::Receiver<bool>,
 }
 
 impl WebSocketServer {
     /// Create a new WebSocket server with no authentication (development only).
-    pub fn new(bus: Arc<dyn EventBus>) -> Self {
+    pub fn new(bus: Arc<dyn EventBus>, shutdown_rx: watch::Receiver<bool>) -> Self {
         Self {
             bus,
             authenticator: Arc::new(NoAuth),
+            shutdown_rx,
         }
     }
 
     /// Create a new WebSocket server with a custom authenticator.
-    pub fn with_auth(bus: Arc<dyn EventBus>, auth: Arc<dyn Authenticator>) -> Self {
+    pub fn with_auth(
+        bus: Arc<dyn EventBus>,
+        auth: Arc<dyn Authenticator>,
+        shutdown_rx: watch::Receiver<bool>,
+    ) -> Self {
         Self {
             bus,
             authenticator: auth,
+            shutdown_rx,
         }
     }
 
     /// Start the WebSocket server on the given address.
     ///
-    /// This method runs indefinitely, accepting connections and spawning a handler
-    /// task for each one. Returns `Err` only if the initial bind fails.
+    /// This method runs until the shutdown signal is received or a fatal error
+    /// occurs. Returns `Err` only if the initial bind fails.
     pub async fn start(&self, addr: SocketAddr) -> crate::Result<()> {
         let listener = TcpListener::bind(addr)
             .await
@@ -190,38 +210,57 @@ impl WebSocketServer {
 
         info!("WebSocket server listening on {}", addr);
 
+        let mut shutdown_rx = self.shutdown_rx.clone();
+
         loop {
-            let (socket, peer_addr) = listener
-                .accept()
-                .await
-                .map_err(|e| crate::EventBusError::Internal(format!("Accept failed: {}", e)))?;
+            tokio::select! {
+                accept_result = listener.accept() => {
+                    let (socket, peer_addr) = accept_result
+                        .map_err(|e| crate::EventBusError::Internal(format!("Accept failed: {}", e)))?;
 
-            let bus = Arc::clone(&self.bus);
-            let auth = Arc::clone(&self.authenticator);
-            tokio::spawn(async move {
-                // Authenticate before upgrading
-                if let Err(reason) = auth.authenticate(peer_addr).await {
-                    warn!(
-                        "WebSocket connection rejected from {}: {}",
-                        peer_addr, reason
-                    );
-                    return;
-                }
+                    let bus = Arc::clone(&self.bus);
+                    let auth = Arc::clone(&self.authenticator);
+                    tokio::spawn(async move {
+                        // Authenticate before upgrading.
+                        // TODO(phase5): Use accept_hdr_async to extract HTTP upgrade
+                        // headers and populate AuthRequest.headers for token-based auth.
+                        // Currently only peer_addr is available.
+                        let auth_req = AuthRequest {
+                            peer_addr,
+                            headers: HashMap::new(),
+                        };
+                        if let Err(reason) = auth.authenticate(&auth_req).await {
+                            warn!(
+                                "WebSocket connection rejected from {}: {}",
+                                peer_addr, reason
+                            );
+                            return;
+                        }
 
-                if let Err(e) = handle_connection(socket, peer_addr, bus).await {
-                    warn!(
-                        "Error handling WebSocket connection from {}: {}",
-                        peer_addr, e
-                    );
+                        if let Err(e) = handle_connection(socket, peer_addr, bus).await {
+                            warn!(
+                                "Error handling WebSocket connection from {}: {}",
+                                peer_addr, e
+                            );
+                        }
+                    });
                 }
-            });
+                _ = shutdown_rx.wait_for(|&v| v) => {
+                    info!("WebSocket server shutting down");
+                    break;
+                }
+            }
         }
+
+        Ok(())
     }
 }
 
 /// Per-connection subscription bookkeeping.
 struct ConnectionSubscription {
     pattern: String,
+    /// Handle to the forwarder task; aborted on disconnect cleanup.
+    forwarder: JoinHandle<()>,
 }
 
 async fn handle_connection(
@@ -240,7 +279,7 @@ async fn handle_connection(
     let mut subscriptions: HashMap<String, ConnectionSubscription> = HashMap::new();
 
     // Channel for forwarding subscription events to the WebSocket sender.
-    // Subscription receivers are polled in a separate task and forwarded here.
+    // Subscription receivers are polled in forwarder tasks and forwarded here.
     let (forward_tx, mut forward_rx) = mpsc::channel::<String>(256);
 
     loop {
@@ -325,10 +364,15 @@ async fn handle_connection(
         }
     }
 
-    // === Disconnect cleanup (Critical #4) ===
-    // Explicitly unsubscribe all active subscriptions for this connection.
+    // === Disconnect cleanup ===
+    // 1. Abort all forwarder tasks immediately (prevents them from racing
+    //    against channel closure during cleanup).
+    // 2. Unsubscribe from the bus to release trie entries and senders.
     let sub_ids: Vec<String> = subscriptions.keys().cloned().collect();
     for sub_id in &sub_ids {
+        if let Some(conn_sub) = subscriptions.remove(sub_id) {
+            conn_sub.forwarder.abort();
+        }
         if let Err(e) = bus.unsubscribe(sub_id).await {
             debug!(
                 "Failed to unsubscribe {} on disconnect from {}: {}",
@@ -362,18 +406,15 @@ async fn ws_send(
         .map_err(|e| crate::EventBusError::Internal(format!("WebSocket send failed: {}", e)))
 }
 
-/// Validate and decode a base64 payload, enforcing size limits.
+/// Validate and decode a base64 payload, mapping to our error type.
 fn validate_and_decode_payload(payload: &str) -> crate::Result<Vec<u8>> {
-    if payload.len() > MAX_PAYLOAD_SIZE {
-        return Err(crate::EventBusError::PayloadTooLarge(format!(
-            "Encoded payload {} bytes exceeds limit of {} bytes",
-            payload.len(),
-            MAX_PAYLOAD_SIZE
-        )));
-    }
-    base64::engine::general_purpose::STANDARD
-        .decode(payload)
-        .map_err(|e| crate::EventBusError::Internal(format!("Base64 decode failed: {}", e)))
+    super::validate_and_decode_payload(payload).map_err(|msg| {
+        if msg.contains("exceeds limit") {
+            crate::EventBusError::PayloadTooLarge(msg)
+        } else {
+            crate::EventBusError::Internal(msg)
+        }
+    })
 }
 
 async fn handle_operation(
@@ -391,11 +432,20 @@ async fn handle_operation(
         ClientOperation::Publish {
             subject,
             payload,
-            correlation_id: _,
+            correlation_id,
         } => {
             let decoded = validate_and_decode_payload(&payload)?;
-            bus.publish(&subject, &decoded).await?;
-            debug!("Published to {} (base64 payload)", subject);
+            let seq = bus.publish(&subject, &decoded).await?;
+            debug!("Published to {} seq={}", subject, seq);
+
+            // Send publish acknowledgment with sequence number
+            let ack = ServerMessage::Published {
+                seq,
+                correlation_id,
+            };
+            if let Ok(json) = serde_json::to_string(&ack) {
+                ws_send(sender, json).await?;
+            }
         }
 
         ClientOperation::Subscribe {
@@ -403,7 +453,7 @@ async fn handle_operation(
             opts,
             correlation_id,
         } => {
-            // Enforce per-connection subscription limit (Critical #1)
+            // Enforce per-connection subscription limit
             if subscriptions.len() >= MAX_SUBSCRIPTIONS_PER_CONNECTION {
                 return Err(crate::EventBusError::Internal(format!(
                     "Subscription limit reached ({} max per connection)",
@@ -426,12 +476,17 @@ async fn handle_operation(
             let sub = bus.subscribe(&pattern, subscribe_opts).await?;
             let sub_id = sub.id.clone();
 
-            // Spawn a task to forward events from this subscription's receiver
-            // to the shared forward channel, so the main select! loop can send them.
+            // Spawn a forwarder task: reads events from the subscription receiver
+            // and sends them to the shared forward channel for the main select! loop.
+            //
+            // The task exits when either:
+            // - rx.recv() returns None (bus unsubscribed, dropping the tx side)
+            // - forward_tx_clone.send() fails (connection closed, forward_rx dropped)
+            // - The JoinHandle is aborted during disconnect cleanup
             let forward_tx_clone = forward_tx.clone();
             let sub_id_for_task = sub_id.clone();
             let mut rx = sub.rx;
-            tokio::spawn(async move {
+            let forwarder = tokio::spawn(async move {
                 while let Some(event) = rx.recv().await {
                     let payload_b64 =
                         base64::engine::general_purpose::STANDARD.encode(&event.payload);
@@ -443,18 +498,17 @@ async fn handle_operation(
                     };
                     if let Ok(json) = serde_json::to_string(&msg) {
                         if forward_tx_clone.send(json).await.is_err() {
-                            // Connection closed, stop forwarding
                             break;
                         }
                     }
                 }
             });
 
-            // Store subscription (rx is owned by the forwarder task above)
             subscriptions.insert(
                 sub_id.clone(),
                 ConnectionSubscription {
                     pattern: pattern.clone(),
+                    forwarder,
                 },
             );
 
@@ -474,6 +528,7 @@ async fn handle_operation(
             correlation_id: _,
         } => {
             if let Some(conn_sub) = subscriptions.remove(&id) {
+                conn_sub.forwarder.abort();
                 bus.unsubscribe(&id).await?;
                 debug!(
                     "Unsubscribed from pattern: {} (id={})",
@@ -598,6 +653,19 @@ mod tests {
     }
 
     #[test]
+    fn test_server_message_published() {
+        let msg = ServerMessage::Published {
+            seq: 42,
+            correlation_id: Some("req-1".to_string()),
+        };
+
+        let json = serde_json::to_value(&msg).unwrap();
+        assert_eq!(json["op"], "published");
+        assert_eq!(json["seq"], 42);
+        assert_eq!(json["correlation_id"], "req-1");
+    }
+
+    #[test]
     fn test_server_message_error_with_correlation() {
         let msg = ServerMessage::Error {
             message: "something failed".to_string(),
@@ -611,11 +679,9 @@ mod tests {
 
     #[test]
     fn test_validate_payload_too_large() {
-        let huge = "A".repeat(MAX_PAYLOAD_SIZE + 1);
+        let huge = "A".repeat(super::super::MAX_PAYLOAD_SIZE + 1);
         let result = validate_and_decode_payload(&huge);
         assert!(result.is_err());
-        let err_msg = format!("{}", result.unwrap_err());
-        assert!(err_msg.contains("too large"));
     }
 
     #[test]

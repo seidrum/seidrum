@@ -1,14 +1,14 @@
 //! Webhook delivery channel.
 //!
 //! Delivers events by HTTP POST to a configured webhook URL.
-//! Includes retry logic with exponential backoff.
+//! Individual delivery attempts are single-shot; retry logic lives in
+//! [`super::RetryTask`] (Phase 5 stub).
 
 use super::{DeliveryChannel, DeliveryError, DeliveryReceipt, DeliveryResult};
 use crate::delivery::ChannelConfig;
 use async_trait::async_trait;
 use base64::Engine;
 use reqwest::Client;
-use serde::{Deserialize, Serialize};
 use serde_json::json;
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -18,47 +18,22 @@ use tracing::{debug, warn};
 /// Timeout for webhook health check requests.
 const HEALTH_CHECK_TIMEOUT: Duration = Duration::from_secs(5);
 
-/// Configuration for webhook retries.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct WebhookRetryConfig {
-    /// Maximum number of delivery attempts before giving up.
-    pub max_attempts: u32,
-    /// Initial backoff duration in milliseconds.
-    pub initial_backoff_ms: u64,
-    /// Maximum backoff duration in milliseconds.
-    pub max_backoff_ms: u64,
-}
-
-impl Default for WebhookRetryConfig {
-    fn default() -> Self {
-        Self {
-            max_attempts: 5,
-            initial_backoff_ms: 100,
-            max_backoff_ms: 30000,
-        }
-    }
-}
-
 /// Webhook delivery channel.
 /// Sends events as HTTP POST requests to a configured URL.
+///
+/// Individual delivery attempts are single-shot. Retry logic is handled
+/// externally by [`super::RetryTask`] which polls the event store for
+/// failed deliveries and re-invokes the channel.
 pub struct WebhookChannel {
     client: Client,
-    #[allow(dead_code)]
-    retry_config: WebhookRetryConfig,
 }
 
 impl WebhookChannel {
     /// Create a new webhook delivery channel.
-    pub fn new(retry_config: WebhookRetryConfig) -> Arc<Self> {
+    pub fn new() -> Arc<Self> {
         Arc::new(Self {
             client: Client::new(),
-            retry_config,
         })
-    }
-
-    /// Create with default retry configuration.
-    pub fn with_defaults() -> Arc<Self> {
-        Self::new(WebhookRetryConfig::default())
     }
 
     /// Extract URL and headers from ChannelConfig.
@@ -150,13 +125,19 @@ impl DeliveryChannel for WebhookChannel {
             Err(_) => return false,
         };
 
-        let mut req = self.client.get(&url).timeout(HEALTH_CHECK_TIMEOUT);
+        // Use HEAD to avoid triggering side-effects on POST-only endpoints.
+        // Fall back to treating connection success as healthy if HEAD returns
+        // 405 Method Not Allowed.
+        let mut req = self.client.head(&url).timeout(HEALTH_CHECK_TIMEOUT);
         for (key, value) in headers.iter() {
             req = req.header(key, value);
         }
 
         match req.send().await {
-            Ok(resp) => resp.status().is_success(),
+            Ok(resp) => {
+                let status = resp.status();
+                status.is_success() || status == reqwest::StatusCode::METHOD_NOT_ALLOWED
+            }
             Err(_) => false,
         }
     }
@@ -165,14 +146,6 @@ impl DeliveryChannel for WebhookChannel {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn test_webhook_retry_config_default() {
-        let config = WebhookRetryConfig::default();
-        assert_eq!(config.max_attempts, 5);
-        assert_eq!(config.initial_backoff_ms, 100);
-        assert_eq!(config.max_backoff_ms, 30000);
-    }
 
     #[tokio::test]
     async fn test_webhook_extract_config() {
@@ -193,5 +166,10 @@ mod tests {
     async fn test_webhook_extract_config_invalid() {
         let config = ChannelConfig::InProcess;
         assert!(WebhookChannel::extract_config(&config).is_err());
+    }
+
+    #[test]
+    fn test_webhook_channel_new() {
+        let _channel = WebhookChannel::new();
     }
 }

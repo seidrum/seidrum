@@ -2,11 +2,37 @@
 //!
 //! Periodically polls the event store for retryable deliveries,
 //! re-attempts delivery, and handles backoff logic.
+//!
+//! **Status: Phase 5 stub.** The polling and backoff infrastructure is in
+//! place, but `retry_delivery` does not yet re-invoke delivery channels.
+//! Do not rely on this task for automatic retries until Phase 5 is complete.
 
 use crate::storage::{EventStore, RetryableDelivery};
+use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 use std::time::Duration;
 use tracing::{debug, error, info, warn};
+
+/// Configuration for delivery retries (backoff parameters).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RetryConfig {
+    /// Maximum number of delivery attempts before giving up.
+    pub max_attempts: u32,
+    /// Initial backoff duration in milliseconds.
+    pub initial_backoff_ms: u64,
+    /// Maximum backoff duration in milliseconds.
+    pub max_backoff_ms: u64,
+}
+
+impl Default for RetryConfig {
+    fn default() -> Self {
+        Self {
+            max_attempts: 5,
+            initial_backoff_ms: 100,
+            max_backoff_ms: 30000,
+        }
+    }
+}
 
 /// Exponential backoff with jitter for retries.
 pub fn calculate_backoff(attempt: u32, initial_ms: u64, max_ms: u64) -> Duration {
@@ -19,6 +45,10 @@ pub fn calculate_backoff(attempt: u32, initial_ms: u64, max_ms: u64) -> Duration
 }
 
 /// Background task for retrying failed deliveries.
+///
+/// **Phase 5 stub:** The task polls the store and computes backoff, but
+/// `retry_delivery` currently logs a warning and skips actual re-delivery.
+/// Wire up delivery channel lookup + re-invocation in Phase 5.
 pub struct RetryTask {
     store: Arc<dyn EventStore>,
     max_attempts: u32,
@@ -107,6 +137,14 @@ impl RetryTask {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_retry_config_default() {
+        let config = RetryConfig::default();
+        assert_eq!(config.max_attempts, 5);
+        assert_eq!(config.initial_backoff_ms, 100);
+        assert_eq!(config.max_backoff_ms, 30000);
+    }
 
     #[test]
     fn test_calculate_backoff() {

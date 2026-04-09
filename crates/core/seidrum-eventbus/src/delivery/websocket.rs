@@ -1,6 +1,11 @@
-//! WebSocket delivery channel.
+//! Standalone WebSocket delivery channel.
 //!
 //! Delivers events over a WebSocket connection by writing JSON frames.
+//!
+//! This is a **standalone delivery channel** for pushing events to externally
+//! managed WebSocket connections (e.g., when embedding the bus in your own
+//! server). It is separate from [`crate::transport::ws::WebSocketServer`],
+//! which manages its own connections and forwarding internally.
 
 use super::{DeliveryChannel, DeliveryError, DeliveryReceipt, DeliveryResult};
 use crate::delivery::ChannelConfig;

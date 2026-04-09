@@ -11,7 +11,7 @@ use thiserror::Error;
 
 pub use in_process::InProcessChannel;
 pub use registry::ChannelRegistry;
-pub use retry::{calculate_backoff, RetryTask};
+pub use retry::{calculate_backoff, RetryConfig, RetryTask};
 pub use webhook::WebhookChannel;
 pub use websocket::{WebSocketChannel, WebSocketMessage};
 

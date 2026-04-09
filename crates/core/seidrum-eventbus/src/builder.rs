@@ -7,6 +7,7 @@ use crate::EventBusError;
 use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::Duration;
+use tokio::sync::watch;
 use tokio::task::JoinHandle;
 
 /// Builder for constructing an EventBus with configurable options.
@@ -26,7 +27,8 @@ const DEFAULT_RETENTION: Duration = Duration::from_secs(86400);
 /// Handles to background tasks spawned by the builder.
 ///
 /// Callers can use these handles to detect if a server task panicked or exited
-/// unexpectedly. Dropping the handles does **not** cancel the tasks.
+/// unexpectedly. Call [`BusHandles::shutdown`] to gracefully stop transport
+/// servers. Dropping the handles does **not** cancel the tasks.
 pub struct BusHandles {
     /// The constructed event bus.
     pub bus: Arc<dyn EventBus>,
@@ -36,6 +38,15 @@ pub struct BusHandles {
     pub ws_server: Option<JoinHandle<()>>,
     /// Handle to the HTTP server task, if configured.
     pub http_server: Option<JoinHandle<()>>,
+    /// Send `true` to gracefully shut down all transport servers.
+    shutdown_tx: watch::Sender<bool>,
+}
+
+impl BusHandles {
+    /// Signal all transport servers to shut down gracefully.
+    pub fn shutdown(&self) {
+        let _ = self.shutdown_tx.send(true);
+    }
 }
 
 impl EventBusBuilder {
@@ -86,19 +97,28 @@ impl EventBusBuilder {
     /// need to monitor or await the background tasks.
     pub async fn build(self) -> crate::Result<Arc<dyn EventBus>> {
         let handles = self.build_with_handles().await?;
-        Ok(handles.bus)
+        let bus = handles.bus;
+        // Intentionally leak the shutdown sender so transport servers
+        // remain running for the lifetime of the process. Callers who
+        // need graceful shutdown should use build_with_handles() instead.
+        std::mem::forget(handles.shutdown_tx);
+        Ok(bus)
     }
 
     /// Build the EventBus and return handles to all spawned background tasks.
     ///
     /// This gives the caller the ability to detect panics or unexpected exits
-    /// from the compaction task or transport servers.
+    /// from the compaction task or transport servers. Call
+    /// [`BusHandles::shutdown`] to gracefully stop transport servers.
     pub async fn build_with_handles(self) -> crate::Result<BusHandles> {
         let store = self
             .store
             .ok_or_else(|| EventBusError::Config("storage backend is required".to_string()))?;
 
         let bus = Arc::new(EventBusImpl::new(Arc::clone(&store)));
+
+        // Shared shutdown signal for all transport servers
+        let (shutdown_tx, shutdown_rx) = watch::channel(false);
 
         // Start compaction task
         let compaction_task =
@@ -110,8 +130,9 @@ impl EventBusBuilder {
         // Start WebSocket server if configured
         let ws_handle = if let Some(addr) = self.ws_addr {
             let bus_clone = Arc::clone(&bus);
+            let rx = shutdown_rx.clone();
             Some(tokio::spawn(async move {
-                let ws_server = WebSocketServer::new(bus_clone);
+                let ws_server = WebSocketServer::new(bus_clone, rx);
                 if let Err(e) = ws_server.start(addr).await {
                     tracing::error!("WebSocket server error: {}", e);
                 }
@@ -124,8 +145,9 @@ impl EventBusBuilder {
         let http_handle = if let Some(addr) = self.http_addr {
             let bus_clone = Arc::clone(&bus);
             let registry = Arc::new(ChannelRegistry::new());
+            let rx = shutdown_rx.clone();
             Some(tokio::spawn(async move {
-                let http_server = HttpServer::new(bus_clone, registry);
+                let http_server = HttpServer::new(bus_clone, registry, rx);
                 if let Err(e) = http_server.start(addr).await {
                     tracing::error!("HTTP server error: {}", e);
                 }
@@ -139,6 +161,7 @@ impl EventBusBuilder {
             compaction: compaction_handle,
             ws_server: ws_handle,
             http_server: http_handle,
+            shutdown_tx,
         })
     }
 }
@@ -194,5 +217,18 @@ mod tests {
         // No transport servers configured
         assert!(handles.ws_server.is_none());
         assert!(handles.http_server.is_none());
+    }
+
+    #[tokio::test]
+    async fn test_builder_shutdown() {
+        let store = Arc::new(InMemoryEventStore::new());
+        let handles = EventBusBuilder::new()
+            .storage(store)
+            .build_with_handles()
+            .await
+            .unwrap();
+
+        // Shutdown should not panic even without transport servers
+        handles.shutdown();
     }
 }
