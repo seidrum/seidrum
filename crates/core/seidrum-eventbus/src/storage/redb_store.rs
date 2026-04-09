@@ -237,13 +237,26 @@ impl EventStore for RedbEventStore {
                     delivery.status = status;
                     delivery.attempts += 1;
                     delivery.last_attempt = Some(RedbEventStore::current_time_ms());
+                    delivery.next_retry = if status == DeliveryStatus::Failed {
+                        let backoff_ms =
+                            100_u64.saturating_mul(2_u64.saturating_pow(delivery.attempts));
+                        Some(RedbEventStore::current_time_ms() + backoff_ms.min(30_000))
+                    } else {
+                        None
+                    };
                 } else {
+                    let now = RedbEventStore::current_time_ms();
+                    let next_retry = if status == DeliveryStatus::Failed {
+                        Some(now + 100)
+                    } else {
+                        None
+                    };
                     event.deliveries.push(DeliveryRecord {
                         subscriber_id,
                         status,
                         attempts: 1,
-                        last_attempt: Some(RedbEventStore::current_time_ms()),
-                        next_retry: None,
+                        last_attempt: Some(now),
+                        next_retry,
                         error: None,
                     });
                 }
@@ -316,7 +329,10 @@ impl EventStore for RedbEventStore {
                     let event: StoredEvent = serde_json::from_slice(&bytes).map_err(|e| {
                         StorageError::OperationFailed(format!("failed to deserialize: {}", e))
                     })?;
-                    results.push(event);
+                    // Verify actual status matches index (guards against stale entries).
+                    if event.status == status {
+                        results.push(event);
+                    }
                 }
             }
 
@@ -418,11 +434,14 @@ impl EventStore for RedbEventStore {
                     StorageError::OperationFailed(format!("failed to deserialize: {}", e))
                 })?;
 
+                let now = RedbEventStore::current_time_ms();
                 for delivery in &event.deliveries {
                     if results.len() >= limit {
                         break;
                     }
-                    if delivery.status == DeliveryStatus::Failed && delivery.attempts < max_attempts
+                    if delivery.status == DeliveryStatus::Failed
+                        && delivery.attempts < max_attempts
+                        && delivery.next_retry.is_none_or(|t| t <= now)
                     {
                         results.push(RetryableDelivery {
                             seq: event.seq,
@@ -447,12 +466,15 @@ impl EventStore for RedbEventStore {
             RedbEventStore::current_time_ms().saturating_sub(older_than.as_millis() as u64);
 
         tokio::task::spawn_blocking(move || {
-            // First pass: read and collect items to delete
+            // Single write transaction: identify candidates and delete atomically.
+            // This prevents TOCTOU races where an event's status could change
+            // between identification and deletion.
+            let write_txn = db.begin_write().map_err(|e| {
+                StorageError::DatabaseError(format!("failed to begin write: {}", e))
+            })?;
+
             let to_delete: Vec<(u64, String, u8)> = {
-                let read_txn = db.begin_read().map_err(|e| {
-                    StorageError::DatabaseError(format!("failed to begin read: {}", e))
-                })?;
-                let events_table = read_txn.open_table(EVENTS_TABLE).map_err(|e| {
+                let events_table = write_txn.open_table(EVENTS_TABLE).map_err(|e| {
                     StorageError::DatabaseError(format!("failed to open events table: {}", e))
                 })?;
 
@@ -479,13 +501,10 @@ impl EventStore for RedbEventStore {
             };
 
             if to_delete.is_empty() {
+                // Abort the write transaction — nothing to do.
+                let _ = write_txn.abort();
                 return Ok(0);
             }
-
-            // Second pass: delete collected items
-            let write_txn = db.begin_write().map_err(|e| {
-                StorageError::DatabaseError(format!("failed to begin write: {}", e))
-            })?;
 
             let removed = to_delete.len() as u64;
 

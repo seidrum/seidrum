@@ -50,6 +50,10 @@ pub enum EventBusError {
     #[error("request timed out")]
     RequestTimeout,
 
+    /// The reply channel was closed before a reply was received.
+    #[error("reply channel closed")]
+    ReplyChannelClosed,
+
     /// An internal error.
     #[error("internal error: {0}")]
     Internal(String),

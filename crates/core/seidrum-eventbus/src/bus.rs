@@ -67,8 +67,16 @@ pub trait EventBus: Send + Sync + 'static {
     /// Similar to subscribe(), but the returned RequestSubscription yields
     /// (RequestMessage, Replier) pairs. The handler can call replier.reply()
     /// to send a response to the requester.
-    async fn serve(&self, subject: &str, opts: SubscribeOpts)
-        -> crate::Result<RequestSubscription>;
+    ///
+    /// The handler always uses Async mode and InProcess delivery. Use `priority`
+    /// to control ordering relative to other subscribers on the same subject.
+    async fn serve(
+        &self,
+        subject: &str,
+        priority: u32,
+        timeout: Duration,
+        filter: Option<EventFilter>,
+    ) -> crate::Result<RequestSubscription>;
 
     /// Register a sync interceptor for a subject pattern.
     /// Returns the subscription ID. The interceptor runs in priority order
@@ -150,11 +158,11 @@ impl EventBus for EventBusImpl {
     async fn serve(
         &self,
         subject: &str,
-        opts: SubscribeOpts,
+        priority: u32,
+        timeout: Duration,
+        filter: Option<EventFilter>,
     ) -> crate::Result<RequestSubscription> {
-        self.engine
-            .serve(subject, opts.priority, opts.timeout, opts.filter)
-            .await
+        self.engine.serve(subject, priority, timeout, filter).await
     }
 
     async fn intercept(

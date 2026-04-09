@@ -450,14 +450,10 @@ async fn test_request_reply_basic() {
     // Spawn a handler task
     let bus_clone = Arc::clone(&bus);
     tokio::spawn(async move {
-        let opts = SubscribeOpts {
-            priority: 10,
-            mode: SubscriptionMode::Async,
-            channel: ChannelConfig::InProcess,
-            timeout: Duration::from_secs(5),
-            filter: None,
-        };
-        let mut sub = bus_clone.serve("test.request", opts).await.unwrap();
+        let mut sub = bus_clone
+            .serve("test.request", 10, Duration::from_secs(5), None)
+            .await
+            .unwrap();
 
         while let Some((req_msg, replier)) = sub.rx.recv().await {
             let response = format!("echo: {}", String::from_utf8_lossy(&req_msg.payload));

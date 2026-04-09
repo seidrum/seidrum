@@ -1,14 +1,74 @@
-use crate::bus::{EventBus, EventBusImpl};
+use crate::bus::{EventBus, EventBusImpl, SubscribeOpts, Subscription};
 use crate::delivery::ChannelRegistry;
+use crate::dispatch::{EventFilter, Interceptor, SubscriptionInfo};
+use crate::request_reply::RequestSubscription;
 use crate::storage::compaction::CompactionTask;
 use crate::storage::EventStore;
 use crate::transport::{HttpServer, WebSocketServer};
 use crate::EventBusError;
+use async_trait::async_trait;
 use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::watch;
 use tokio::task::JoinHandle;
+
+/// Wrapper that holds the bus and keeps the shutdown sender alive.
+/// When this is dropped, the sender is dropped too, signaling shutdown.
+struct OwnedBus {
+    inner: Arc<dyn EventBus>,
+    _shutdown: watch::Sender<bool>,
+}
+
+#[async_trait]
+impl EventBus for OwnedBus {
+    async fn publish(&self, subject: &str, payload: &[u8]) -> crate::Result<u64> {
+        self.inner.publish(subject, payload).await
+    }
+    async fn subscribe(&self, pattern: &str, opts: SubscribeOpts) -> crate::Result<Subscription> {
+        self.inner.subscribe(pattern, opts).await
+    }
+    async fn unsubscribe(&self, id: &str) -> crate::Result<()> {
+        self.inner.unsubscribe(id).await
+    }
+    async fn request(
+        &self,
+        subject: &str,
+        payload: &[u8],
+        timeout: Duration,
+    ) -> crate::Result<Vec<u8>> {
+        self.inner.request(subject, payload, timeout).await
+    }
+    async fn serve(
+        &self,
+        subject: &str,
+        priority: u32,
+        timeout: Duration,
+        filter: Option<EventFilter>,
+    ) -> crate::Result<RequestSubscription> {
+        self.inner.serve(subject, priority, timeout, filter).await
+    }
+    async fn intercept(
+        &self,
+        pattern: &str,
+        priority: u32,
+        interceptor: Arc<dyn Interceptor>,
+        timeout: Option<Duration>,
+    ) -> crate::Result<String> {
+        self.inner
+            .intercept(pattern, priority, interceptor, timeout)
+            .await
+    }
+    async fn list_subscriptions(
+        &self,
+        filter: Option<&str>,
+    ) -> crate::Result<Vec<SubscriptionInfo>> {
+        self.inner.list_subscriptions(filter).await
+    }
+    async fn metrics(&self) -> crate::Result<crate::bus::BusMetrics> {
+        self.inner.metrics().await
+    }
+}
 
 /// Builder for constructing an EventBus with configurable options.
 pub struct EventBusBuilder {
@@ -98,11 +158,13 @@ impl EventBusBuilder {
     pub async fn build(self) -> crate::Result<Arc<dyn EventBus>> {
         let handles = self.build_with_handles().await?;
         let bus = handles.bus;
-        // Intentionally leak the shutdown sender so transport servers
-        // remain running for the lifetime of the process. Callers who
-        // need graceful shutdown should use build_with_handles() instead.
-        std::mem::forget(handles.shutdown_tx);
-        Ok(bus)
+        // Wrap the bus with the shutdown sender so that:
+        // - The sender stays alive as long as the bus Arc is alive
+        // - Transport servers shut down when the last Arc is dropped
+        Ok(Arc::new(OwnedBus {
+            inner: bus,
+            _shutdown: handles.shutdown_tx,
+        }))
     }
 
     /// Build the EventBus and return handles to all spawned background tasks.
@@ -121,8 +183,12 @@ impl EventBusBuilder {
         let (shutdown_tx, shutdown_rx) = watch::channel(false);
 
         // Start compaction task
-        let compaction_task =
-            CompactionTask::new(Arc::clone(&store), self.compaction_interval, self.retention);
+        let compaction_task = CompactionTask::new(
+            Arc::clone(&store),
+            self.compaction_interval,
+            self.retention,
+            shutdown_rx.clone(),
+        );
         let compaction_handle = tokio::spawn(async move {
             compaction_task.run().await;
         });

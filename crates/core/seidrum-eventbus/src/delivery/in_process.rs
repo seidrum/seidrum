@@ -16,13 +16,6 @@ impl InProcessChannel {
     }
 }
 
-impl Default for InProcessChannel {
-    fn default() -> Self {
-        let (tx, _rx) = mpsc::unbounded_channel();
-        Self { tx }
-    }
-}
-
 #[async_trait]
 impl DeliveryChannel for InProcessChannel {
     async fn deliver(

@@ -78,13 +78,27 @@ impl EventStore for InMemoryEventStore {
                 delivery.status = status;
                 delivery.attempts += 1;
                 delivery.last_attempt = Some(Self::current_time_ms());
+                delivery.next_retry = if status == DeliveryStatus::Failed {
+                    // Exponential backoff: 100ms * 2^attempts, capped at 30s
+                    let backoff_ms =
+                        100_u64.saturating_mul(2_u64.saturating_pow(delivery.attempts));
+                    Some(Self::current_time_ms() + backoff_ms.min(30_000))
+                } else {
+                    None
+                };
             } else {
+                let now = Self::current_time_ms();
+                let next_retry = if status == DeliveryStatus::Failed {
+                    Some(now + 100) // first retry after 100ms
+                } else {
+                    None
+                };
                 event.deliveries.push(DeliveryRecord {
                     subscriber_id: subscriber_id.to_string(),
                     status,
                     attempts: 1,
-                    last_attempt: Some(Self::current_time_ms()),
-                    next_retry: None,
+                    last_attempt: Some(now),
+                    next_retry,
                     error: None,
                 });
             }
@@ -131,9 +145,13 @@ impl EventStore for InMemoryEventStore {
         let events = self.events.read().await;
         let mut retryable = Vec::new();
 
+        let now = Self::current_time_ms();
         for event in events.iter() {
             for delivery in &event.deliveries {
-                if delivery.status == DeliveryStatus::Failed && delivery.attempts < max_attempts {
+                if delivery.status == DeliveryStatus::Failed
+                    && delivery.attempts < max_attempts
+                    && delivery.next_retry.is_none_or(|t| t <= now)
+                {
                     retryable.push(RetryableDelivery {
                         seq: event.seq,
                         subject: event.subject.clone(),
@@ -150,7 +168,7 @@ impl EventStore for InMemoryEventStore {
 
     async fn compact(&self, older_than: Duration) -> StorageResult<u64> {
         let now = Self::current_time_ms();
-        let threshold = now - older_than.as_millis() as u64;
+        let threshold = now.saturating_sub(older_than.as_millis() as u64);
 
         let mut events = self.events.write().await;
         let original_len = events.len();

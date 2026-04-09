@@ -1,5 +1,5 @@
 use serde::{Deserialize, Serialize};
-use tracing::debug;
+use tracing::{debug, warn};
 
 /// An event filter narrows which events a subscription receives beyond subject matching.
 ///
@@ -16,18 +16,23 @@ use tracing::debug;
 /// - `Any(filters)`: Logical OR — any sub-filter must match.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum EventFilter {
-    /// Match a top-level JSON field against an exact value.
+    /// Match a JSON field against an exact value. Supports dot-separated paths
+    /// for nested access (e.g., `"user.id"` resolves `root["user"]["id"]`).
     FieldEquals {
         path: String,
         value: serde_json::Value,
     },
-    /// Match a top-level JSON field containing a substring.
+    /// Match a JSON field containing a substring. Supports dot-separated paths.
+    /// For non-string values, the JSON serialization is searched.
     FieldContains { path: String, substring: String },
     /// All sub-filters must match (logical AND). Empty list matches everything.
     All(Vec<EventFilter>),
     /// Any sub-filter must match (logical OR). Empty list matches nothing.
     Any(Vec<EventFilter>),
 }
+
+/// Maximum nesting depth for `All`/`Any` filter combinators.
+const MAX_FILTER_DEPTH: usize = 16;
 
 impl EventFilter {
     /// Evaluate the filter against a raw payload (bytes).
@@ -43,10 +48,17 @@ impl EventFilter {
             debug!("non-JSON payload encountered, passing through all filters");
             return true;
         };
-        self.matches_value(&value)
+        self.matches_inner(&value, 0)
     }
 
-    fn matches_value(&self, root: &serde_json::Value) -> bool {
+    fn matches_inner(&self, root: &serde_json::Value, depth: usize) -> bool {
+        if depth > MAX_FILTER_DEPTH {
+            warn!(
+                "EventFilter nesting depth exceeded (max {}), rejecting",
+                MAX_FILTER_DEPTH
+            );
+            return false;
+        }
         match self {
             EventFilter::FieldEquals { path, value } => {
                 Self::resolve_path(root, path).is_some_and(|v| v == value)
@@ -56,8 +68,8 @@ impl EventFilter {
                     serde_json::Value::String(s) => s.contains(substring.as_str()),
                     other => other.to_string().contains(substring.as_str()),
                 }),
-            EventFilter::All(filters) => filters.iter().all(|f| f.matches_value(root)),
-            EventFilter::Any(filters) => filters.iter().any(|f| f.matches_value(root)),
+            EventFilter::All(filters) => filters.iter().all(|f| f.matches_inner(root, depth + 1)),
+            EventFilter::Any(filters) => filters.iter().any(|f| f.matches_inner(root, depth + 1)),
         }
     }
 

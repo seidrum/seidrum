@@ -16,6 +16,7 @@
 use crate::dispatch::DispatchEngine;
 use crate::EventBusError;
 use serde::{Deserialize, Serialize};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::mpsc;
@@ -35,14 +36,24 @@ pub struct DispatchedEvent {
 }
 
 /// A handle for sending a reply to a request.
+///
+/// A reply can only be sent once. Subsequent calls to [`reply()`] return an error.
 pub struct Replier {
     engine: Arc<DispatchEngine>,
     reply_subject: String,
+    replied: AtomicBool,
 }
 
 impl Replier {
     /// Send a reply to the requester.
+    ///
+    /// Returns an error if a reply has already been sent.
     pub async fn reply(&self, payload: &[u8]) -> crate::Result<u64> {
+        if self.replied.swap(true, Ordering::AcqRel) {
+            return Err(EventBusError::Internal(
+                "reply already sent for this request".to_string(),
+            ));
+        }
         self.engine.publish(&self.reply_subject, payload).await
     }
 }
@@ -69,16 +80,28 @@ pub struct RequestMessage {
 /// A subscription for handling requests.
 ///
 /// When you call serve(), you get a RequestSubscription that allows you to
-/// receive incoming requests and send replies. Drop it to unsubscribe.
+/// receive incoming requests and send replies. Dropping it unsubscribes from
+/// the bus and cleans up the bridge task.
 pub struct RequestSubscription {
     /// The subscription ID (for cleanup).
     pub id: String,
     /// Channel for receiving request messages with repliers.
     pub rx: mpsc::Receiver<(RequestMessage, Replier)>,
+    /// Engine reference for unsubscribe on drop.
+    engine: Arc<DispatchEngine>,
 }
 
 impl Drop for RequestSubscription {
     fn drop(&mut self) {
+        let engine = Arc::clone(&self.engine);
+        let id = self.id.clone();
+        // Spawn cleanup task — the async unsubscribe removes the trie entry
+        // and sender, which causes the bridge task's event_rx to close.
+        tokio::spawn(async move {
+            if let Err(e) = engine.unsubscribe(&id).await {
+                debug!(subscription_id = %id, error = %e, "RequestSubscription cleanup failed");
+            }
+        });
         debug!(subscription_id = %self.id, "RequestSubscription dropped");
     }
 }
@@ -148,7 +171,7 @@ impl DispatchEngine {
             }
             Ok(None) => {
                 warn!(subject = %subject, "reply channel closed without message");
-                Err(EventBusError::RequestTimeout)
+                Err(EventBusError::ReplyChannelClosed)
             }
             Err(_timeout) => {
                 warn!(subject = %subject, "request timed out");
@@ -221,6 +244,7 @@ impl DispatchEngine {
                 let replier = Replier {
                     engine: Arc::clone(&engine),
                     reply_subject,
+                    replied: AtomicBool::new(false),
                 };
 
                 if req_tx.send((req_msg, replier)).await.is_err() {
@@ -234,6 +258,7 @@ impl DispatchEngine {
         Ok(RequestSubscription {
             id: sub_id,
             rx: req_rx,
+            engine: Arc::clone(self),
         })
     }
 }

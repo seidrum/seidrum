@@ -34,7 +34,7 @@ use crate::storage::{DeliveryStatus, EventStatus, EventStore, StoredEvent};
 use crate::EventBusError;
 use std::collections::HashMap;
 use std::sync::Arc;
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::Duration;
 use tokio::sync::mpsc;
 use tokio::sync::RwLock;
 use tracing::{debug, warn};
@@ -148,19 +148,27 @@ impl DispatchEngine {
         Self::validate_subject(subject)?;
         Self::validate_payload(payload)?;
 
-        let event = StoredEvent {
-            seq: 0,
-            subject: subject.to_string(),
-            payload: payload.to_vec(),
-            stored_at: Self::current_time_ms(),
-            status: EventStatus::Pending,
-            deliveries: vec![],
-            reply_subject: reply_subject.clone(),
-        };
+        // Skip persistence for ephemeral _reply.* subjects (request/reply responses).
+        // These are one-shot messages consumed immediately; persisting them would
+        // cause unbounded storage growth with no benefit.
+        let is_reply = subject.starts_with("_reply.");
 
-        // 1. PERSIST (write-ahead)
-        let seq = self.store.append(&event).await?;
-        let event_reply_subject = event.reply_subject;
+        let seq = if is_reply {
+            0 // No durable seq for reply events
+        } else {
+            let event = StoredEvent {
+                seq: 0,
+                subject: subject.to_string(),
+                payload: payload.to_vec(),
+                stored_at: 0, // overwritten by store.append()
+                status: EventStatus::Pending,
+                deliveries: vec![],
+                reply_subject: reply_subject.clone(),
+            };
+            // 1. PERSIST (write-ahead)
+            self.store.append(&event).await?
+        };
+        let event_reply_subject = reply_subject;
 
         // 2. RESOLVE: find matching subscriptions (release lock after lookup)
         let mut matches = {
@@ -169,19 +177,23 @@ impl DispatchEngine {
         };
 
         if matches.is_empty() {
-            if let Err(e) = self.store.update_status(seq, EventStatus::Delivered).await {
-                warn!(seq = seq, error = %e, "failed to update status to Delivered (no subscribers)");
+            if !is_reply {
+                if let Err(e) = self.store.update_status(seq, EventStatus::Delivered).await {
+                    warn!(seq = seq, error = %e, "failed to update status to Delivered (no subscribers)");
+                }
             }
             return Ok(seq);
         }
 
         // Update status to Dispatching
-        if let Err(e) = self
-            .store
-            .update_status(seq, EventStatus::Dispatching)
-            .await
-        {
-            warn!(seq = seq, error = %e, "failed to update status to Dispatching");
+        if !is_reply {
+            if let Err(e) = self
+                .store
+                .update_status(seq, EventStatus::Dispatching)
+                .await
+            {
+                warn!(seq = seq, error = %e, "failed to update status to Dispatching");
+            }
         }
 
         // 3. FILTER: apply EventFilter on each subscription
@@ -194,8 +206,10 @@ impl DispatchEngine {
         });
 
         if matches.is_empty() {
-            if let Err(e) = self.store.update_status(seq, EventStatus::Delivered).await {
-                warn!(seq = seq, error = %e, "failed to update status to Delivered (all filtered)");
+            if !is_reply {
+                if let Err(e) = self.store.update_status(seq, EventStatus::Delivered).await {
+                    warn!(seq = seq, error = %e, "failed to update status to Delivered (all filtered)");
+                }
             }
             return Ok(seq);
         }
@@ -212,18 +226,36 @@ impl DispatchEngine {
             .cloned()
             .collect();
 
-        // 4. SYNC CHAIN: process interceptors sequentially in priority order
+        // 4. SYNC CHAIN: process interceptors sequentially in priority order.
+        // Snapshot the interceptors and senders we need, then release the lock
+        // so that subscribe/unsubscribe is not blocked during interceptor execution.
         let mut dropped = false;
         {
-            let state = self.state.read().await;
-            for entry in &sync_entries {
-                if let Some(interceptor) = state.interceptors.get(&entry.id) {
-                    let interceptor = Arc::clone(interceptor);
-                    let timeout = entry.timeout;
+            type SyncEntry = (
+                String,
+                Duration,
+                Option<Arc<dyn Interceptor>>,
+                Option<mpsc::Sender<crate::request_reply::DispatchedEvent>>,
+            );
+            let sync_snapshot: Vec<SyncEntry> = {
+                let state = self.state.read().await;
+                sync_entries
+                    .iter()
+                    .map(|entry| {
+                        let interceptor = state.interceptors.get(&entry.id).cloned();
+                        let sender = state.senders.get(&entry.id).cloned();
+                        (entry.id.clone(), entry.timeout, interceptor, sender)
+                    })
+                    .collect()
+            };
+            // Lock is released here.
 
-                    // Execute interceptor with timeout enforcement
+            for (entry_id, timeout, interceptor_opt, sender_opt) in &sync_snapshot {
+                if let Some(interceptor) = interceptor_opt {
+                    let interceptor = Arc::clone(interceptor);
+
                     let result = tokio::time::timeout(
-                        timeout,
+                        *timeout,
                         interceptor.intercept(subject, &mut current_payload),
                     )
                     .await;
@@ -232,78 +264,75 @@ impl DispatchEngine {
                         Ok(InterceptResult::Pass) => {
                             if let Err(e) = self
                                 .store
-                                .record_delivery(seq, &entry.id, DeliveryStatus::Delivered)
+                                .record_delivery(seq, entry_id, DeliveryStatus::Delivered)
                                 .await
                             {
-                                warn!(seq = seq, subscriber = entry.id, error = %e, "failed to record interceptor delivery");
+                                warn!(seq = seq, subscriber = entry_id, error = %e, "failed to record interceptor delivery");
                             }
                         }
                         Ok(InterceptResult::Modified) => {
-                            debug!(subscriber = entry.id, "interceptor modified payload");
+                            debug!(subscriber = entry_id, "interceptor modified payload");
                             if let Err(e) = self
                                 .store
-                                .record_delivery(seq, &entry.id, DeliveryStatus::Delivered)
+                                .record_delivery(seq, entry_id, DeliveryStatus::Delivered)
                                 .await
                             {
-                                warn!(seq = seq, subscriber = entry.id, error = %e, "failed to record interceptor delivery");
+                                warn!(seq = seq, subscriber = entry_id, error = %e, "failed to record interceptor delivery");
                             }
                         }
                         Ok(InterceptResult::Drop) => {
-                            debug!(subscriber = entry.id, "interceptor dropped event");
+                            debug!(subscriber = entry_id, "interceptor dropped event");
                             if let Err(e) = self
                                 .store
-                                .record_delivery(seq, &entry.id, DeliveryStatus::Delivered)
+                                .record_delivery(seq, entry_id, DeliveryStatus::Delivered)
                                 .await
                             {
-                                warn!(seq = seq, subscriber = entry.id, error = %e, "failed to record interceptor delivery");
+                                warn!(seq = seq, subscriber = entry_id, error = %e, "failed to record interceptor delivery");
                             }
                             dropped = true;
                             break;
                         }
                         Err(_timeout) => {
                             warn!(
-                                subscriber = entry.id,
+                                subscriber = entry_id,
                                 timeout_ms = timeout.as_millis() as u64,
                                 "sync interceptor timed out, skipping"
                             );
-                            // Timed-out interceptor is skipped, chain continues
                             if let Err(e) = self
                                 .store
-                                .record_delivery(seq, &entry.id, DeliveryStatus::Failed)
+                                .record_delivery(seq, entry_id, DeliveryStatus::Failed)
                                 .await
                             {
-                                warn!(seq = seq, subscriber = entry.id, error = %e, "failed to record timeout");
+                                warn!(seq = seq, subscriber = entry_id, error = %e, "failed to record timeout");
                             }
                         }
                     }
-                } else {
+                } else if let Some(tx) = sender_opt {
                     // Sync subscriber without an interceptor — deliver via channel
-                    if let Some(tx) = state.senders.get(&entry.id) {
-                        let event = crate::request_reply::DispatchedEvent {
-                            payload: current_payload.clone(),
-                            reply_subject: event_reply_subject.clone(),
-                            subject: subject.to_string(),
-                            seq,
-                        };
-                        match tx.try_send(event) {
-                            Ok(()) => {
-                                if let Err(e) = self
-                                    .store
-                                    .record_delivery(seq, &entry.id, DeliveryStatus::Delivered)
-                                    .await
-                                {
-                                    warn!(seq = seq, subscriber = entry.id, error = %e, "failed to record delivery");
-                                }
+                    let event = crate::request_reply::DispatchedEvent {
+                        payload: current_payload.clone(),
+                        reply_subject: event_reply_subject.clone(),
+                        subject: subject.to_string(),
+                        seq,
+                    };
+                    match tx.try_send(event) {
+                        Ok(()) => {
+                            if let Err(e) = self
+                                .store
+                                .record_delivery(seq, entry_id, DeliveryStatus::Delivered)
+                                .await
+                            {
+                                warn!(seq = seq, subscriber = entry_id, error = %e, "failed to record delivery");
                             }
-                            Err(_) => {
-                                warn!(subscriber = entry.id, "sync channel delivery failed");
-                                if let Err(e) = self
-                                    .store
-                                    .record_delivery(seq, &entry.id, DeliveryStatus::Failed)
-                                    .await
-                                {
-                                    warn!(seq = seq, subscriber = entry.id, error = %e, "failed to record failed delivery");
-                                }
+                        }
+                        Err(_) => {
+                            warn!(subscriber = entry_id, "sync channel delivery failed");
+                            if let Err(e) = self
+                                .store
+                                .record_delivery(seq, entry_id, DeliveryStatus::Failed)
+                                .await
+                            {
+                                warn!(seq = seq, subscriber = entry_id, error = %e, "failed to record failed delivery");
                             }
                         }
                     }
@@ -313,8 +342,10 @@ impl DispatchEngine {
 
         if dropped {
             // Event was intentionally dropped by an interceptor — mark as Delivered.
-            if let Err(e) = self.store.update_status(seq, EventStatus::Delivered).await {
-                warn!(seq = seq, error = %e, "failed to update status after drop");
+            if !is_reply {
+                if let Err(e) = self.store.update_status(seq, EventStatus::Delivered).await {
+                    warn!(seq = seq, error = %e, "failed to update status after drop");
+                }
             }
             return Ok(seq);
         }
@@ -391,13 +422,15 @@ impl DispatchEngine {
         }
 
         // 6. FINALIZE
-        let final_status = if any_failed {
-            EventStatus::PartiallyDelivered
-        } else {
-            EventStatus::Delivered
-        };
-        if let Err(e) = self.store.update_status(seq, final_status).await {
-            warn!(seq = seq, error = %e, "failed to update final status");
+        if !is_reply {
+            let final_status = if any_failed {
+                EventStatus::PartiallyDelivered
+            } else {
+                EventStatus::Delivered
+            };
+            if let Err(e) = self.store.update_status(seq, final_status).await {
+                warn!(seq = seq, error = %e, "failed to update final status");
+            }
         }
 
         Ok(seq)
@@ -518,13 +551,6 @@ impl DispatchEngine {
                 mode: format!("{:?}", e.mode),
             })
             .collect())
-    }
-
-    fn current_time_ms() -> u64 {
-        SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_millis() as u64
     }
 }
 
