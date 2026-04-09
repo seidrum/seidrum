@@ -2,6 +2,7 @@ use crate::delivery::ChannelConfig;
 use crate::dispatch::{
     DispatchEngine, EventFilter, Interceptor, SubscriptionInfo, SubscriptionMode,
 };
+use crate::request_reply::RequestSubscription;
 use crate::storage::EventStore;
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
@@ -21,7 +22,7 @@ pub struct BusMetrics {
 #[derive(Debug)]
 pub struct Subscription {
     pub id: String,
-    pub rx: tokio::sync::mpsc::Receiver<Vec<u8>>,
+    pub rx: tokio::sync::mpsc::Receiver<crate::request_reply::DispatchedEvent>,
 }
 
 /// Options for subscribing.
@@ -47,6 +48,27 @@ pub trait EventBus: Send + Sync + 'static {
 
     /// Remove a subscription by ID.
     async fn unsubscribe(&self, id: &str) -> crate::Result<()>;
+
+    /// Publish a request and wait for a reply.
+    ///
+    /// Generates a unique reply subject, publishes the request to the target
+    /// subject with the reply_subject set, and waits for a response.
+    /// Returns the reply payload or `Err(RequestTimeout)` if no reply arrives
+    /// within the timeout duration.
+    async fn request(
+        &self,
+        subject: &str,
+        payload: &[u8],
+        timeout: Duration,
+    ) -> crate::Result<Vec<u8>>;
+
+    /// Register a request handler on a subject.
+    ///
+    /// Similar to subscribe(), but the returned RequestSubscription yields
+    /// (RequestMessage, Replier) pairs. The handler can call replier.reply()
+    /// to send a response to the requester.
+    async fn serve(&self, subject: &str, opts: SubscribeOpts)
+        -> crate::Result<RequestSubscription>;
 
     /// Register a sync interceptor for a subject pattern.
     /// Returns the subscription ID. The interceptor runs in priority order
@@ -85,6 +107,15 @@ impl EventBusImpl {
 #[async_trait]
 impl EventBus for EventBusImpl {
     async fn publish(&self, subject: &str, payload: &[u8]) -> crate::Result<u64> {
+        // Reject publication to reserved internal subjects.
+        // _reply.* subjects are used for request/reply routing and must not be
+        // published to directly — only Replier::reply() may do so internally.
+        if subject.starts_with("_reply.") {
+            return Err(crate::EventBusError::InvalidSubject(
+                "subjects starting with '_reply.' are reserved for internal request/reply routing"
+                    .to_string(),
+            ));
+        }
         self.engine.publish(subject, payload).await
     }
 
@@ -98,6 +129,25 @@ impl EventBus for EventBusImpl {
 
     async fn unsubscribe(&self, id: &str) -> crate::Result<()> {
         self.engine.unsubscribe(id).await
+    }
+
+    async fn request(
+        &self,
+        subject: &str,
+        payload: &[u8],
+        timeout: Duration,
+    ) -> crate::Result<Vec<u8>> {
+        self.engine.request(subject, payload, timeout).await
+    }
+
+    async fn serve(
+        &self,
+        subject: &str,
+        opts: SubscribeOpts,
+    ) -> crate::Result<RequestSubscription> {
+        self.engine
+            .serve(subject, opts.priority, opts.timeout, opts.filter)
+            .await
     }
 
     async fn intercept(
@@ -155,7 +205,7 @@ mod tests {
         let msg = tokio::time::timeout(Duration::from_secs(1), sub.rx.recv())
             .await
             .unwrap();
-        assert_eq!(msg, Some(b"hello".to_vec()));
+        assert_eq!(msg.map(|e| e.payload), Some(b"hello".to_vec()));
     }
 
     #[tokio::test]
@@ -183,8 +233,8 @@ mod tests {
             .await
             .unwrap();
 
-        assert_eq!(msg1, Some(b"message".to_vec()));
-        assert_eq!(msg2, Some(b"message".to_vec()));
+        assert_eq!(msg1.map(|e| e.payload), Some(b"message".to_vec()));
+        assert_eq!(msg2.map(|e| e.payload), Some(b"message".to_vec()));
     }
 
     #[tokio::test]
@@ -230,6 +280,9 @@ mod tests {
         let msg = tokio::time::timeout(Duration::from_secs(1), sub.rx.recv())
             .await
             .unwrap();
-        assert_eq!(msg, Some(b"[intercepted] hello".to_vec()));
+        assert_eq!(
+            msg.map(|e| e.payload),
+            Some(b"[intercepted] hello".to_vec())
+        );
     }
 }

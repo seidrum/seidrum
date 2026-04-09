@@ -4,8 +4,6 @@ use crate::storage::EventStore;
 use crate::EventBusError;
 use std::sync::Arc;
 use std::time::Duration;
-use tokio::task::JoinHandle;
-use tracing::error;
 
 /// Builder for constructing an EventBus with configurable options.
 pub struct EventBusBuilder {

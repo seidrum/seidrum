@@ -37,7 +37,7 @@ use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use tokio::sync::mpsc;
 use tokio::sync::RwLock;
-use tracing::{debug, error, warn};
+use tracing::{debug, warn};
 
 /// Default channel buffer size for bounded channels.
 const DEFAULT_CHANNEL_CAPACITY: usize = 8192;
@@ -57,16 +57,16 @@ const MAX_INTERCEPTORS_PER_SUBJECT: usize = 100;
 /// The dispatch engine routes published events to matching subscribers.
 /// Implements the full pipeline: persist → resolve → filter → sync chain → async fan-out → finalize.
 pub struct DispatchEngine {
-    store: Arc<dyn EventStore>,
+    pub(crate) store: Arc<dyn EventStore>,
     /// Combined lock for index + senders + interceptors to prevent desync.
-    state: Arc<RwLock<DispatchState>>,
+    pub(crate) state: Arc<RwLock<DispatchState>>,
 }
 
-struct DispatchState {
-    index: SubjectIndex,
-    senders: HashMap<String, mpsc::Sender<Vec<u8>>>,
+pub(crate) struct DispatchState {
+    pub(crate) index: SubjectIndex,
+    pub(crate) senders: HashMap<String, mpsc::Sender<crate::request_reply::DispatchedEvent>>,
     /// Per-subscription interceptors (for sync mode in-process subscribers).
-    interceptors: HashMap<String, Arc<dyn Interceptor>>,
+    pub(crate) interceptors: HashMap<String, Arc<dyn Interceptor>>,
 }
 
 impl DispatchEngine {
@@ -136,7 +136,14 @@ impl DispatchEngine {
     ///   is full, delivery silently fails. Only interceptors (with timeout enforcement) provide
     ///   true synchronous processing.
     /// - **Async mode**: Parallel delivery with the same channel limitations as Sync.
-    pub async fn publish(&self, subject: &str, payload: &[u8]) -> crate::Result<u64> {
+    /// Publish an event. Called by the public API with `reply_subject: None`,
+    /// and by `request()` with a reply subject set.
+    pub async fn publish_event(
+        &self,
+        subject: &str,
+        payload: &[u8],
+        reply_subject: Option<String>,
+    ) -> crate::Result<u64> {
         Self::validate_subject(subject)?;
         Self::validate_payload(payload)?;
 
@@ -147,11 +154,12 @@ impl DispatchEngine {
             stored_at: Self::current_time_ms(),
             status: EventStatus::Pending,
             deliveries: vec![],
-            reply_subject: None,
+            reply_subject: reply_subject.clone(),
         };
 
         // 1. PERSIST (write-ahead)
         let seq = self.store.append(&event).await?;
+        let event_reply_subject = event.reply_subject;
 
         // 2. RESOLVE: find matching subscriptions (release lock after lookup)
         let mut matches = {
@@ -270,7 +278,13 @@ impl DispatchEngine {
                 } else {
                     // Sync subscriber without an interceptor — deliver via channel
                     if let Some(tx) = state.senders.get(&entry.id) {
-                        match tx.try_send(current_payload.clone()) {
+                        let event = crate::request_reply::DispatchedEvent {
+                            payload: current_payload.clone(),
+                            reply_subject: event_reply_subject.clone(),
+                            subject: subject.to_string(),
+                            seq,
+                        };
+                        match tx.try_send(event) {
                             Ok(()) => {
                                 if let Err(e) = self
                                     .store
@@ -306,7 +320,10 @@ impl DispatchEngine {
 
         // 5. ASYNC FAN-OUT: deliver the (possibly mutated) payload to all async subscribers
         // Collect senders while holding the lock, then release before trying to send
-        let async_senders: Vec<(String, Option<mpsc::Sender<Vec<u8>>>)> = {
+        let async_senders: Vec<(
+            String,
+            Option<mpsc::Sender<crate::request_reply::DispatchedEvent>>,
+        )> = {
             let state = self.state.read().await;
             async_entries
                 .iter()
@@ -320,7 +337,13 @@ impl DispatchEngine {
         let mut any_failed = false;
         for (entry_id, tx_opt) in async_senders {
             if let Some(tx) = tx_opt {
-                match tx.try_send(current_payload.clone()) {
+                let event = crate::request_reply::DispatchedEvent {
+                    payload: current_payload.clone(),
+                    reply_subject: event_reply_subject.clone(),
+                    subject: subject.to_string(),
+                    seq,
+                };
+                match tx.try_send(event) {
                     Ok(()) => {
                         if let Err(e) = self
                             .store
@@ -379,6 +402,14 @@ impl DispatchEngine {
         Ok(seq)
     }
 
+    /// Publish an event to a subject (no reply subject).
+    ///
+    /// Subjects starting with `_reply.` are reserved for internal request/reply
+    /// routing and are allowed here because `Replier::reply()` uses this method.
+    pub async fn publish(&self, subject: &str, payload: &[u8]) -> crate::Result<u64> {
+        self.publish_event(subject, payload, None).await
+    }
+
     /// Subscribe with a channel for receiving events (async mode typical).
     pub async fn subscribe(
         &self,
@@ -387,7 +418,10 @@ impl DispatchEngine {
         mode: SubscriptionMode,
         timeout: Duration,
         filter: Option<EventFilter>,
-    ) -> crate::Result<(String, mpsc::Receiver<Vec<u8>>)> {
+    ) -> crate::Result<(
+        String,
+        mpsc::Receiver<crate::request_reply::DispatchedEvent>,
+    )> {
         Self::validate_subject(subject_pattern)?;
 
         let subscription_id = ulid::Ulid::new().to_string();
@@ -564,7 +598,7 @@ mod tests {
         let msg = tokio::time::timeout(Duration::from_secs(1), rx.recv())
             .await
             .unwrap();
-        assert_eq!(msg, Some(b"hello".to_vec()));
+        assert_eq!(msg.map(|e| e.payload), Some(b"hello".to_vec()));
     }
 
     #[tokio::test]
@@ -591,7 +625,7 @@ mod tests {
         let msg = tokio::time::timeout(Duration::from_secs(1), rx.recv())
             .await
             .unwrap();
-        assert_eq!(msg, Some(b"msg".to_vec()));
+        assert_eq!(msg.map(|e| e.payload), Some(b"msg".to_vec()));
 
         // Should NOT match different depth
         engine
@@ -622,7 +656,7 @@ mod tests {
         let msg = tokio::time::timeout(Duration::from_secs(1), rx.recv())
             .await
             .unwrap();
-        assert_eq!(msg, Some(b"a".to_vec()));
+        assert_eq!(msg.map(|e| e.payload), Some(b"a".to_vec()));
 
         engine
             .publish("brain.entity.upsert.batch", b"b")
@@ -631,7 +665,7 @@ mod tests {
         let msg = tokio::time::timeout(Duration::from_secs(1), rx.recv())
             .await
             .unwrap();
-        assert_eq!(msg, Some(b"b".to_vec()));
+        assert_eq!(msg.map(|e| e.payload), Some(b"b".to_vec()));
     }
 
     #[tokio::test]
@@ -663,7 +697,7 @@ mod tests {
             .await
             .unwrap();
         // Async subscriber should receive the UPPERCASED payload
-        assert_eq!(msg, Some(b"HELLO".to_vec()));
+        assert_eq!(msg.map(|e| e.payload), Some(b"HELLO".to_vec()));
     }
 
     #[tokio::test]
@@ -730,7 +764,7 @@ mod tests {
         let msg = tokio::time::timeout(Duration::from_secs(1), rx.recv())
             .await
             .unwrap();
-        assert_eq!(msg, Some(b"hello".to_vec()));
+        assert_eq!(msg.map(|e| e.payload), Some(b"hello".to_vec()));
     }
 
     #[tokio::test]
@@ -762,7 +796,7 @@ mod tests {
         let msg = tokio::time::timeout(Duration::from_secs(1), rx.recv())
             .await
             .unwrap();
-        assert_eq!(msg, Some(b"HELLO".to_vec()));
+        assert_eq!(msg.map(|e| e.payload), Some(b"HELLO".to_vec()));
     }
 
     #[tokio::test]
@@ -856,8 +890,8 @@ mod tests {
             .unwrap();
 
         // Both should get the uppercased payload
-        assert_eq!(msg1, Some(b"HELLO".to_vec()));
-        assert_eq!(msg2, Some(b"HELLO".to_vec()));
+        assert_eq!(msg1.map(|e| e.payload), Some(b"HELLO".to_vec()));
+        assert_eq!(msg2.map(|e| e.payload), Some(b"HELLO".to_vec()));
     }
 
     #[tokio::test]
@@ -890,7 +924,7 @@ mod tests {
             .await
             .unwrap();
         // Should receive original (lowercase) since interceptor was removed
-        assert_eq!(msg, Some(b"hello".to_vec()));
+        assert_eq!(msg.map(|e| e.payload), Some(b"hello".to_vec()));
     }
 
     #[tokio::test]
