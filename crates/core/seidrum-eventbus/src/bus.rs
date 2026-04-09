@@ -107,6 +107,15 @@ impl EventBusImpl {
 #[async_trait]
 impl EventBus for EventBusImpl {
     async fn publish(&self, subject: &str, payload: &[u8]) -> crate::Result<u64> {
+        // Reject publication to reserved internal subjects.
+        // _reply.* subjects are used for request/reply routing and must not be
+        // published to directly — only Replier::reply() may do so internally.
+        if subject.starts_with("_reply.") {
+            return Err(crate::EventBusError::InvalidSubject(
+                "subjects starting with '_reply.' are reserved for internal request/reply routing"
+                    .to_string(),
+            ));
+        }
         self.engine.publish(subject, payload).await
     }
 
@@ -137,7 +146,7 @@ impl EventBus for EventBusImpl {
         opts: SubscribeOpts,
     ) -> crate::Result<RequestSubscription> {
         self.engine
-            .serve(subject, opts.priority, opts.timeout)
+            .serve(subject, opts.priority, opts.timeout, opts.filter)
             .await
     }
 

@@ -37,7 +37,7 @@ use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use tokio::sync::mpsc;
 use tokio::sync::RwLock;
-use tracing::{debug, error, warn};
+use tracing::{debug, warn};
 
 /// Default channel buffer size for bounded channels.
 const DEFAULT_CHANNEL_CAPACITY: usize = 8192;
@@ -403,6 +403,9 @@ impl DispatchEngine {
     }
 
     /// Publish an event to a subject (no reply subject).
+    ///
+    /// Subjects starting with `_reply.` are reserved for internal request/reply
+    /// routing and are allowed here because `Replier::reply()` uses this method.
     pub async fn publish(&self, subject: &str, payload: &[u8]) -> crate::Result<u64> {
         self.publish_event(subject, payload, None).await
     }
