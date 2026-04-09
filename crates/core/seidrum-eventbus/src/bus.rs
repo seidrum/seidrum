@@ -122,7 +122,14 @@ impl EventBus for EventBusImpl {
     async fn subscribe(&self, pattern: &str, opts: SubscribeOpts) -> crate::Result<Subscription> {
         let (id, rx) = self
             .engine
-            .subscribe(pattern, opts.priority, opts.mode, opts.timeout, opts.filter)
+            .subscribe(
+                pattern,
+                opts.priority,
+                opts.mode,
+                opts.channel,
+                opts.timeout,
+                opts.filter,
+            )
             .await?;
         Ok(Subscription { id, rx })
     }

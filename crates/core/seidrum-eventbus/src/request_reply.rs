@@ -183,6 +183,7 @@ impl DispatchEngine {
                 subject_pattern,
                 priority,
                 SubscriptionMode::Async,
+                crate::delivery::ChannelConfig::InProcess,
                 timeout,
                 filter,
             )

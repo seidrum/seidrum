@@ -1,4 +1,3 @@
-use async_trait::async_trait;
 use seidrum_eventbus::storage::memory_store::InMemoryEventStore;
 use seidrum_eventbus::{
     ChannelConfig, EventBusBuilder, EventFilter, EventStore, InterceptResult, Interceptor,

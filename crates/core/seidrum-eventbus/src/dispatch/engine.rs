@@ -136,7 +136,8 @@ impl DispatchEngine {
     ///   is full, delivery silently fails. Only interceptors (with timeout enforcement) provide
     ///   true synchronous processing.
     /// - **Async mode**: Parallel delivery with the same channel limitations as Sync.
-    /// Publish an event. Called by the public API with `reply_subject: None`,
+    ///
+    /// Called by the public API with `reply_subject: None`,
     /// and by `request()` with a reply subject set.
     pub async fn publish_event(
         &self,
@@ -189,7 +190,7 @@ impl DispatchEngine {
             entry
                 .filter
                 .as_ref()
-                .map_or(true, |f| f.matches(&current_payload))
+                .is_none_or(|f| f.matches(&current_payload))
         });
 
         if matches.is_empty() {
@@ -416,6 +417,7 @@ impl DispatchEngine {
         subject_pattern: &str,
         priority: u32,
         mode: SubscriptionMode,
+        channel: ChannelConfig,
         timeout: Duration,
         filter: Option<EventFilter>,
     ) -> crate::Result<(
@@ -432,7 +434,7 @@ impl DispatchEngine {
             subject_pattern: subject_pattern.to_string(),
             priority,
             mode,
-            channel: ChannelConfig::InProcess,
+            channel,
             timeout,
             filter,
         };
@@ -587,6 +589,7 @@ mod tests {
                 "test.subject",
                 10,
                 SubscriptionMode::Async,
+                ChannelConfig::InProcess,
                 Duration::from_secs(5),
                 None,
             )
@@ -611,6 +614,7 @@ mod tests {
                 "channel.*.inbound",
                 10,
                 SubscriptionMode::Async,
+                ChannelConfig::InProcess,
                 Duration::from_secs(5),
                 None,
             )
@@ -646,6 +650,7 @@ mod tests {
                 "brain.>",
                 10,
                 SubscriptionMode::Async,
+                ChannelConfig::InProcess,
                 Duration::from_secs(5),
                 None,
             )
@@ -685,6 +690,7 @@ mod tests {
                 "test.subject",
                 10,
                 SubscriptionMode::Async,
+                ChannelConfig::InProcess,
                 Duration::from_secs(5),
                 None,
             )
@@ -717,6 +723,7 @@ mod tests {
                 "test.subject",
                 10,
                 SubscriptionMode::Async,
+                ChannelConfig::InProcess,
                 Duration::from_secs(5),
                 None,
             )
@@ -752,6 +759,7 @@ mod tests {
                 "test.subject",
                 10,
                 SubscriptionMode::Async,
+                ChannelConfig::InProcess,
                 Duration::from_secs(5),
                 None,
             )
@@ -785,6 +793,7 @@ mod tests {
                 "test.subject",
                 20,
                 SubscriptionMode::Async,
+                ChannelConfig::InProcess,
                 Duration::from_secs(5),
                 None,
             )
@@ -814,6 +823,7 @@ mod tests {
                 "channel.>",
                 10,
                 SubscriptionMode::Async,
+                ChannelConfig::InProcess,
                 Duration::from_secs(5),
                 Some(filter),
             )
@@ -862,6 +872,7 @@ mod tests {
                 "test",
                 10,
                 SubscriptionMode::Async,
+                ChannelConfig::InProcess,
                 Duration::from_secs(5),
                 None,
             )
@@ -874,6 +885,7 @@ mod tests {
                 "test",
                 20,
                 SubscriptionMode::Async,
+                ChannelConfig::InProcess,
                 Duration::from_secs(5),
                 None,
             )
@@ -909,6 +921,7 @@ mod tests {
                 "test",
                 10,
                 SubscriptionMode::Async,
+                ChannelConfig::InProcess,
                 Duration::from_secs(5),
                 None,
             )
@@ -960,6 +973,7 @@ mod tests {
                 "test",
                 10,
                 SubscriptionMode::Async,
+                ChannelConfig::InProcess,
                 Duration::from_secs(5),
                 None,
             )

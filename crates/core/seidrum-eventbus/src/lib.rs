@@ -1,7 +1,8 @@
 //! seidrum-eventbus: A purpose-built event bus for Seidrum.
 //!
 //! This crate provides a high-performance, durable event bus with support for
-//! in-process delivery, subject-based routing, and crash recovery.
+//! in-process delivery, subject-based routing, crash recovery, and remote
+//! access via WebSocket and HTTP transports.
 
 pub mod builder;
 pub mod bus;
@@ -9,13 +10,18 @@ pub mod delivery;
 pub mod dispatch;
 pub mod request_reply;
 pub mod storage;
+pub mod transport;
 
-pub use builder::EventBusBuilder;
+pub use builder::{BusHandles, EventBusBuilder};
 pub use bus::{BusMetrics, EventBus, EventBusImpl, SubscribeOpts, Subscription};
-pub use delivery::{ChannelConfig, DeliveryChannel, DeliveryReceipt};
+pub use delivery::{
+    ChannelConfig, ChannelRegistry, DeliveryChannel, DeliveryError, DeliveryReceipt,
+    DeliveryResult, WebSocketChannel, WebhookChannel,
+};
 pub use dispatch::{EventFilter, InterceptResult, Interceptor, SubscriptionInfo, SubscriptionMode};
 pub use request_reply::{DispatchedEvent, Replier, RequestMessage, RequestSubscription};
 pub use storage::{EventStatus, EventStore, StoredEvent};
+pub use transport::{HttpAuthenticator, HttpServer, NoHttpAuth, WebSocketServer};
 
 /// Errors that can occur in the event bus.
 #[derive(Debug, thiserror::Error)]

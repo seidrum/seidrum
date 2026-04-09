@@ -1,4 +1,8 @@
 pub mod in_process;
+pub mod registry;
+pub mod retry;
+pub mod webhook;
+pub mod websocket;
 
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
@@ -6,6 +10,10 @@ use std::collections::HashMap;
 use thiserror::Error;
 
 pub use in_process::InProcessChannel;
+pub use registry::ChannelRegistry;
+pub use retry::{calculate_backoff, RetryConfig, RetryTask};
+pub use webhook::WebhookChannel;
+pub use websocket::{WebSocketChannel, WebSocketMessage};
 
 #[derive(Debug, Error)]
 pub enum DeliveryError {
