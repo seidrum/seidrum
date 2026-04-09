@@ -1,7 +1,10 @@
 use crate::bus::{EventBus, EventBusImpl};
+use crate::delivery::ChannelRegistry;
 use crate::storage::compaction::CompactionTask;
 use crate::storage::EventStore;
+use crate::transport::{HttpServer, WebSocketServer};
 use crate::EventBusError;
+use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -10,6 +13,8 @@ pub struct EventBusBuilder {
     store: Option<Arc<dyn EventStore>>,
     compaction_interval: Duration,
     retention: Duration,
+    ws_addr: Option<SocketAddr>,
+    http_addr: Option<SocketAddr>,
 }
 
 /// Default compaction interval: 1 hour.
@@ -23,6 +28,8 @@ impl EventBusBuilder {
             store: None,
             compaction_interval: DEFAULT_COMPACTION_INTERVAL,
             retention: DEFAULT_RETENTION,
+            ws_addr: None,
+            http_addr: None,
         }
     }
 
@@ -44,9 +51,22 @@ impl EventBusBuilder {
         self
     }
 
+    /// Enable WebSocket server on the given address.
+    pub fn with_websocket(mut self, addr: SocketAddr) -> Self {
+        self.ws_addr = Some(addr);
+        self
+    }
+
+    /// Enable HTTP server on the given address.
+    pub fn with_http(mut self, addr: SocketAddr) -> Self {
+        self.http_addr = Some(addr);
+        self
+    }
+
     /// Build the EventBus.
     /// Note: The compaction task is spawned as a background task and runs for the lifetime
     /// of the bus. To stop it, drop the returned bus.
+    /// Also starts WebSocket and HTTP servers if configured.
     pub async fn build(self) -> crate::Result<Arc<dyn EventBus>> {
         let store = self
             .store
@@ -58,10 +78,32 @@ impl EventBusBuilder {
         let compaction_task =
             CompactionTask::new(Arc::clone(&store), self.compaction_interval, self.retention);
         // Spawn compaction task as a background task. It will continue until the bus is dropped.
-        // Handle task panics by logging an error instead of silently crashing.
         tokio::spawn(async move {
             compaction_task.run().await;
         });
+
+        // Start WebSocket server if configured
+        if let Some(addr) = self.ws_addr {
+            let bus_clone = Arc::clone(&bus);
+            tokio::spawn(async move {
+                let ws_server = WebSocketServer::new(bus_clone);
+                if let Err(e) = ws_server.start(addr).await {
+                    tracing::error!("WebSocket server error: {}", e);
+                }
+            });
+        }
+
+        // Start HTTP server if configured
+        if let Some(addr) = self.http_addr {
+            let bus_clone = Arc::clone(&bus);
+            let registry = Arc::new(ChannelRegistry::new());
+            tokio::spawn(async move {
+                let http_server = HttpServer::new(bus_clone, registry);
+                if let Err(e) = http_server.start(addr).await {
+                    tracing::error!("HTTP server error: {}", e);
+                }
+            });
+        }
 
         Ok(bus)
     }

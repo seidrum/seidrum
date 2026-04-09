@@ -49,10 +49,10 @@ impl EventFilter {
     fn matches_value(&self, root: &serde_json::Value) -> bool {
         match self {
             EventFilter::FieldEquals { path, value } => {
-                Self::resolve_path(root, path).map_or(false, |v| v == value)
+                Self::resolve_path(root, path).is_some_and(|v| v == value)
             }
             EventFilter::FieldContains { path, substring } => Self::resolve_path(root, path)
-                .map_or(false, |v| match v {
+                .is_some_and(|v| match v {
                     serde_json::Value::String(s) => s.contains(substring.as_str()),
                     other => other.to_string().contains(substring.as_str()),
                 }),

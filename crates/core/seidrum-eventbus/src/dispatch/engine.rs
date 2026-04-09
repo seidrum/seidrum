@@ -136,7 +136,8 @@ impl DispatchEngine {
     ///   is full, delivery silently fails. Only interceptors (with timeout enforcement) provide
     ///   true synchronous processing.
     /// - **Async mode**: Parallel delivery with the same channel limitations as Sync.
-    /// Publish an event. Called by the public API with `reply_subject: None`,
+    ///
+    /// Called by the public API with `reply_subject: None`,
     /// and by `request()` with a reply subject set.
     pub async fn publish_event(
         &self,
@@ -189,7 +190,7 @@ impl DispatchEngine {
             entry
                 .filter
                 .as_ref()
-                .map_or(true, |f| f.matches(&current_payload))
+                .is_none_or(|f| f.matches(&current_payload))
         });
 
         if matches.is_empty() {
