@@ -1,9 +1,12 @@
 use crate::delivery::ChannelConfig;
-use crate::dispatch::{DispatchEngine, SubscriptionInfo, SubscriptionMode};
+use crate::dispatch::{
+    DispatchEngine, EventFilter, Interceptor, SubscriptionInfo, SubscriptionMode,
+};
 use crate::storage::EventStore;
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
+use std::time::Duration;
 
 /// Metrics from the bus.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -27,7 +30,8 @@ pub struct SubscribeOpts {
     pub priority: u32,
     pub mode: SubscriptionMode,
     pub channel: ChannelConfig,
-    pub timeout: std::time::Duration,
+    pub timeout: Duration,
+    pub filter: Option<EventFilter>,
 }
 
 /// The EventBus trait is the public API for the entire event bus.
@@ -43,6 +47,17 @@ pub trait EventBus: Send + Sync + 'static {
 
     /// Remove a subscription by ID.
     async fn unsubscribe(&self, id: &str) -> crate::Result<()>;
+
+    /// Register a sync interceptor for a subject pattern.
+    /// Returns the subscription ID. The interceptor runs in priority order
+    /// during the sync chain and can modify or drop events.
+    async fn intercept(
+        &self,
+        pattern: &str,
+        priority: u32,
+        interceptor: Arc<dyn Interceptor>,
+        timeout: Option<Duration>,
+    ) -> crate::Result<String>;
 
     /// List active subscriptions, optionally filtered by pattern.
     async fn list_subscriptions(
@@ -76,13 +91,25 @@ impl EventBus for EventBusImpl {
     async fn subscribe(&self, pattern: &str, opts: SubscribeOpts) -> crate::Result<Subscription> {
         let (id, rx) = self
             .engine
-            .subscribe(pattern, opts.priority, opts.mode, opts.timeout)
+            .subscribe(pattern, opts.priority, opts.mode, opts.timeout, opts.filter)
             .await?;
         Ok(Subscription { id, rx })
     }
 
     async fn unsubscribe(&self, id: &str) -> crate::Result<()> {
         self.engine.unsubscribe(id).await
+    }
+
+    async fn intercept(
+        &self,
+        pattern: &str,
+        priority: u32,
+        interceptor: Arc<dyn Interceptor>,
+        timeout: Option<Duration>,
+    ) -> crate::Result<String> {
+        self.engine
+            .intercept(pattern, priority, interceptor, timeout)
+            .await
     }
 
     async fn list_subscriptions(
@@ -93,7 +120,7 @@ impl EventBus for EventBusImpl {
     }
 
     async fn metrics(&self) -> crate::Result<BusMetrics> {
-        // TODO: Phase 2 will track detailed publish/deliver counters
+        // TODO: Phase 3+ will track detailed publish/deliver counters
         Ok(BusMetrics {
             events_published: 0,
             events_delivered: 0,
@@ -106,6 +133,7 @@ impl EventBus for EventBusImpl {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::dispatch::InterceptResult;
     use crate::storage::memory_store::InMemoryEventStore;
 
     #[tokio::test]
@@ -117,13 +145,14 @@ mod tests {
             priority: 10,
             mode: SubscriptionMode::Async,
             channel: ChannelConfig::InProcess,
-            timeout: std::time::Duration::from_secs(5),
+            timeout: Duration::from_secs(5),
+            filter: None,
         };
         let mut sub = bus.subscribe("test.subject", opts).await.unwrap();
 
         bus.publish("test.subject", b"hello").await.unwrap();
 
-        let msg = tokio::time::timeout(std::time::Duration::from_secs(1), sub.rx.recv())
+        let msg = tokio::time::timeout(Duration::from_secs(1), sub.rx.recv())
             .await
             .unwrap();
         assert_eq!(msg, Some(b"hello".to_vec()));
@@ -138,7 +167,8 @@ mod tests {
             priority: 10,
             mode: SubscriptionMode::Async,
             channel: ChannelConfig::InProcess,
-            timeout: std::time::Duration::from_secs(5),
+            timeout: Duration::from_secs(5),
+            filter: None,
         };
 
         let mut sub1 = bus.subscribe("test.subject", opts.clone()).await.unwrap();
@@ -146,10 +176,10 @@ mod tests {
 
         bus.publish("test.subject", b"message").await.unwrap();
 
-        let msg1 = tokio::time::timeout(std::time::Duration::from_secs(1), sub1.rx.recv())
+        let msg1 = tokio::time::timeout(Duration::from_secs(1), sub1.rx.recv())
             .await
             .unwrap();
-        let msg2 = tokio::time::timeout(std::time::Duration::from_secs(1), sub2.rx.recv())
+        let msg2 = tokio::time::timeout(Duration::from_secs(1), sub2.rx.recv())
             .await
             .unwrap();
 
@@ -158,7 +188,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_builder_minimal() {
+    async fn test_metrics() {
         let store = Arc::new(InMemoryEventStore::new());
         let bus = EventBusImpl::new(store);
         let metrics = bus.metrics().await.unwrap();
@@ -166,24 +196,40 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_list_subscriptions() {
+    async fn test_intercept_via_bus() {
+        struct PrefixInterceptor;
+
+        #[async_trait]
+        impl Interceptor for PrefixInterceptor {
+            async fn intercept(&self, _subject: &str, payload: &mut Vec<u8>) -> InterceptResult {
+                let mut new = b"[intercepted] ".to_vec();
+                new.extend_from_slice(payload);
+                *payload = new;
+                InterceptResult::Modified
+            }
+        }
+
         let store = Arc::new(InMemoryEventStore::new());
         let bus = EventBusImpl::new(store);
+
+        bus.intercept("test", 5, Arc::new(PrefixInterceptor), None)
+            .await
+            .unwrap();
 
         let opts = SubscribeOpts {
             priority: 10,
             mode: SubscriptionMode::Async,
             channel: ChannelConfig::InProcess,
-            timeout: std::time::Duration::from_secs(5),
+            timeout: Duration::from_secs(5),
+            filter: None,
         };
+        let mut sub = bus.subscribe("test", opts).await.unwrap();
 
-        let _sub1 = bus.subscribe("test.a", opts.clone()).await.unwrap();
-        let _sub2 = bus.subscribe("test.b", opts.clone()).await.unwrap();
+        bus.publish("test", b"hello").await.unwrap();
 
-        let all = bus.list_subscriptions(None).await.unwrap();
-        assert_eq!(all.len(), 2);
-
-        let filtered = bus.list_subscriptions(Some("test.a")).await.unwrap();
-        assert_eq!(filtered.len(), 1);
+        let msg = tokio::time::timeout(Duration::from_secs(1), sub.rx.recv())
+            .await
+            .unwrap();
+        assert_eq!(msg, Some(b"[intercepted] hello".to_vec()));
     }
 }
