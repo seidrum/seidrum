@@ -32,7 +32,7 @@ async fn test_publish_deliver_end_to_end() {
     let msg = tokio::time::timeout(Duration::from_secs(1), sub.rx.recv())
         .await
         .unwrap();
-    assert_eq!(msg, Some(b"hello".to_vec()));
+    assert_eq!(msg.map(|e| e.payload), Some(b"hello".to_vec()));
 }
 
 #[tokio::test]
@@ -114,8 +114,8 @@ async fn test_multi_subscriber() {
         .await
         .unwrap();
 
-    assert_eq!(msg1, Some(b"message".to_vec()));
-    assert_eq!(msg2, Some(b"message".to_vec()));
+    assert_eq!(msg1.map(|e| e.payload), Some(b"message".to_vec()));
+    assert_eq!(msg2.map(|e| e.payload), Some(b"message".to_vec()));
 }
 
 #[tokio::test]
@@ -174,8 +174,8 @@ async fn test_wildcard_star_subscription() {
         .await
         .unwrap();
 
-    assert_eq!(msg1, Some(b"msg1".to_vec()));
-    assert_eq!(msg2, Some(b"msg2".to_vec()));
+    assert_eq!(msg1.map(|e| e.payload), Some(b"msg1".to_vec()));
+    assert_eq!(msg2.map(|e| e.payload), Some(b"msg2".to_vec()));
 
     // Should NOT match 4-token subject
     bus.publish("channel.telegram.sub.inbound", b"nope")
@@ -204,8 +204,8 @@ async fn test_wildcard_gt_subscription() {
         .await
         .unwrap();
 
-    assert_eq!(msg1, Some(b"a".to_vec()));
-    assert_eq!(msg2, Some(b"b".to_vec()));
+    assert_eq!(msg1.map(|e| e.payload), Some(b"a".to_vec()));
+    assert_eq!(msg2.map(|e| e.payload), Some(b"b".to_vec()));
 
     // "brain" alone should NOT match "brain.>"
     bus.publish("brain", b"nope").await.unwrap();
@@ -250,7 +250,7 @@ async fn test_interceptor_modifies_payload() {
     let msg = tokio::time::timeout(Duration::from_secs(1), sub.rx.recv())
         .await
         .unwrap();
-    assert_eq!(msg, Some(b"HELLO WORLD".to_vec()));
+    assert_eq!(msg.map(|e| e.payload), Some(b"HELLO WORLD".to_vec()));
 }
 
 #[tokio::test]
@@ -295,7 +295,7 @@ async fn test_interceptor_chain_mutation_propagates() {
     let msg = tokio::time::timeout(Duration::from_secs(1), sub.rx.recv())
         .await
         .unwrap();
-    assert_eq!(msg, Some(b"HELLO".to_vec()));
+    assert_eq!(msg.map(|e| e.payload), Some(b"HELLO".to_vec()));
 }
 
 #[tokio::test]
@@ -320,7 +320,7 @@ async fn test_interceptor_with_wildcard() {
     let msg = tokio::time::timeout(Duration::from_secs(1), sub.rx.recv())
         .await
         .unwrap();
-    assert_eq!(msg, Some(b"HELLO".to_vec()));
+    assert_eq!(msg.map(|e| e.payload), Some(b"HELLO".to_vec()));
 }
 
 // --- Phase 2 tests: Event Filters ---
@@ -435,8 +435,58 @@ async fn test_interceptor_timeout_behavior() {
         .await
         .unwrap();
     assert_eq!(
-        msg,
+        msg.map(|e| e.payload),
         Some(b"hello".to_vec()),
         "event should be delivered despite interceptor timeout"
     );
+}
+
+// --- Phase 3 tests: Request/Reply ---
+
+#[tokio::test]
+async fn test_request_reply_basic() {
+    let store = Arc::new(InMemoryEventStore::new());
+    let bus = EventBusBuilder::new().storage(store).build().await.unwrap();
+
+    // Spawn a handler task
+    let bus_clone = Arc::clone(&bus);
+    tokio::spawn(async move {
+        let opts = SubscribeOpts {
+            priority: 10,
+            mode: SubscriptionMode::Async,
+            channel: ChannelConfig::InProcess,
+            timeout: Duration::from_secs(5),
+            filter: None,
+        };
+        let mut sub = bus_clone.serve("test.request", opts).await.unwrap();
+
+        while let Some((req_msg, replier)) = sub.rx.recv().await {
+            let response = format!("echo: {}", String::from_utf8_lossy(&req_msg.payload));
+            let _ = replier.reply(response.as_bytes()).await;
+        }
+    });
+
+    // Give the handler time to register
+    tokio::time::sleep(Duration::from_millis(100)).await;
+
+    // Send a request and wait for reply
+    let reply = bus
+        .request("test.request", b"hello", Duration::from_secs(1))
+        .await
+        .unwrap();
+
+    assert_eq!(reply, b"echo: hello".to_vec());
+}
+
+#[tokio::test]
+async fn test_request_reply_timeout() {
+    let store = Arc::new(InMemoryEventStore::new());
+    let bus = EventBusBuilder::new().storage(store).build().await.unwrap();
+
+    // No handler registered for this subject
+    let result = bus
+        .request("test.request", b"hello", Duration::from_millis(100))
+        .await;
+
+    assert!(result.is_err());
 }

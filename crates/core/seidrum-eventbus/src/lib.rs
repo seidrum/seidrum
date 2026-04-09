@@ -7,12 +7,14 @@ pub mod builder;
 pub mod bus;
 pub mod delivery;
 pub mod dispatch;
+pub mod request_reply;
 pub mod storage;
 
 pub use builder::EventBusBuilder;
 pub use bus::{BusMetrics, EventBus, EventBusImpl, SubscribeOpts, Subscription};
 pub use delivery::{ChannelConfig, DeliveryChannel, DeliveryReceipt};
 pub use dispatch::{EventFilter, InterceptResult, Interceptor, SubscriptionInfo, SubscriptionMode};
+pub use request_reply::{DispatchedEvent, Replier, RequestMessage, RequestSubscription};
 pub use storage::{EventStatus, EventStore, StoredEvent};
 
 /// Errors that can occur in the event bus.
@@ -37,6 +39,10 @@ pub enum EventBusError {
     /// Configuration or builder error.
     #[error("configuration error: {0}")]
     Config(String),
+
+    /// A request timed out while waiting for a reply.
+    #[error("request timed out")]
+    RequestTimeout,
 
     /// An internal error.
     #[error("internal error: {0}")]
