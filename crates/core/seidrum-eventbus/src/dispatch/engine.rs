@@ -170,6 +170,20 @@ impl DispatchEngine {
         };
         let event_reply_subject = reply_subject;
 
+        // Helper: record delivery only for persisted (non-reply) events.
+        let store = &self.store;
+        let try_record = |seq: u64, sub_id: &str, status: DeliveryStatus| {
+            let sub_id = sub_id.to_string();
+            let store = Arc::clone(store);
+            async move {
+                if !is_reply {
+                    if let Err(e) = store.record_delivery(seq, &sub_id, status).await {
+                        warn!(seq = seq, subscriber = sub_id, error = %e, "failed to record delivery");
+                    }
+                }
+            }
+        };
+
         // 2. RESOLVE: find matching subscriptions (release lock after lookup)
         let mut matches = {
             let state = self.state.read().await;
@@ -262,33 +276,15 @@ impl DispatchEngine {
 
                     match result {
                         Ok(InterceptResult::Pass) => {
-                            if let Err(e) = self
-                                .store
-                                .record_delivery(seq, entry_id, DeliveryStatus::Delivered)
-                                .await
-                            {
-                                warn!(seq = seq, subscriber = entry_id, error = %e, "failed to record interceptor delivery");
-                            }
+                            try_record(seq, entry_id, DeliveryStatus::Delivered).await;
                         }
                         Ok(InterceptResult::Modified) => {
                             debug!(subscriber = entry_id, "interceptor modified payload");
-                            if let Err(e) = self
-                                .store
-                                .record_delivery(seq, entry_id, DeliveryStatus::Delivered)
-                                .await
-                            {
-                                warn!(seq = seq, subscriber = entry_id, error = %e, "failed to record interceptor delivery");
-                            }
+                            try_record(seq, entry_id, DeliveryStatus::Delivered).await;
                         }
                         Ok(InterceptResult::Drop) => {
                             debug!(subscriber = entry_id, "interceptor dropped event");
-                            if let Err(e) = self
-                                .store
-                                .record_delivery(seq, entry_id, DeliveryStatus::Delivered)
-                                .await
-                            {
-                                warn!(seq = seq, subscriber = entry_id, error = %e, "failed to record interceptor delivery");
-                            }
+                            try_record(seq, entry_id, DeliveryStatus::Delivered).await;
                             dropped = true;
                             break;
                         }
@@ -298,13 +294,7 @@ impl DispatchEngine {
                                 timeout_ms = timeout.as_millis() as u64,
                                 "sync interceptor timed out, skipping"
                             );
-                            if let Err(e) = self
-                                .store
-                                .record_delivery(seq, entry_id, DeliveryStatus::Failed)
-                                .await
-                            {
-                                warn!(seq = seq, subscriber = entry_id, error = %e, "failed to record timeout");
-                            }
+                            try_record(seq, entry_id, DeliveryStatus::Failed).await;
                         }
                     }
                 } else if let Some(tx) = sender_opt {
@@ -317,23 +307,11 @@ impl DispatchEngine {
                     };
                     match tx.try_send(event) {
                         Ok(()) => {
-                            if let Err(e) = self
-                                .store
-                                .record_delivery(seq, entry_id, DeliveryStatus::Delivered)
-                                .await
-                            {
-                                warn!(seq = seq, subscriber = entry_id, error = %e, "failed to record delivery");
-                            }
+                            try_record(seq, entry_id, DeliveryStatus::Delivered).await;
                         }
                         Err(_) => {
                             warn!(subscriber = entry_id, "sync channel delivery failed");
-                            if let Err(e) = self
-                                .store
-                                .record_delivery(seq, entry_id, DeliveryStatus::Failed)
-                                .await
-                            {
-                                warn!(seq = seq, subscriber = entry_id, error = %e, "failed to record failed delivery");
-                            }
+                            try_record(seq, entry_id, DeliveryStatus::Failed).await;
                         }
                     }
                 }
@@ -377,47 +355,23 @@ impl DispatchEngine {
                 };
                 match tx.try_send(event) {
                     Ok(()) => {
-                        if let Err(e) = self
-                            .store
-                            .record_delivery(seq, &entry_id, DeliveryStatus::Delivered)
-                            .await
-                        {
-                            warn!(seq = seq, subscriber = entry_id, error = %e, "failed to record delivery");
-                        }
+                        try_record(seq, &entry_id, DeliveryStatus::Delivered).await;
                     }
                     Err(mpsc::error::TrySendError::Full(_)) => {
                         warn!(subscriber = entry_id, "delivery failed: channel full");
                         any_failed = true;
-                        if let Err(e) = self
-                            .store
-                            .record_delivery(seq, &entry_id, DeliveryStatus::Failed)
-                            .await
-                        {
-                            warn!(seq = seq, subscriber = entry_id, error = %e, "failed to record failed delivery");
-                        }
+                        try_record(seq, &entry_id, DeliveryStatus::Failed).await;
                     }
                     Err(mpsc::error::TrySendError::Closed(_)) => {
                         debug!(subscriber = entry_id, "delivery failed: channel closed");
                         any_failed = true;
-                        if let Err(e) = self
-                            .store
-                            .record_delivery(seq, &entry_id, DeliveryStatus::Failed)
-                            .await
-                        {
-                            warn!(seq = seq, subscriber = entry_id, error = %e, "failed to record failed delivery");
-                        }
+                        try_record(seq, &entry_id, DeliveryStatus::Failed).await;
                     }
                 }
             } else {
                 debug!(subscriber = entry_id, "no sender found");
                 any_failed = true;
-                if let Err(e) = self
-                    .store
-                    .record_delivery(seq, &entry_id, DeliveryStatus::Failed)
-                    .await
-                {
-                    warn!(seq = seq, subscriber = entry_id, error = %e, "failed to record failed delivery");
-                }
+                try_record(seq, &entry_id, DeliveryStatus::Failed).await;
             }
         }
 
