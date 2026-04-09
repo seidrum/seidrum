@@ -18,7 +18,7 @@ tokio-tungstenite = "0.26"
 futures-util = "0.3"
 reqwest = { version = "0.12", features = ["json"] }
 tower = "0.5"
-tower-http = { version = "0.6", features = ["cors"] }
+tower-http = { version = "0.6", features = ["cors", "limit"] }
 rand = "0.9"
 hyper = "1"
 base64 = "0.22"

@@ -6,5 +6,5 @@
 pub mod http;
 pub mod ws;
 
-pub use http::{create_router, HttpServer};
-pub use ws::WebSocketServer;
+pub use http::{create_router, AppState, ErrorResponse, HttpServer};
+pub use ws::{Authenticator, NoAuth, WebSocketServer};

@@ -9,6 +9,10 @@ use std::sync::Arc;
 use tokio::sync::RwLock;
 
 /// Registry for custom delivery channels keyed by channel type string.
+///
+/// Thread-safe: all methods acquire a [`tokio::sync::RwLock`] internally, so
+/// the registry can be shared across tasks via `Arc<ChannelRegistry>` or by
+/// cloning (clones share the same underlying map).
 pub struct ChannelRegistry {
     channels: Arc<RwLock<HashMap<String, Arc<dyn DeliveryChannel>>>>,
 }

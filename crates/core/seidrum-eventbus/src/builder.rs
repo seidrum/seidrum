@@ -7,6 +7,7 @@ use crate::EventBusError;
 use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::Duration;
+use tokio::task::JoinHandle;
 
 /// Builder for constructing an EventBus with configurable options.
 pub struct EventBusBuilder {
@@ -21,6 +22,21 @@ pub struct EventBusBuilder {
 const DEFAULT_COMPACTION_INTERVAL: Duration = Duration::from_secs(3600);
 /// Default retention period for delivered events: 24 hours.
 const DEFAULT_RETENTION: Duration = Duration::from_secs(86400);
+
+/// Handles to background tasks spawned by the builder.
+///
+/// Callers can use these handles to detect if a server task panicked or exited
+/// unexpectedly. Dropping the handles does **not** cancel the tasks.
+pub struct BusHandles {
+    /// The constructed event bus.
+    pub bus: Arc<dyn EventBus>,
+    /// Handle to the compaction background task.
+    pub compaction: JoinHandle<()>,
+    /// Handle to the WebSocket server task, if configured.
+    pub ws_server: Option<JoinHandle<()>>,
+    /// Handle to the HTTP server task, if configured.
+    pub http_server: Option<JoinHandle<()>>,
+}
 
 impl EventBusBuilder {
     pub fn new() -> Self {
@@ -63,49 +79,67 @@ impl EventBusBuilder {
         self
     }
 
-    /// Build the EventBus.
-    /// Note: The compaction task is spawned as a background task and runs for the lifetime
-    /// of the bus. To stop it, drop the returned bus.
-    /// Also starts WebSocket and HTTP servers if configured.
+    /// Build the EventBus, returning only the bus (dropping task handles).
+    ///
+    /// Background tasks (compaction, transport servers) are spawned and will run
+    /// for the lifetime of the tokio runtime. Use [`build_with_handles`] if you
+    /// need to monitor or await the background tasks.
     pub async fn build(self) -> crate::Result<Arc<dyn EventBus>> {
+        let handles = self.build_with_handles().await?;
+        Ok(handles.bus)
+    }
+
+    /// Build the EventBus and return handles to all spawned background tasks.
+    ///
+    /// This gives the caller the ability to detect panics or unexpected exits
+    /// from the compaction task or transport servers.
+    pub async fn build_with_handles(self) -> crate::Result<BusHandles> {
         let store = self
             .store
             .ok_or_else(|| EventBusError::Config("storage backend is required".to_string()))?;
 
         let bus = Arc::new(EventBusImpl::new(Arc::clone(&store)));
 
-        // Start compaction task using the configured interval
+        // Start compaction task
         let compaction_task =
             CompactionTask::new(Arc::clone(&store), self.compaction_interval, self.retention);
-        // Spawn compaction task as a background task. It will continue until the bus is dropped.
-        tokio::spawn(async move {
+        let compaction_handle = tokio::spawn(async move {
             compaction_task.run().await;
         });
 
         // Start WebSocket server if configured
-        if let Some(addr) = self.ws_addr {
+        let ws_handle = if let Some(addr) = self.ws_addr {
             let bus_clone = Arc::clone(&bus);
-            tokio::spawn(async move {
+            Some(tokio::spawn(async move {
                 let ws_server = WebSocketServer::new(bus_clone);
                 if let Err(e) = ws_server.start(addr).await {
                     tracing::error!("WebSocket server error: {}", e);
                 }
-            });
-        }
+            }))
+        } else {
+            None
+        };
 
         // Start HTTP server if configured
-        if let Some(addr) = self.http_addr {
+        let http_handle = if let Some(addr) = self.http_addr {
             let bus_clone = Arc::clone(&bus);
             let registry = Arc::new(ChannelRegistry::new());
-            tokio::spawn(async move {
+            Some(tokio::spawn(async move {
                 let http_server = HttpServer::new(bus_clone, registry);
                 if let Err(e) = http_server.start(addr).await {
                     tracing::error!("HTTP server error: {}", e);
                 }
-            });
-        }
+            }))
+        } else {
+            None
+        };
 
-        Ok(bus)
+        Ok(BusHandles {
+            bus,
+            compaction: compaction_handle,
+            ws_server: ws_handle,
+            http_server: http_handle,
+        })
     }
 }
 
@@ -142,5 +176,23 @@ mod tests {
             .unwrap();
 
         assert!(bus.metrics().await.is_ok());
+    }
+
+    #[tokio::test]
+    async fn test_builder_with_handles() {
+        let store = Arc::new(InMemoryEventStore::new());
+        let handles = EventBusBuilder::new()
+            .storage(store)
+            .build_with_handles()
+            .await
+            .unwrap();
+
+        // Bus should be operational
+        assert!(handles.bus.metrics().await.is_ok());
+        // Compaction task should be running
+        assert!(!handles.compaction.is_finished());
+        // No transport servers configured
+        assert!(handles.ws_server.is_none());
+        assert!(handles.http_server.is_none());
     }
 }

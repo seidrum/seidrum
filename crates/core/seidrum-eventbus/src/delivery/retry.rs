@@ -6,7 +6,7 @@
 use crate::storage::{EventStore, RetryableDelivery};
 use std::sync::Arc;
 use std::time::Duration;
-use tracing::{debug, error, info};
+use tracing::{debug, error, info, warn};
 
 /// Exponential backoff with jitter for retries.
 pub fn calculate_backoff(attempt: u32, initial_ms: u64, max_ms: u64) -> Duration {
@@ -80,16 +80,17 @@ impl RetryTask {
     }
 
     async fn retry_delivery(&self, delivery: &RetryableDelivery) {
-        debug!(
-            "Retrying delivery for seq={} subscriber={} attempt={}",
+        // TODO(phase5): Implement actual retry delivery logic.
+        // This requires:
+        //   1. Looking up the delivery channel for this subscriber
+        //   2. Calling deliver() on it with the original payload
+        //   3. Recording success/failure in the store
+        //   4. Applying backoff on failure
+        // For now, log a warning so operators know retries are not yet active.
+        warn!(
+            "Retry delivery is a stub — skipping seq={} subscriber={} attempt={}",
             delivery.seq, delivery.subscriber_id, delivery.attempts
         );
-
-        // In a real implementation, we would:
-        // 1. Look up the delivery channel for this subscriber
-        // 2. Call deliver() on it
-        // 3. Record the result
-        // For now, we log and mark for next retry cycle
 
         let backoff = calculate_backoff(
             delivery.attempts,
@@ -97,7 +98,7 @@ impl RetryTask {
             self.max_backoff_ms,
         );
         debug!(
-            "Next retry scheduled in {:?} for seq={}",
+            "Next retry would be scheduled in {:?} for seq={}",
             backoff, delivery.seq
         );
     }

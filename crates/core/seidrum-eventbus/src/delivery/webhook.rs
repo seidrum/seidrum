@@ -8,14 +8,18 @@ use crate::delivery::ChannelConfig;
 use async_trait::async_trait;
 use base64::Engine;
 use reqwest::Client;
+use serde::{Deserialize, Serialize};
 use serde_json::json;
 use std::collections::HashMap;
 use std::sync::Arc;
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use tracing::{debug, warn};
 
+/// Timeout for webhook health check requests.
+const HEALTH_CHECK_TIMEOUT: Duration = Duration::from_secs(5);
+
 /// Configuration for webhook retries.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct WebhookRetryConfig {
     /// Maximum number of delivery attempts before giving up.
     pub max_attempts: u32,
@@ -146,7 +150,7 @@ impl DeliveryChannel for WebhookChannel {
             Err(_) => return false,
         };
 
-        let mut req = self.client.get(&url);
+        let mut req = self.client.get(&url).timeout(HEALTH_CHECK_TIMEOUT);
         for (key, value) in headers.iter() {
             req = req.header(key, value);
         }

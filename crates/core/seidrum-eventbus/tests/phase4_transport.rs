@@ -23,6 +23,23 @@ mod tests {
         // The actual servers are spawned in background tasks.
     }
 
+    /// Test builder returns task handles when using build_with_handles.
+    #[tokio::test]
+    async fn test_builder_with_handles() {
+        let store = Arc::new(seidrum_eventbus::storage::memory_store::InMemoryEventStore::new());
+
+        let handles = EventBusBuilder::new()
+            .storage(store)
+            .build_with_handles()
+            .await
+            .unwrap();
+
+        assert!(handles.bus.metrics().await.is_ok());
+        assert!(!handles.compaction.is_finished());
+        assert!(handles.ws_server.is_none());
+        assert!(handles.http_server.is_none());
+    }
+
     /// Test that ChannelRegistry can register and retrieve channels.
     #[tokio::test]
     async fn test_channel_registry() {
@@ -86,13 +103,13 @@ mod tests {
             .deliver(event, "test.subject", &ChannelConfig::InProcess)
             .await;
 
-        assert!(result.is_ok());
+        assert!(result.is_ok(), "WebSocket deliver should succeed");
         let receipt = result.unwrap();
-        assert!(receipt.latency_us > 0);
+        assert!(receipt.latency_us > 0, "Latency should be positive");
 
         // Verify message was enqueued
         let msg = rx.recv().await;
-        assert!(msg.is_some());
+        assert!(msg.is_some(), "Should receive a forwarded message");
     }
 
     /// Test webhook delivery channel configuration parsing.
@@ -109,12 +126,18 @@ mod tests {
         };
 
         // Verify we can work with the config
-        match config {
+        match &config {
             ChannelConfig::Webhook { url, headers } => {
                 assert_eq!(url, "https://example.com/webhook");
-                assert_eq!(headers.get("Authorization").unwrap(), "Bearer token123");
+                assert_eq!(
+                    headers.get("Authorization").unwrap(),
+                    "Bearer token123",
+                    "Authorization header should match"
+                );
             }
-            _ => panic!("Wrong config type"),
+            other => {
+                panic!("Expected Webhook config, got {:?}", other);
+            }
         }
     }
 
@@ -125,16 +148,45 @@ mod tests {
 
         // Subtractive jitter: result is always in [base - base/4, base]
         let d1 = calculate_backoff(0, 100, 30000);
-        assert!(d1.as_millis() >= 75 && d1.as_millis() <= 100);
+        assert!(
+            d1.as_millis() >= 75 && d1.as_millis() <= 100,
+            "attempt 0: expected 75..100ms, got {}ms",
+            d1.as_millis()
+        );
 
         let d2 = calculate_backoff(1, 100, 30000);
-        assert!(d2.as_millis() >= 150 && d2.as_millis() <= 200);
+        assert!(
+            d2.as_millis() >= 150 && d2.as_millis() <= 200,
+            "attempt 1: expected 150..200ms, got {}ms",
+            d2.as_millis()
+        );
 
         let d5 = calculate_backoff(5, 100, 30000);
         // 2^5 * 100 = 3200, jitter removes up to 800 → 2400..3200
-        assert!(d5.as_millis() >= 2400 && d5.as_millis() <= 3200);
+        assert!(
+            d5.as_millis() >= 2400 && d5.as_millis() <= 3200,
+            "attempt 5: expected 2400..3200ms, got {}ms",
+            d5.as_millis()
+        );
 
         let d10 = calculate_backoff(10, 100, 30000);
-        assert!(d10.as_millis() <= 30000); // Capped at max
+        assert!(
+            d10.as_millis() <= 30000,
+            "attempt 10 should be capped at 30000ms, got {}ms",
+            d10.as_millis()
+        );
+    }
+
+    /// Test WebhookRetryConfig implements Serialize/Deserialize.
+    #[test]
+    fn test_webhook_retry_config_serde() {
+        use seidrum_eventbus::delivery::webhook::WebhookRetryConfig;
+
+        let config = WebhookRetryConfig::default();
+        let json = serde_json::to_string(&config).expect("should serialize");
+        let parsed: WebhookRetryConfig = serde_json::from_str(&json).expect("should deserialize");
+        assert_eq!(parsed.max_attempts, config.max_attempts);
+        assert_eq!(parsed.initial_backoff_ms, config.initial_backoff_ms);
+        assert_eq!(parsed.max_backoff_ms, config.max_backoff_ms);
     }
 }

@@ -12,7 +12,7 @@ pub mod request_reply;
 pub mod storage;
 pub mod transport;
 
-pub use builder::EventBusBuilder;
+pub use builder::{BusHandles, EventBusBuilder};
 pub use bus::{BusMetrics, EventBus, EventBusImpl, SubscribeOpts, Subscription};
 pub use delivery::{
     ChannelConfig, ChannelRegistry, DeliveryChannel, DeliveryError, DeliveryReceipt,
