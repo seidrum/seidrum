@@ -136,7 +136,9 @@ impl DispatchEngine {
         // Wait for the reply with timeout.
         let result = tokio::time::timeout(timeout, reply_rx.recv()).await;
 
-        // Clean up the one-shot subscription regardless of outcome.
+        // Close the receiver first to prevent any in-flight replies from being
+        // lost between timeout and unsubscribe, then clean up the trie entry.
+        drop(reply_rx);
         self.unsubscribe(&reply_sub_id).await.ok();
 
         match result {
@@ -160,6 +162,10 @@ impl DispatchEngine {
     /// Returns a `RequestSubscription` that yields `(RequestMessage, Replier)` pairs.
     /// The handler calls `replier.reply(payload)` to send a response.
     ///
+    /// Only events published with a `reply_subject` (i.e., via `request()`) are
+    /// forwarded to the handler. Regular `publish()` events on the same subject
+    /// are silently skipped by the bridge task.
+    ///
     /// Requires `Arc<Self>` so that `Replier` can hold a reference to the engine
     /// for publishing replies.
     pub async fn serve(
@@ -167,6 +173,7 @@ impl DispatchEngine {
         subject_pattern: &str,
         priority: u32,
         timeout: Duration,
+        filter: Option<crate::dispatch::filter::EventFilter>,
     ) -> crate::Result<RequestSubscription> {
         use crate::dispatch::SubscriptionMode;
 
@@ -177,7 +184,7 @@ impl DispatchEngine {
                 priority,
                 SubscriptionMode::Async,
                 timeout,
-                None,
+                filter,
             )
             .await?;
 
@@ -188,9 +195,21 @@ impl DispatchEngine {
         let engine = Arc::clone(self);
 
         // Spawn a bridge task: DispatchedEvent → (RequestMessage, Replier)
+        // Only forwards events that have a reply_subject (i.e., actual requests).
+        // Regular publish() events without reply_subject are silently skipped —
+        // they aren't requests and have no one to reply to.
         tokio::spawn(async move {
             while let Some(dispatched) = event_rx.recv().await {
-                let reply_subject = dispatched.reply_subject.unwrap_or_default();
+                let reply_subject = match dispatched.reply_subject {
+                    Some(rs) if !rs.is_empty() => rs,
+                    _ => {
+                        debug!(
+                            subject = %dispatched.subject,
+                            "serve() received non-request event (no reply_subject), skipping"
+                        );
+                        continue;
+                    }
+                };
 
                 let req_msg = RequestMessage {
                     payload: dispatched.payload,
@@ -207,6 +226,8 @@ impl DispatchEngine {
                     break; // RequestSubscription dropped
                 }
             }
+            // Bridge task exiting — drop engine Arc to allow clean shutdown.
+            drop(engine);
         });
 
         Ok(RequestSubscription {
@@ -230,7 +251,7 @@ mod tests {
         let handler_engine = Arc::clone(&engine);
         tokio::spawn(async move {
             let mut sub = handler_engine
-                .serve("test.request", 10, Duration::from_secs(5))
+                .serve("test.request", 10, Duration::from_secs(5), None)
                 .await
                 .unwrap();
 
@@ -271,7 +292,7 @@ mod tests {
         let handler_engine = Arc::clone(&engine);
         tokio::spawn(async move {
             let mut sub = handler_engine
-                .serve("test.request", 10, Duration::from_secs(5))
+                .serve("test.request", 10, Duration::from_secs(5), None)
                 .await
                 .unwrap();
 
@@ -298,7 +319,7 @@ mod tests {
         let handler_engine = Arc::clone(&engine);
         tokio::spawn(async move {
             let mut sub = handler_engine
-                .serve("test.request", 10, Duration::from_secs(5))
+                .serve("test.request", 10, Duration::from_secs(5), None)
                 .await
                 .unwrap();
 
@@ -369,7 +390,7 @@ mod tests {
         let handler_engine = Arc::clone(&engine);
         tokio::spawn(async move {
             let mut sub = handler_engine
-                .serve("test.request", 10, Duration::from_secs(5))
+                .serve("test.request", 10, Duration::from_secs(5), None)
                 .await
                 .unwrap();
 
@@ -387,5 +408,30 @@ mod tests {
             .unwrap();
 
         assert_eq!(reply, b"HELLO".to_vec());
+    }
+
+    #[tokio::test]
+    async fn test_serve_skips_non_request_events() {
+        let store = Arc::new(InMemoryEventStore::new());
+        let engine = Arc::new(DispatchEngine::new(store));
+
+        // Register a serve handler
+        let mut req_sub = engine
+            .serve("test.subject", 10, Duration::from_secs(5), None)
+            .await
+            .unwrap();
+
+        // Publish a regular event (no reply_subject) — serve() bridge should skip it
+        engine.publish("test.subject", b"regular").await.unwrap();
+
+        // Give the bridge task time to process
+        tokio::time::sleep(Duration::from_millis(50)).await;
+
+        // The serve channel should NOT receive anything for non-request events
+        let result = tokio::time::timeout(Duration::from_millis(200), req_sub.rx.recv()).await;
+        assert!(
+            result.is_err(),
+            "serve() should skip events without reply_subject"
+        );
     }
 }
