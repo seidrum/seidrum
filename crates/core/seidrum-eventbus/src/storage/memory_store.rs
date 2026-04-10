@@ -51,6 +51,11 @@ impl EventStore for InMemoryEventStore {
         Ok(seq)
     }
 
+    async fn get(&self, seq: u64) -> StorageResult<Option<StoredEvent>> {
+        let events = self.events.read().await;
+        Ok(events.iter().find(|e| e.seq == seq).cloned())
+    }
+
     async fn update_status(&self, seq: u64, status: EventStatus) -> StorageResult<()> {
         let mut events = self.events.write().await;
         if let Some(event) = events.iter_mut().find(|e| e.seq == seq) {
@@ -67,6 +72,7 @@ impl EventStore for InMemoryEventStore {
         subscriber_id: &str,
         status: DeliveryStatus,
         error: Option<String>,
+        next_retry: Option<u64>,
     ) -> StorageResult<()> {
         let mut events = self.events.write().await;
         if let Some(event) = events.iter_mut().find(|e| e.seq == seq) {
@@ -77,28 +83,36 @@ impl EventStore for InMemoryEventStore {
                 .find(|d| d.subscriber_id == subscriber_id)
             {
                 delivery.status = status;
-                delivery.attempts += 1;
+                // Count attempts that represent a real delivery attempt
+                // (Failed and DeadLettered) but not Delivered (which would
+                // produce off-by-one observability).
+                if matches!(
+                    status,
+                    DeliveryStatus::Failed | DeliveryStatus::DeadLettered
+                ) {
+                    delivery.attempts += 1;
+                }
                 delivery.last_attempt = Some(Self::current_time_ms());
-                delivery.error = error;
-                delivery.next_retry = if status == DeliveryStatus::Failed {
-                    // Exponential backoff: 100ms * 2^attempts, capped at 30s
-                    let backoff_ms =
-                        100_u64.saturating_mul(2_u64.saturating_pow(delivery.attempts));
-                    Some(Self::current_time_ms() + backoff_ms.min(30_000))
-                } else {
-                    None
-                };
+                // Only overwrite the error on Failed/DeadLettered transitions.
+                // Successful retries preserve the prior failure context for
+                // diagnostics, regardless of what the caller passed.
+                if matches!(
+                    status,
+                    DeliveryStatus::Failed | DeliveryStatus::DeadLettered
+                ) {
+                    delivery.error = error;
+                }
+                delivery.next_retry = next_retry;
             } else {
                 let now = Self::current_time_ms();
-                let next_retry = if status == DeliveryStatus::Failed {
-                    Some(now + 100) // first retry after 100ms
-                } else {
-                    None
-                };
                 event.deliveries.push(DeliveryRecord {
                     subscriber_id: subscriber_id.to_string(),
                     status,
-                    attempts: 1,
+                    attempts: if status == DeliveryStatus::Failed {
+                        1
+                    } else {
+                        0
+                    },
                     last_attempt: Some(now),
                     next_retry,
                     error,
@@ -150,22 +164,38 @@ impl EventStore for InMemoryEventStore {
         let now = Self::current_time_ms();
         for event in events.iter() {
             for delivery in &event.deliveries {
-                if delivery.status == DeliveryStatus::Failed
-                    && delivery.attempts < max_attempts
-                    && delivery.next_retry.is_none_or(|t| t <= now)
-                {
+                if delivery.is_retryable(max_attempts, now) {
                     retryable.push(RetryableDelivery {
                         seq: event.seq,
                         subject: event.subject.clone(),
                         subscriber_id: delivery.subscriber_id.clone(),
                         attempts: delivery.attempts,
                         payload: event.payload.clone(),
+                        reply_subject: event.reply_subject.clone(),
+                        next_retry: delivery.next_retry,
                     });
                 }
             }
         }
 
+        // Sort by next_retry ascending so the earliest-due deliveries come
+        // first. None (no retry scheduled) sorts first.
+        retryable.sort_by_key(|r| r.next_retry.unwrap_or(0));
         Ok(retryable.into_iter().take(limit).collect())
+    }
+
+    async fn count_retryable(&self, max_attempts: u32) -> StorageResult<u64> {
+        let events = self.events.read().await;
+        let now = Self::current_time_ms();
+        let mut count = 0u64;
+        for event in events.iter() {
+            for delivery in &event.deliveries {
+                if delivery.is_retryable(max_attempts, now) {
+                    count += 1;
+                }
+            }
+        }
+        Ok(count)
     }
 
     async fn compact(&self, older_than: Duration) -> StorageResult<u64> {

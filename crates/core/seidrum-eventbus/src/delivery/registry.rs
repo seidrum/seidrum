@@ -26,8 +26,18 @@ impl ChannelRegistry {
     }
 
     /// Register a delivery channel by type name.
+    ///
+    /// If a channel was already registered under the same type name it is
+    /// silently replaced; a warning is logged so accidental shadowing is
+    /// visible in operator logs.
     pub async fn register(&self, type_name: &str, channel: Arc<dyn DeliveryChannel>) {
         let mut channels = self.channels.write().await;
+        if channels.contains_key(type_name) {
+            tracing::warn!(
+                channel_type = type_name,
+                "ChannelRegistry: replacing existing registration"
+            );
+        }
         channels.insert(type_name.to_string(), channel);
     }
 

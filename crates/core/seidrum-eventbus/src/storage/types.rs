@@ -79,6 +79,20 @@ pub struct DeliveryRecord {
     pub error: Option<String>,
 }
 
+impl DeliveryRecord {
+    /// Returns `true` if this delivery is currently eligible for a retry
+    /// attempt: status is `Failed`, `attempts` is below the cap, and the
+    /// `next_retry` schedule has elapsed (or is unset).
+    ///
+    /// Single source of truth used by both `query_retryable` and
+    /// `count_retryable` in every store implementation.
+    pub fn is_retryable(&self, max_attempts: u32, now_ms: u64) -> bool {
+        self.status == DeliveryStatus::Failed
+            && self.attempts < max_attempts
+            && self.next_retry.is_none_or(|t| t <= now_ms)
+    }
+}
+
 /// A delivery that is ready to be retried.
 #[derive(Debug, Clone)]
 pub struct RetryableDelivery {
@@ -87,4 +101,11 @@ pub struct RetryableDelivery {
     pub subscriber_id: String,
     pub attempts: u32,
     pub payload: Vec<u8>,
+    /// If the original event was a request, the subject to reply on.
+    /// Propagated through retry so handlers receive a working `Replier`.
+    pub reply_subject: Option<String>,
+    /// Earliest timestamp (unix-millis) at which this delivery is eligible
+    /// for the next retry attempt. Used by `query_retryable` to sort
+    /// results so the earliest-due deliveries are returned first.
+    pub next_retry: Option<u64>,
 }

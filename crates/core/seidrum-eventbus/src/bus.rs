@@ -146,10 +146,38 @@ pub struct EventBusImpl {
 }
 
 impl EventBusImpl {
+    /// Construct an `EventBusImpl` from an event store with default
+    /// retry configuration and an empty channel registry.
+    ///
+    /// **Note:** the engine wired up by this constructor cannot share its
+    /// `ChannelRegistry` with anything else (e.g., the HTTP transport's
+    /// webhook subscriptions or the retry task's `Custom` channel lookups).
+    /// For production use, prefer constructing via [`crate::EventBusBuilder`]
+    /// which wires up a single shared registry across the engine, transports,
+    /// and retry task.
     pub fn new(store: Arc<dyn EventStore>) -> Self {
         Self {
             engine: Arc::new(DispatchEngine::new(store)),
         }
+    }
+
+    /// Construct an `EventBusImpl` that shares a [`crate::delivery::ChannelRegistry`]
+    /// with the dispatch engine. The registry is used by the retry task for
+    /// looking up `ChannelConfig::Custom` delivery channels.
+    pub fn with_registry(
+        store: Arc<dyn EventStore>,
+        registry: Arc<crate::delivery::ChannelRegistry>,
+    ) -> Self {
+        Self {
+            engine: Arc::new(DispatchEngine::with_registry(store, registry)),
+        }
+    }
+
+    /// Wrap an already-constructed [`DispatchEngine`] in an `EventBusImpl`.
+    /// Used by [`crate::EventBusBuilder`] so the engine, retry task, and
+    /// transports all share the same instance.
+    pub fn from_engine(engine: Arc<DispatchEngine>) -> Self {
+        Self { engine }
     }
 }
 
@@ -227,16 +255,26 @@ impl EventBus for EventBusImpl {
 
     async fn metrics(&self) -> crate::Result<BusMetrics> {
         use std::sync::atomic::Ordering;
-        // events_pending_retry: query the store. We use u32::MAX as the
-        // "give me everything that could ever retry" upper bound and a large
-        // limit so the count is approximate but useful.
-        let pending_retry = self
-            .engine
-            .store
-            .query_retryable(u32::MAX, 10_000)
-            .await
-            .map(|v| v.len() as u64)
-            .unwrap_or(0);
+        // Only report `events_pending_retry` if a retry task is actually
+        // running. Otherwise the count is meaningless — there's no worker
+        // to drain it. A bus without `with_retry()` reports 0 here so
+        // dashboards don't surface a permanent backlog.
+        let pending_retry = if self.engine.retry_enabled {
+            match self
+                .engine
+                .store
+                .count_retryable(self.engine.retry_config.max_attempts)
+                .await
+            {
+                Ok(n) => n,
+                Err(e) => {
+                    tracing::warn!(error = %e, "metrics: count_retryable failed");
+                    0
+                }
+            }
+        } else {
+            0
+        };
 
         Ok(BusMetrics {
             events_published: self.engine.events_published.load(Ordering::Relaxed),

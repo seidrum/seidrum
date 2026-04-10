@@ -227,6 +227,41 @@ impl SubjectIndex {
         all
     }
 
+    /// Find a subscription by its ID. O(n) walk over the trie.
+    /// Returns `None` if no subscription with the given ID exists.
+    pub fn find_by_id(&self, id: &str) -> Option<SubscriptionEntry> {
+        let mut found = None;
+        Self::find_by_id_inner(&self.root, id, &mut found);
+        found
+    }
+
+    fn find_by_id_inner(node: &TrieNode, id: &str, out: &mut Option<SubscriptionEntry>) {
+        if out.is_some() {
+            return;
+        }
+        for entry in &node.subscriptions {
+            if entry.id == id {
+                *out = Some(entry.clone());
+                return;
+            }
+        }
+        for entry in &node.terminal_wildcard {
+            if entry.id == id {
+                *out = Some(entry.clone());
+                return;
+            }
+        }
+        for child in node.children.values() {
+            Self::find_by_id_inner(child, id, out);
+            if out.is_some() {
+                return;
+            }
+        }
+        if let Some(ref wildcard) = node.wildcard {
+            Self::find_by_id_inner(wildcard, id, out);
+        }
+    }
+
     fn collect_all(node: &TrieNode, filter: Option<&str>, results: &mut Vec<SubscriptionEntry>) {
         let matches = |entry: &SubscriptionEntry| filter.is_none_or(|f| entry.subject_pattern == f);
         for entry in &node.subscriptions {
@@ -427,6 +462,51 @@ mod tests {
         // "foo" alone must match nothing (no exact pattern equals "foo")
         let filtered = index.list(Some("foo"));
         assert!(filtered.is_empty());
+    }
+
+    #[test]
+    fn test_find_by_id_exact() {
+        let mut index = SubjectIndex::new();
+        index.subscribe(make_entry("a", "test.exact", 10)).unwrap();
+        let found = index.find_by_id("a");
+        assert!(found.is_some());
+        assert_eq!(found.unwrap().subject_pattern, "test.exact");
+    }
+
+    #[test]
+    fn test_find_by_id_star_wildcard() {
+        let mut index = SubjectIndex::new();
+        index
+            .subscribe(make_entry("star", "channel.*.inbound", 10))
+            .unwrap();
+        let found = index.find_by_id("star");
+        assert!(found.is_some());
+        assert_eq!(found.unwrap().subject_pattern, "channel.*.inbound");
+    }
+
+    #[test]
+    fn test_find_by_id_gt_wildcard() {
+        let mut index = SubjectIndex::new();
+        index.subscribe(make_entry("gt", "brain.>", 10)).unwrap();
+        let found = index.find_by_id("gt");
+        assert!(found.is_some());
+        assert_eq!(found.unwrap().subject_pattern, "brain.>");
+    }
+
+    #[test]
+    fn test_find_by_id_not_found() {
+        let mut index = SubjectIndex::new();
+        index.subscribe(make_entry("a", "test", 10)).unwrap();
+        assert!(index.find_by_id("nonexistent").is_none());
+    }
+
+    #[test]
+    fn test_find_by_id_after_unsubscribe() {
+        let mut index = SubjectIndex::new();
+        index.subscribe(make_entry("a", "test", 10)).unwrap();
+        assert!(index.find_by_id("a").is_some());
+        index.unsubscribe("a");
+        assert!(index.find_by_id("a").is_none());
     }
 
     #[test]
