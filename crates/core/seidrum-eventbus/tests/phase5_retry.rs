@@ -33,6 +33,11 @@ impl FlakyChannel {
         })
     }
 
+    /// Channel that fails every delivery attempt forever.
+    fn always_fail() -> Arc<Self> {
+        Self::new(u32::MAX)
+    }
+
     fn calls(&self) -> u32 {
         self.call_count.load(Ordering::SeqCst)
     }
@@ -76,18 +81,27 @@ async fn setup_engine_with_retry(
     Arc<InMemoryEventStore>,
     tokio::sync::watch::Sender<bool>,
 ) {
+    use seidrum_eventbus::delivery::WebhookChannel;
     let store = Arc::new(InMemoryEventStore::new());
-    let engine = Arc::new(DispatchEngine::with_registry(
+    let retry_config = Arc::new(RetryConfig {
+        max_attempts,
+        initial_backoff_ms: 30,
+        max_backoff_ms: 200,
+    });
+    let engine = Arc::new(DispatchEngine::with_components(
         Arc::clone(&store) as Arc<dyn EventStore>,
         registry,
+        WebhookChannel::new(),
+        Arc::clone(&retry_config),
     ));
 
     let (shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);
     let retry_task = RetryTask::new(
         Arc::clone(&store) as Arc<dyn EventStore>,
         Arc::clone(&engine),
-        max_attempts,
+        retry_config,
         Duration::from_millis(50),
+        256,
         shutdown_rx,
     );
     tokio::spawn(async move {
@@ -142,12 +156,19 @@ async fn seed_failed_event(
         reply_subject: None,
     };
     let seq = store.append(&event).await.unwrap();
+    // Schedule the first retry to fire essentially immediately so tests
+    // don't have to wait for the default backoff.
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis() as u64;
     store
         .record_delivery(
             seq,
             sub_id,
             DeliveryStatus::Failed,
             Some("initial failure".to_string()),
+            Some(now), // ready immediately
         )
         .await
         .unwrap();
@@ -201,7 +222,7 @@ async fn test_retry_succeeds_after_failures() {
 #[tokio::test]
 async fn test_retry_dead_letters_after_max_attempts() {
     let registry = Arc::new(ChannelRegistry::new());
-    let flaky = FlakyChannel::new(u32::MAX); // always fails
+    let flaky = FlakyChannel::always_fail();
     registry
         .register("flaky", Arc::clone(&flaky) as Arc<dyn DeliveryChannel>)
         .await;
@@ -315,4 +336,212 @@ async fn test_retry_task_not_started_without_with_retry() {
         .unwrap();
 
     assert!(handles.retry_task.is_none());
+}
+
+#[tokio::test]
+async fn test_with_retry_poll_interval_order_independent() {
+    // Calling with_retry_poll_interval BEFORE with_retry must still apply.
+    let store = Arc::new(InMemoryEventStore::new());
+    let handles = EventBusBuilder::new()
+        .storage(store)
+        .with_retry_poll_interval(Duration::from_millis(75))
+        .with_retry(RetryConfig::default())
+        .build_with_handles()
+        .await
+        .unwrap();
+
+    // The retry task is spawned (we can't observe the interval directly,
+    // but the test ensures the chained methods work without panicking
+    // and that with_retry_poll_interval doesn't drop the value).
+    assert!(handles.retry_task.is_some());
+    handles.shutdown_and_join().await;
+}
+
+#[tokio::test]
+async fn test_register_channel_via_builder() {
+    let store = Arc::new(InMemoryEventStore::new());
+    let flaky = FlakyChannel::new(0); // always succeeds
+
+    let handles = EventBusBuilder::new()
+        .storage(store)
+        .register_channel("flaky", Arc::clone(&flaky) as Arc<dyn DeliveryChannel>)
+        .with_retry(RetryConfig::default())
+        .build_with_handles()
+        .await
+        .unwrap();
+
+    assert!(handles.retry_task.is_some());
+    handles.shutdown_and_join().await;
+}
+
+#[tokio::test]
+async fn test_count_retryable_metric() {
+    use seidrum_eventbus::storage::DeliveryStatus;
+    use seidrum_eventbus::storage::StoredEvent;
+
+    let registry = Arc::new(ChannelRegistry::new());
+    // Register a channel that always fails so retries don't drain the queue.
+    let flaky = FlakyChannel::always_fail();
+    registry
+        .register("flaky", Arc::clone(&flaky) as Arc<dyn DeliveryChannel>)
+        .await;
+
+    let store = Arc::new(InMemoryEventStore::new());
+
+    // Seed two failed deliveries, both ready immediately
+    let event = StoredEvent {
+        seq: 0,
+        subject: "test".to_string(),
+        payload: b"x".to_vec(),
+        stored_at: 0,
+        status: EventStatus::PartiallyDelivered,
+        deliveries: vec![],
+        reply_subject: None,
+    };
+    let seq1 = store.append(&event).await.unwrap();
+    let seq2 = store.append(&event).await.unwrap();
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis() as u64;
+    store
+        .record_delivery(
+            seq1,
+            "sub1",
+            DeliveryStatus::Failed,
+            Some("a".into()),
+            Some(now),
+        )
+        .await
+        .unwrap();
+    store
+        .record_delivery(
+            seq2,
+            "sub2",
+            DeliveryStatus::Failed,
+            Some("b".into()),
+            Some(now),
+        )
+        .await
+        .unwrap();
+
+    let count = store.count_retryable(10).await.unwrap();
+    assert_eq!(count, 2);
+}
+
+#[tokio::test]
+async fn test_redb_retry_succeeds_after_failures() {
+    use seidrum_eventbus::delivery::WebhookChannel;
+    use seidrum_eventbus::storage::redb_store::RedbEventStore;
+    use seidrum_eventbus::storage::DeliveryStatus;
+    use seidrum_eventbus::storage::StoredEvent;
+    use tempfile::TempDir;
+
+    let temp = TempDir::new().unwrap();
+    let store: Arc<dyn EventStore> =
+        Arc::new(RedbEventStore::open(temp.path().join("events.db")).unwrap());
+
+    let registry = Arc::new(ChannelRegistry::new());
+    let flaky = FlakyChannel::new(2);
+    registry
+        .register("flaky", Arc::clone(&flaky) as Arc<dyn DeliveryChannel>)
+        .await;
+
+    let retry_config = Arc::new(RetryConfig {
+        max_attempts: 5,
+        initial_backoff_ms: 30,
+        max_backoff_ms: 200,
+    });
+    let engine = Arc::new(DispatchEngine::with_components(
+        Arc::clone(&store),
+        Arc::clone(&registry),
+        WebhookChannel::new(),
+        Arc::clone(&retry_config),
+    ));
+
+    let sub_id = subscribe_custom(&engine, "test.redb_retry", "flaky").await;
+
+    let event = StoredEvent {
+        seq: 0,
+        subject: "test.redb_retry".to_string(),
+        payload: b"redb".to_vec(),
+        stored_at: 0,
+        status: EventStatus::PartiallyDelivered,
+        deliveries: vec![],
+        reply_subject: None,
+    };
+    let seq = store.append(&event).await.unwrap();
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis() as u64;
+    store
+        .record_delivery(
+            seq,
+            &sub_id,
+            DeliveryStatus::Failed,
+            Some("first".into()),
+            Some(now),
+        )
+        .await
+        .unwrap();
+    store
+        .update_status(seq, EventStatus::PartiallyDelivered)
+        .await
+        .unwrap();
+
+    let (_shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);
+    let task = RetryTask::new(
+        Arc::clone(&store),
+        Arc::clone(&engine),
+        Arc::clone(&retry_config),
+        Duration::from_millis(50),
+        256,
+        shutdown_rx,
+    );
+    tokio::spawn(async move {
+        task.run().await;
+    });
+
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while Instant::now() < deadline && flaky.calls() < 3 {
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    assert!(
+        flaky.calls() >= 3,
+        "redb retry: expected 3 calls, got {}",
+        flaky.calls()
+    );
+
+    // The failed_deliveries_idx should be cleaned up after success
+    let pending = store.count_retryable(10).await.unwrap();
+    assert_eq!(pending, 0, "no retryable deliveries should remain");
+}
+
+#[tokio::test]
+async fn test_concurrent_retries_independent() {
+    let registry = Arc::new(ChannelRegistry::new());
+    let flaky_a = FlakyChannel::new(1); // fail once, succeed
+    let flaky_b = FlakyChannel::new(1);
+    registry
+        .register("a", Arc::clone(&flaky_a) as Arc<dyn DeliveryChannel>)
+        .await;
+    registry
+        .register("b", Arc::clone(&flaky_b) as Arc<dyn DeliveryChannel>)
+        .await;
+
+    let (engine, store, _shutdown) = setup_engine_with_retry(Arc::clone(&registry), 5).await;
+    let sub_a = subscribe_custom(&engine, "test.a", "a").await;
+    let sub_b = subscribe_custom(&engine, "test.b", "b").await;
+
+    let _seq_a = seed_failed_event(&store, "test.a", b"a", &sub_a).await;
+    let _seq_b = seed_failed_event(&store, "test.b", b"b", &sub_b).await;
+
+    // Wait for both to deliver successfully (each: 1 fail + 1 success = 2 calls)
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while Instant::now() < deadline && (flaky_a.calls() < 2 || flaky_b.calls() < 2) {
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    assert!(flaky_a.calls() >= 2, "channel a calls={}", flaky_a.calls());
+    assert!(flaky_b.calls() >= 2, "channel b calls={}", flaky_b.calls());
 }

@@ -80,13 +80,21 @@ impl DeliveryChannel for WebhookChannel {
             .await
             .map_err(|e| DeliveryError::Failed(format!("HTTP request failed: {}", e)))?;
 
-        // Check status code
-        if !response.status().is_success() {
-            return Err(DeliveryError::Failed(format!(
+        // Classify status code: 4xx is permanent (auth errors, not-found,
+        // method-not-allowed don't get better with retries); 5xx and other
+        // failures are transient.
+        let status = response.status();
+        if !status.is_success() {
+            let msg = format!(
                 "HTTP {}: {}",
-                response.status().as_u16(),
-                response.status().canonical_reason().unwrap_or("unknown")
-            )));
+                status.as_u16(),
+                status.canonical_reason().unwrap_or("unknown")
+            );
+            // Treat 408 Request Timeout and 429 Too Many Requests as transient.
+            if status.is_client_error() && status.as_u16() != 408 && status.as_u16() != 429 {
+                return Err(DeliveryError::Permanent(msg));
+            }
+            return Err(DeliveryError::Failed(msg));
         }
 
         let elapsed = SystemTime::now()

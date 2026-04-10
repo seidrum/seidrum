@@ -465,6 +465,51 @@ mod tests {
     }
 
     #[test]
+    fn test_find_by_id_exact() {
+        let mut index = SubjectIndex::new();
+        index.subscribe(make_entry("a", "test.exact", 10)).unwrap();
+        let found = index.find_by_id("a");
+        assert!(found.is_some());
+        assert_eq!(found.unwrap().subject_pattern, "test.exact");
+    }
+
+    #[test]
+    fn test_find_by_id_star_wildcard() {
+        let mut index = SubjectIndex::new();
+        index
+            .subscribe(make_entry("star", "channel.*.inbound", 10))
+            .unwrap();
+        let found = index.find_by_id("star");
+        assert!(found.is_some());
+        assert_eq!(found.unwrap().subject_pattern, "channel.*.inbound");
+    }
+
+    #[test]
+    fn test_find_by_id_gt_wildcard() {
+        let mut index = SubjectIndex::new();
+        index.subscribe(make_entry("gt", "brain.>", 10)).unwrap();
+        let found = index.find_by_id("gt");
+        assert!(found.is_some());
+        assert_eq!(found.unwrap().subject_pattern, "brain.>");
+    }
+
+    #[test]
+    fn test_find_by_id_not_found() {
+        let mut index = SubjectIndex::new();
+        index.subscribe(make_entry("a", "test", 10)).unwrap();
+        assert!(index.find_by_id("nonexistent").is_none());
+    }
+
+    #[test]
+    fn test_find_by_id_after_unsubscribe() {
+        let mut index = SubjectIndex::new();
+        index.subscribe(make_entry("a", "test", 10)).unwrap();
+        assert!(index.find_by_id("a").is_some());
+        index.unsubscribe("a");
+        assert!(index.find_by_id("a").is_none());
+    }
+
+    #[test]
     fn test_subject_depth_limit() {
         let mut index = SubjectIndex::new();
         let deep_pattern = (0..257)

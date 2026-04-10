@@ -149,6 +149,33 @@ impl EventStore for RedbEventStore {
         .map_err(|e| StorageError::OperationFailed(format!("spawn_blocking error: {}", e)))?
     }
 
+    async fn get(&self, seq: u64) -> StorageResult<Option<StoredEvent>> {
+        let db = Arc::clone(&self.db);
+        tokio::task::spawn_blocking(move || {
+            let read_txn = db
+                .begin_read()
+                .map_err(|e| StorageError::DatabaseError(format!("failed to begin read: {}", e)))?;
+            let events_table = read_txn.open_table(EVENTS_TABLE).map_err(|e| {
+                StorageError::DatabaseError(format!("failed to open events table: {}", e))
+            })?;
+            match events_table
+                .get(seq)
+                .map_err(|e| StorageError::DatabaseError(format!("failed to get event: {}", e)))?
+            {
+                Some(data) => {
+                    let bytes = data.value().to_vec();
+                    let event: StoredEvent = serde_json::from_slice(&bytes).map_err(|e| {
+                        StorageError::OperationFailed(format!("failed to deserialize: {}", e))
+                    })?;
+                    Ok(Some(event))
+                }
+                None => Ok(None),
+            }
+        })
+        .await
+        .map_err(|e| StorageError::OperationFailed(format!("spawn_blocking error: {}", e)))?
+    }
+
     async fn update_status(&self, seq: u64, status: EventStatus) -> StorageResult<()> {
         let db = Arc::clone(&self.db);
 
@@ -203,6 +230,23 @@ impl EventStore for RedbEventStore {
                 })?;
             }
 
+            // Defensively clean the failed-deliveries index when transitioning
+            // to a terminal state. The invariant is "seq is in the index iff
+            // any delivery is Failed", and a terminal event status implies no
+            // outstanding failures.
+            if matches!(status, EventStatus::Delivered | EventStatus::DeadLettered) {
+                let mut failed_idx =
+                    write_txn
+                        .open_table(FAILED_DELIVERIES_IDX_TABLE)
+                        .map_err(|e| {
+                            StorageError::DatabaseError(format!(
+                                "failed to open failed_deliveries_idx: {}",
+                                e
+                            ))
+                        })?;
+                let _ = failed_idx.remove(seq);
+            }
+
             write_txn
                 .commit()
                 .map_err(|e| StorageError::DatabaseError(format!("failed to commit: {}", e)))
@@ -217,6 +261,7 @@ impl EventStore for RedbEventStore {
         subscriber_id: &str,
         status: DeliveryStatus,
         error: Option<String>,
+        next_retry: Option<u64>,
     ) -> StorageResult<()> {
         let db = Arc::clone(&self.db);
         let subscriber_id = subscriber_id.to_string();
@@ -250,27 +295,27 @@ impl EventStore for RedbEventStore {
                     .find(|d| d.subscriber_id == subscriber_id)
                 {
                     delivery.status = status;
-                    delivery.attempts += 1;
+                    // Only count failed retries against attempts; success and
+                    // dead-letter transitions preserve the existing count.
+                    if status == DeliveryStatus::Failed {
+                        delivery.attempts += 1;
+                    }
                     delivery.last_attempt = Some(RedbEventStore::current_time_ms());
-                    delivery.error = error;
-                    delivery.next_retry = if status == DeliveryStatus::Failed {
-                        let backoff_ms =
-                            100_u64.saturating_mul(2_u64.saturating_pow(delivery.attempts));
-                        Some(RedbEventStore::current_time_ms() + backoff_ms.min(30_000))
-                    } else {
-                        None
-                    };
+                    // Preserve previous error on success transitions.
+                    if error.is_some() {
+                        delivery.error = error;
+                    }
+                    delivery.next_retry = next_retry;
                 } else {
                     let now = RedbEventStore::current_time_ms();
-                    let next_retry = if status == DeliveryStatus::Failed {
-                        Some(now + 100)
-                    } else {
-                        None
-                    };
                     event.deliveries.push(DeliveryRecord {
                         subscriber_id,
                         status,
-                        attempts: 1,
+                        attempts: if status == DeliveryStatus::Failed {
+                            1
+                        } else {
+                            0
+                        },
                         last_attempt: Some(now),
                         next_retry,
                         error,
@@ -468,7 +513,7 @@ impl EventStore for RedbEventStore {
                     ))
                 })?;
 
-            let mut results = Vec::new();
+            let mut results: Vec<RetryableDelivery> = Vec::new();
             // Iterate only events known to have at least one Failed delivery.
             let iter = failed_idx
                 .iter()
@@ -476,9 +521,6 @@ impl EventStore for RedbEventStore {
 
             let now = RedbEventStore::current_time_ms();
             for item in iter {
-                if results.len() >= limit {
-                    break;
-                }
                 let (key, _) = item.map_err(|e| {
                     StorageError::DatabaseError(format!("failed to iterate: {}", e))
                 })?;
@@ -488,7 +530,13 @@ impl EventStore for RedbEventStore {
                     StorageError::DatabaseError(format!("failed to get event: {}", e))
                 })? {
                     Some(d) => d,
-                    None => continue, // Stale index entry
+                    None => {
+                        tracing::warn!(
+                            seq = seq,
+                            "stale failed_deliveries_idx entry: event not found"
+                        );
+                        continue;
+                    }
                 };
                 let bytes = data.value().to_vec();
                 let event: StoredEvent = serde_json::from_slice(&bytes).map_err(|e| {
@@ -496,9 +544,6 @@ impl EventStore for RedbEventStore {
                 })?;
 
                 for delivery in &event.deliveries {
-                    if results.len() >= limit {
-                        break;
-                    }
                     if delivery.status == DeliveryStatus::Failed
                         && delivery.attempts < max_attempts
                         && delivery.next_retry.is_none_or(|t| t <= now)
@@ -509,12 +554,71 @@ impl EventStore for RedbEventStore {
                             subscriber_id: delivery.subscriber_id.clone(),
                             attempts: delivery.attempts,
                             payload: event.payload.clone(),
+                            reply_subject: event.reply_subject.clone(),
+                            next_retry: delivery.next_retry,
                         });
                     }
                 }
             }
 
+            // Sort by next_retry ascending so the earliest-due deliveries
+            // come first. None (no retry scheduled) sorts to the front.
+            results.sort_by_key(|r| r.next_retry.unwrap_or(0));
+            results.truncate(limit);
             Ok(results)
+        })
+        .await
+        .map_err(|e| StorageError::OperationFailed(format!("spawn_blocking error: {}", e)))?
+    }
+
+    async fn count_retryable(&self, max_attempts: u32) -> StorageResult<u64> {
+        let db = Arc::clone(&self.db);
+        tokio::task::spawn_blocking(move || {
+            let read_txn = db
+                .begin_read()
+                .map_err(|e| StorageError::DatabaseError(format!("failed to begin read: {}", e)))?;
+            let events_table = read_txn.open_table(EVENTS_TABLE).map_err(|e| {
+                StorageError::DatabaseError(format!("failed to open events table: {}", e))
+            })?;
+            let failed_idx = read_txn
+                .open_table(FAILED_DELIVERIES_IDX_TABLE)
+                .map_err(|e| {
+                    StorageError::DatabaseError(format!(
+                        "failed to open failed_deliveries_idx: {}",
+                        e
+                    ))
+                })?;
+
+            let now = RedbEventStore::current_time_ms();
+            let mut count = 0u64;
+            let iter = failed_idx
+                .iter()
+                .map_err(|e| StorageError::DatabaseError(format!("failed to iterate: {}", e)))?;
+            for item in iter {
+                let (key, _) = item.map_err(|e| {
+                    StorageError::DatabaseError(format!("failed to iterate: {}", e))
+                })?;
+                let seq: u64 = key.value();
+                let data = match events_table.get(seq).map_err(|e| {
+                    StorageError::DatabaseError(format!("failed to get event: {}", e))
+                })? {
+                    Some(d) => d,
+                    None => continue,
+                };
+                let bytes = data.value().to_vec();
+                let event: StoredEvent = serde_json::from_slice(&bytes).map_err(|e| {
+                    StorageError::OperationFailed(format!("failed to deserialize: {}", e))
+                })?;
+                for delivery in &event.deliveries {
+                    if delivery.status == DeliveryStatus::Failed
+                        && delivery.attempts < max_attempts
+                        && delivery.next_retry.is_none_or(|t| t <= now)
+                    {
+                        count += 1;
+                    }
+                }
+            }
+            Ok(count)
         })
         .await
         .map_err(|e| StorageError::OperationFailed(format!("spawn_blocking error: {}", e)))?
@@ -746,7 +850,7 @@ mod tests {
 
         let seq = store.append(&event).await.unwrap();
         store
-            .record_delivery(seq, "sub1", DeliveryStatus::Delivered, None)
+            .record_delivery(seq, "sub1", DeliveryStatus::Delivered, None, None)
             .await
             .unwrap();
 

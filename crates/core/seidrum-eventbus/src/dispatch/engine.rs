@@ -81,8 +81,10 @@ pub struct DispatchEngine {
     pub(crate) events_delivered: AtomicU64,
     /// Registry of custom delivery channels for retry execution.
     pub(crate) channel_registry: Arc<crate::delivery::ChannelRegistry>,
-    /// Built-in webhook delivery channel used by the retry task.
+    /// Shared webhook delivery channel used for both initial delivery and retries.
     pub(crate) webhook_channel: Arc<crate::delivery::WebhookChannel>,
+    /// Retry backoff configuration applied when recording delivery failures.
+    pub(crate) retry_config: Arc<crate::delivery::RetryConfig>,
 }
 
 pub(crate) struct DispatchState {
@@ -94,12 +96,35 @@ pub(crate) struct DispatchState {
 
 impl DispatchEngine {
     pub fn new(store: Arc<dyn EventStore>) -> Self {
-        Self::with_registry(store, Arc::new(crate::delivery::ChannelRegistry::new()))
+        Self::with_components(
+            store,
+            Arc::new(crate::delivery::ChannelRegistry::new()),
+            crate::delivery::WebhookChannel::new(),
+            Arc::new(crate::delivery::RetryConfig::default()),
+        )
     }
 
     pub fn with_registry(
         store: Arc<dyn EventStore>,
         channel_registry: Arc<crate::delivery::ChannelRegistry>,
+    ) -> Self {
+        Self::with_components(
+            store,
+            channel_registry,
+            crate::delivery::WebhookChannel::new(),
+            Arc::new(crate::delivery::RetryConfig::default()),
+        )
+    }
+
+    /// Construct a `DispatchEngine` with all components explicitly supplied.
+    /// Used by [`crate::EventBusBuilder`] so the same channel registry,
+    /// webhook channel, and retry config are shared with the HTTP transport
+    /// and retry task.
+    pub fn with_components(
+        store: Arc<dyn EventStore>,
+        channel_registry: Arc<crate::delivery::ChannelRegistry>,
+        webhook_channel: Arc<crate::delivery::WebhookChannel>,
+        retry_config: Arc<crate::delivery::RetryConfig>,
     ) -> Self {
         Self {
             store,
@@ -111,7 +136,8 @@ impl DispatchEngine {
             events_published: AtomicU64::new(0),
             events_delivered: AtomicU64::new(0),
             channel_registry,
-            webhook_channel: crate::delivery::WebhookChannel::new(),
+            webhook_channel,
+            retry_config,
         }
     }
 
@@ -218,17 +244,33 @@ impl DispatchEngine {
         let event_reply_subject = reply_subject;
 
         // Helper: record delivery only for persisted (non-reply) events.
+        // For Failed transitions, computes next_retry from the engine's
+        // RetryConfig (this is the *first* failure on this subscriber, so
+        // the post-store attempt count will be 1).
         let store = &self.store;
         let delivered_counter = &self.events_delivered;
-        let try_record = |seq: u64, sub_id: &str, status: DeliveryStatus, error: Option<String>| {
+        let retry_config = Arc::clone(&self.retry_config);
+        let try_record = move |seq: u64,
+                               sub_id: &str,
+                               status: DeliveryStatus,
+                               error: Option<String>| {
             let sub_id = sub_id.to_string();
             let store = Arc::clone(store);
+            let retry_config = Arc::clone(&retry_config);
             async move {
                 if status == DeliveryStatus::Delivered {
                     delivered_counter.fetch_add(1, Ordering::Relaxed);
                 }
+                let next_retry = if status == DeliveryStatus::Failed {
+                    Some(crate::delivery::next_retry_after(1, &retry_config))
+                } else {
+                    None
+                };
                 if !is_reply {
-                    if let Err(e) = store.record_delivery(seq, &sub_id, status, error).await {
+                    if let Err(e) = store
+                        .record_delivery(seq, &sub_id, status, error, next_retry)
+                        .await
+                    {
                         warn!(seq = seq, subscriber = sub_id, error = %e, "failed to record delivery");
                     }
                 }
@@ -612,27 +654,36 @@ impl DispatchEngine {
 
     /// Retry delivery to a specific subscriber. Used by [`crate::delivery::RetryTask`].
     ///
-    /// Looks up the live subscription by `subscriber_id`, then dispatches the
-    /// payload through the channel configured on that subscription. Returns
-    /// `Ok(())` on successful delivery, `Err(RetryOutcome::Permanent)` if the
-    /// subscriber is gone or the channel cannot be retried (e.g., closed
-    /// WebSocket), or `Err(RetryOutcome::Transient)` if delivery failed and
-    /// can be retried again.
+    /// Looks up the live subscription by `subscriber_id` (in a single read
+    /// lock acquisition that also captures the in-process sender if applicable)
+    /// and dispatches the payload through the configured channel.
+    ///
+    /// Returns:
+    /// - `Ok(())` on successful delivery
+    /// - `Err(RetryOutcome::Permanent)` if the subscriber is gone, the
+    ///   channel type isn't retryable (WebSocket), or no `Custom` handler
+    ///   is registered
+    /// - `Err(RetryOutcome::Transient)` if delivery failed and is eligible
+    ///   for further retry attempts
     pub async fn retry_to_subscriber(
         &self,
         subscriber_id: &str,
         subject: &str,
         payload: &[u8],
+        reply_subject: Option<String>,
+        seq: u64,
     ) -> Result<(), RetryOutcome> {
-        // Look up the live subscription
-        let entry = {
+        // Single lock acquisition: look up the entry AND the in-process
+        // sender, so we don't need to re-acquire later.
+        let (entry, sender) = {
             let state = self.state.read().await;
-            state.index.find_by_id(subscriber_id)
+            let entry = state.index.find_by_id(subscriber_id);
+            let sender = state.senders.get(subscriber_id).cloned();
+            (entry, sender)
         };
         let entry = match entry {
             Some(e) => e,
             None => {
-                // Subscription is gone — cannot retry
                 return Err(RetryOutcome::Permanent(format!(
                     "subscriber {} no longer exists",
                     subscriber_id
@@ -642,14 +693,19 @@ impl DispatchEngine {
 
         match &entry.channel {
             ChannelConfig::Webhook { .. } => {
-                use crate::delivery::DeliveryChannel;
-                self.webhook_channel
+                use crate::delivery::{DeliveryChannel, DeliveryError};
+                match self
+                    .webhook_channel
                     .deliver(payload, subject, &entry.channel)
                     .await
-                    .map(|_| ())
-                    .map_err(|e| RetryOutcome::Transient(format!("{}", e)))
+                {
+                    Ok(_) => Ok(()),
+                    Err(DeliveryError::Permanent(msg)) => Err(RetryOutcome::Permanent(msg)),
+                    Err(e) => Err(RetryOutcome::Transient(format!("{}", e))),
+                }
             }
             ChannelConfig::Custom { channel_type, .. } => {
+                use crate::delivery::DeliveryError;
                 let channel_opt = self.channel_registry.get(channel_type).await;
                 let channel = match channel_opt {
                     Some(c) => c,
@@ -660,31 +716,27 @@ impl DispatchEngine {
                         )));
                     }
                 };
-                channel
-                    .deliver(payload, subject, &entry.channel)
-                    .await
-                    .map(|_| ())
-                    .map_err(|e| RetryOutcome::Transient(format!("{}", e)))
+                match channel.deliver(payload, subject, &entry.channel).await {
+                    Ok(_) => Ok(()),
+                    Err(DeliveryError::Permanent(msg)) => Err(RetryOutcome::Permanent(msg)),
+                    Err(e) => Err(RetryOutcome::Transient(format!("{}", e))),
+                }
             }
             ChannelConfig::InProcess => {
-                // Try to push through the live mpsc sender. If the consumer
-                // is still draining, this may now succeed even if the original
-                // try_send failed.
-                let state = self.state.read().await;
-                let tx = match state.senders.get(subscriber_id) {
-                    Some(tx) => tx.clone(),
+                // Push through the live mpsc sender we captured above.
+                let tx = match sender {
+                    Some(tx) => tx,
                     None => {
                         return Err(RetryOutcome::Permanent(
                             "in-process sender no longer registered".to_string(),
                         ));
                     }
                 };
-                drop(state);
                 let event = crate::request_reply::DispatchedEvent {
                     payload: payload.to_vec(),
-                    reply_subject: None,
+                    reply_subject,
                     subject: subject.to_string(),
-                    seq: 0, // unknown at retry time
+                    seq,
                 };
                 tx.try_send(event)
                     .map_err(|e| RetryOutcome::Transient(format!("{}", e)))

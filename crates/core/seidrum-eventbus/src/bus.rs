@@ -146,13 +146,22 @@ pub struct EventBusImpl {
 }
 
 impl EventBusImpl {
+    /// Construct an `EventBusImpl` from an event store with default
+    /// retry configuration and an empty channel registry.
+    ///
+    /// **Note:** the engine wired up by this constructor cannot share its
+    /// `ChannelRegistry` with anything else (e.g., the HTTP transport's
+    /// webhook subscriptions or the retry task's `Custom` channel lookups).
+    /// For production use, prefer constructing via [`crate::EventBusBuilder`]
+    /// which wires up a single shared registry across the engine, transports,
+    /// and retry task.
     pub fn new(store: Arc<dyn EventStore>) -> Self {
         Self {
             engine: Arc::new(DispatchEngine::new(store)),
         }
     }
 
-    /// Construct an EventBusImpl that shares a [`crate::delivery::ChannelRegistry`]
+    /// Construct an `EventBusImpl` that shares a [`crate::delivery::ChannelRegistry`]
     /// with the dispatch engine. The registry is used by the retry task for
     /// looking up `ChannelConfig::Custom` delivery channels.
     pub fn with_registry(
@@ -164,9 +173,11 @@ impl EventBusImpl {
         }
     }
 
-    /// Internal accessor used by the builder to spawn the retry task.
-    pub(crate) fn engine(&self) -> Arc<DispatchEngine> {
-        Arc::clone(&self.engine)
+    /// Wrap an already-constructed [`DispatchEngine`] in an `EventBusImpl`.
+    /// Used by [`crate::EventBusBuilder`] so the engine, retry task, and
+    /// transports all share the same instance.
+    pub fn from_engine(engine: Arc<DispatchEngine>) -> Self {
+        Self { engine }
     }
 }
 
@@ -244,16 +255,22 @@ impl EventBus for EventBusImpl {
 
     async fn metrics(&self) -> crate::Result<BusMetrics> {
         use std::sync::atomic::Ordering;
-        // events_pending_retry: query the store. We use u32::MAX as the
-        // "give me everything that could ever retry" upper bound and a large
-        // limit so the count is approximate but useful.
-        let pending_retry = self
+        // Use the dedicated count_retryable method (O(failed events) for
+        // ReDB, O(events) for in-memory) instead of fetching full delivery
+        // records just to count them. Errors are logged so operators see
+        // a signal rather than a silent zero.
+        let pending_retry = match self
             .engine
             .store
-            .query_retryable(u32::MAX, 10_000)
+            .count_retryable(self.engine.retry_config.max_attempts)
             .await
-            .map(|v| v.len() as u64)
-            .unwrap_or(0);
+        {
+            Ok(n) => n,
+            Err(e) => {
+                tracing::warn!(error = %e, "metrics: count_retryable failed");
+                0
+            }
+        };
 
         Ok(BusMetrics {
             events_published: self.engine.events_published.load(Ordering::Relaxed),

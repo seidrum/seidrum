@@ -28,14 +28,20 @@ use thiserror::Error;
 
 pub use in_process::InProcessChannel;
 pub use registry::ChannelRegistry;
-pub use retry::{calculate_backoff, RetryConfig, RetryTask};
+pub use retry::{calculate_backoff, next_retry_after, RetryConfig, RetryTask};
 pub use webhook::WebhookChannel;
 pub use websocket::{WebSocketChannel, WebSocketMessage};
 
 #[derive(Debug, Error)]
 pub enum DeliveryError {
+    /// Transient delivery failure — the delivery should be retried.
     #[error("delivery failed: {0}")]
     Failed(String),
+    /// Permanent delivery failure — retrying will not help. The retry task
+    /// dead-letters deliveries that return this variant.
+    #[error("delivery permanently failed: {0}")]
+    Permanent(String),
+    /// The channel is not ready to deliver (e.g., closed connection).
     #[error("channel not ready")]
     NotReady,
 }

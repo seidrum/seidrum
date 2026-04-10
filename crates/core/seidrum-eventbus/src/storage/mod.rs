@@ -45,17 +45,36 @@ pub trait EventStore: Send + Sync + 'static {
     /// This is the write-ahead step — the event is durable after this call returns.
     async fn append(&self, event: &StoredEvent) -> StorageResult<u64>;
 
+    /// Fetch a single event by its sequence number.
+    /// Returns `Ok(None)` if no event with that seq exists.
+    async fn get(&self, seq: u64) -> StorageResult<Option<StoredEvent>>;
+
     /// Update the dispatch status of an event.
+    ///
+    /// Implementations should defensively clean any stale per-subscriber
+    /// retry-tracking metadata when transitioning to a terminal state
+    /// (`Delivered` or `DeadLettered`).
     async fn update_status(&self, seq: u64, status: EventStatus) -> StorageResult<()>;
 
     /// Record delivery outcome for one subscriber.
-    /// `error` carries an optional human-readable error message for failed deliveries.
+    ///
+    /// - `error`: optional human-readable error message. Preserved on success
+    ///   transitions so the last failure context isn't wiped.
+    /// - `next_retry`: optional unix-millis timestamp indicating when the
+    ///   delivery is eligible for the next retry attempt. Callers compute
+    ///   this using the canonical [`crate::delivery::calculate_backoff`]
+    ///   helper. Stored verbatim by the implementation.
+    ///
+    /// `attempts` is incremented only on `Failed` transitions; success and
+    /// dead-letter transitions preserve the existing count for accurate
+    /// observability.
     async fn record_delivery(
         &self,
         seq: u64,
         subscriber_id: &str,
         status: DeliveryStatus,
         error: Option<String>,
+        next_retry: Option<u64>,
     ) -> StorageResult<()>;
 
     /// Query events by status (for crash recovery and retry).
@@ -75,11 +94,27 @@ pub trait EventStore: Send + Sync + 'static {
     ) -> StorageResult<Vec<StoredEvent>>;
 
     /// Query failed deliveries that are due for retry.
+    ///
+    /// Returns deliveries whose `next_retry` is `<= now` (or unset),
+    /// ordered ascending by `next_retry` so the earliest-due deliveries
+    /// are processed first. This prevents older deliveries from starving
+    /// newer urgent ones.
     async fn query_retryable(
         &self,
         max_attempts: u32,
         limit: usize,
     ) -> StorageResult<Vec<RetryableDelivery>>;
+
+    /// Count failed deliveries eligible for retry (cheap version of
+    /// [`Self::query_retryable`] for metrics scraping).
+    ///
+    /// Default implementation calls `query_retryable` with `usize::MAX`
+    /// and counts. Implementations should override with an O(1) or
+    /// O(failed events) version where possible.
+    async fn count_retryable(&self, max_attempts: u32) -> StorageResult<u64> {
+        let v = self.query_retryable(max_attempts, usize::MAX).await?;
+        Ok(v.len() as u64)
+    }
 
     /// Compact: remove fully-delivered events older than the retention threshold.
     /// Returns the number of events removed.
@@ -191,7 +226,7 @@ mod tests {
 
         let seq = store.append(&event).await.unwrap();
         store
-            .record_delivery(seq, "sub1", DeliveryStatus::Delivered, None)
+            .record_delivery(seq, "sub1", DeliveryStatus::Delivered, None, None)
             .await
             .unwrap();
 

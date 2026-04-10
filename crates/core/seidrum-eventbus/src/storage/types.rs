@@ -87,4 +87,11 @@ pub struct RetryableDelivery {
     pub subscriber_id: String,
     pub attempts: u32,
     pub payload: Vec<u8>,
+    /// If the original event was a request, the subject to reply on.
+    /// Propagated through retry so handlers receive a working `Replier`.
+    pub reply_subject: Option<String>,
+    /// Earliest timestamp (unix-millis) at which this delivery is eligible
+    /// for the next retry attempt. Used by `query_retryable` to sort
+    /// results so the earliest-due deliveries are returned first.
+    pub next_retry: Option<u64>,
 }

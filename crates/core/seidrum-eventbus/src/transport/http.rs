@@ -204,12 +204,16 @@ pub fn create_router(state: AppState) -> Router {
 pub struct HttpServer {
     bus: Arc<dyn EventBus>,
     registry: Arc<ChannelRegistry>,
+    webhook_channel: Arc<WebhookChannel>,
     authenticator: Arc<dyn HttpAuthenticator>,
     shutdown_rx: watch::Receiver<bool>,
 }
 
 impl HttpServer {
     /// Create a new HTTP server with no authentication (development only).
+    /// Constructs its own `WebhookChannel` — prefer
+    /// [`Self::with_webhook_channel`] when called from the builder so the
+    /// engine and HTTP transport share a single channel.
     pub fn new(
         bus: Arc<dyn EventBus>,
         registry: Arc<ChannelRegistry>,
@@ -218,6 +222,7 @@ impl HttpServer {
         Self {
             bus,
             registry,
+            webhook_channel: WebhookChannel::new(),
             authenticator: Arc::new(NoHttpAuth),
             shutdown_rx,
         }
@@ -233,7 +238,26 @@ impl HttpServer {
         Self {
             bus,
             registry,
+            webhook_channel: WebhookChannel::new(),
             authenticator,
+            shutdown_rx,
+        }
+    }
+
+    /// Create a new HTTP server with an explicit shared `WebhookChannel`.
+    /// Used by [`crate::EventBusBuilder`] so the dispatch engine and the
+    /// HTTP transport share the same channel instance.
+    pub fn with_webhook_channel(
+        bus: Arc<dyn EventBus>,
+        registry: Arc<ChannelRegistry>,
+        webhook_channel: Arc<WebhookChannel>,
+        shutdown_rx: watch::Receiver<bool>,
+    ) -> Self {
+        Self {
+            bus,
+            registry,
+            webhook_channel,
+            authenticator: Arc::new(NoHttpAuth),
             shutdown_rx,
         }
     }
@@ -245,7 +269,7 @@ impl HttpServer {
         let state = AppState {
             bus: Arc::clone(&self.bus),
             registry: Arc::clone(&self.registry),
-            webhook_channel: WebhookChannel::new(),
+            webhook_channel: Arc::clone(&self.webhook_channel),
             authenticator: Arc::clone(&self.authenticator),
             subscription_count: Arc::new(AtomicUsize::new(0)),
         };

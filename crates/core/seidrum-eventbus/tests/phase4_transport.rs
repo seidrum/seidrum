@@ -146,34 +146,35 @@ mod tests {
     fn test_retry_backoff() {
         use seidrum_eventbus::delivery::calculate_backoff;
 
-        // Subtractive jitter: result is always in [base - base/4, base]
-        let d1 = calculate_backoff(0, 100, 30000);
+        // attempt 1: base=100, subtractive jitter → 75..100
+        let d1 = calculate_backoff(1, 100, 30000);
         assert!(
             d1.as_millis() >= 75 && d1.as_millis() <= 100,
-            "attempt 0: expected 75..100ms, got {}ms",
+            "attempt 1: expected 75..100ms, got {}ms",
             d1.as_millis()
         );
 
-        let d2 = calculate_backoff(1, 100, 30000);
+        // attempt 2: base=200 → 150..200
+        let d2 = calculate_backoff(2, 100, 30000);
         assert!(
             d2.as_millis() >= 150 && d2.as_millis() <= 200,
-            "attempt 1: expected 150..200ms, got {}ms",
+            "attempt 2: expected 150..200ms, got {}ms",
             d2.as_millis()
         );
 
-        let d5 = calculate_backoff(5, 100, 30000);
-        // 2^5 * 100 = 3200, jitter removes up to 800 → 2400..3200
+        // attempt 6: 100 * 2^5 = 3200 → 2400..3200
+        let d6 = calculate_backoff(6, 100, 30000);
         assert!(
-            d5.as_millis() >= 2400 && d5.as_millis() <= 3200,
-            "attempt 5: expected 2400..3200ms, got {}ms",
-            d5.as_millis()
+            d6.as_millis() >= 2400 && d6.as_millis() <= 3200,
+            "attempt 6: expected 2400..3200ms, got {}ms",
+            d6.as_millis()
         );
 
-        let d10 = calculate_backoff(10, 100, 30000);
+        let d11 = calculate_backoff(11, 100, 30000);
         assert!(
-            d10.as_millis() <= 30000,
-            "attempt 10 should be capped at 30000ms, got {}ms",
-            d10.as_millis()
+            d11.as_millis() <= 30000,
+            "attempt 11 should be capped at 30000ms, got {}ms",
+            d11.as_millis()
         );
     }
 
