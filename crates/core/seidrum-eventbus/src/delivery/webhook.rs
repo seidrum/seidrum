@@ -90,8 +90,11 @@ impl DeliveryChannel for WebhookChannel {
                 status.as_u16(),
                 status.canonical_reason().unwrap_or("unknown")
             );
-            // Treat 408 Request Timeout and 429 Too Many Requests as transient.
-            if status.is_client_error() && status.as_u16() != 408 && status.as_u16() != 429 {
+            // Treat 408 (Request Timeout), 425 (Too Early — RFC 8470:
+            // "try again later"), and 429 (Too Many Requests) as transient.
+            // All other 4xx are permanent.
+            let code = status.as_u16();
+            if status.is_client_error() && code != 408 && code != 425 && code != 429 {
                 return Err(DeliveryError::Permanent(msg));
             }
             return Err(DeliveryError::Failed(msg));

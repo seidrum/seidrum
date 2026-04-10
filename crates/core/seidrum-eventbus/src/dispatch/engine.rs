@@ -85,6 +85,10 @@ pub struct DispatchEngine {
     pub(crate) webhook_channel: Arc<crate::delivery::WebhookChannel>,
     /// Retry backoff configuration applied when recording delivery failures.
     pub(crate) retry_config: Arc<crate::delivery::RetryConfig>,
+    /// Whether a retry task is actually running. Reported via `bus.metrics()`
+    /// so operators can distinguish between "no failed deliveries" and
+    /// "no retry task to drain failed deliveries".
+    pub(crate) retry_enabled: bool,
 }
 
 pub(crate) struct DispatchState {
@@ -95,6 +99,13 @@ pub(crate) struct DispatchState {
 }
 
 impl DispatchEngine {
+    /// Construct a `DispatchEngine` from an event store with default
+    /// retry configuration (`RetryConfig::default()`), an empty channel
+    /// registry, and a fresh `WebhookChannel`.
+    ///
+    /// `retry_enabled` is `false` because no retry task is wired up. Use
+    /// [`crate::EventBusBuilder::with_retry`] to enable durable retries
+    /// in production.
     pub fn new(store: Arc<dyn EventStore>) -> Self {
         Self::with_components(
             store,
@@ -104,6 +115,9 @@ impl DispatchEngine {
         )
     }
 
+    /// Construct a `DispatchEngine` with a user-supplied channel registry.
+    /// Other components default as in [`Self::new`]. `retry_enabled` is
+    /// `false`.
     pub fn with_registry(
         store: Arc<dyn EventStore>,
         channel_registry: Arc<crate::delivery::ChannelRegistry>,
@@ -119,7 +133,8 @@ impl DispatchEngine {
     /// Construct a `DispatchEngine` with all components explicitly supplied.
     /// Used by [`crate::EventBusBuilder`] so the same channel registry,
     /// webhook channel, and retry config are shared with the HTTP transport
-    /// and retry task.
+    /// and retry task. `retry_enabled` defaults to `false`; the builder
+    /// flips it via an internal accessor when `with_retry` is configured.
     pub fn with_components(
         store: Arc<dyn EventStore>,
         channel_registry: Arc<crate::delivery::ChannelRegistry>,
@@ -138,7 +153,14 @@ impl DispatchEngine {
             channel_registry,
             webhook_channel,
             retry_config,
+            retry_enabled: false,
         }
+    }
+
+    /// Mark this engine as having an active retry task. Called by the
+    /// builder when `with_retry` is configured.
+    pub(crate) fn set_retry_enabled(&mut self, enabled: bool) {
+        self.retry_enabled = enabled;
     }
 
     /// Validate a subject string.
@@ -392,12 +414,19 @@ impl DispatchEngine {
                                 "sync interceptor timed out, skipping"
                             );
                             any_failed = true;
+                            // Interceptors are not retryable — they're sync,
+                            // in-process, and have no sender for the retry
+                            // task to dispatch through. Record as
+                            // DeadLettered directly so the retry task
+                            // doesn't pick this up only to discover the
+                            // entry is an interceptor and dead-letter it
+                            // anyway.
                             try_record(
                                 seq,
                                 entry_id,
-                                DeliveryStatus::Failed,
+                                DeliveryStatus::DeadLettered,
                                 Some(format!(
-                                    "interceptor timed out after {}ms",
+                                    "dead-lettered: interceptor timed out after {}ms",
                                     timeout.as_millis()
                                 )),
                             )
@@ -761,15 +790,6 @@ pub enum RetryOutcome {
     /// The retry cannot succeed (subscriber gone, channel type not retryable).
     /// The caller should dead-letter this delivery.
     Permanent(String),
-}
-
-impl std::fmt::Display for RetryOutcome {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            RetryOutcome::Transient(msg) => write!(f, "transient: {}", msg),
-            RetryOutcome::Permanent(msg) => write!(f, "permanent: {}", msg),
-        }
-    }
 }
 
 /// Public information about a subscription.

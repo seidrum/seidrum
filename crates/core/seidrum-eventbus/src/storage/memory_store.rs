@@ -83,16 +83,23 @@ impl EventStore for InMemoryEventStore {
                 .find(|d| d.subscriber_id == subscriber_id)
             {
                 delivery.status = status;
-                // Only count failed retries against attempts; success and
-                // dead-letter transitions preserve the existing count for
-                // accurate observability.
-                if status == DeliveryStatus::Failed {
+                // Count attempts that represent a real delivery attempt
+                // (Failed and DeadLettered) but not Delivered (which would
+                // produce off-by-one observability).
+                if matches!(
+                    status,
+                    DeliveryStatus::Failed | DeliveryStatus::DeadLettered
+                ) {
                     delivery.attempts += 1;
                 }
                 delivery.last_attempt = Some(Self::current_time_ms());
-                // Preserve the previous error on success transitions so the
-                // diagnostic context isn't wiped; replace on failures.
-                if error.is_some() {
+                // Only overwrite the error on Failed/DeadLettered transitions.
+                // Successful retries preserve the prior failure context for
+                // diagnostics, regardless of what the caller passed.
+                if matches!(
+                    status,
+                    DeliveryStatus::Failed | DeliveryStatus::DeadLettered
+                ) {
                     delivery.error = error;
                 }
                 delivery.next_retry = next_retry;
@@ -157,10 +164,7 @@ impl EventStore for InMemoryEventStore {
         let now = Self::current_time_ms();
         for event in events.iter() {
             for delivery in &event.deliveries {
-                if delivery.status == DeliveryStatus::Failed
-                    && delivery.attempts < max_attempts
-                    && delivery.next_retry.is_none_or(|t| t <= now)
-                {
+                if delivery.is_retryable(max_attempts, now) {
                     retryable.push(RetryableDelivery {
                         seq: event.seq,
                         subject: event.subject.clone(),
@@ -186,10 +190,7 @@ impl EventStore for InMemoryEventStore {
         let mut count = 0u64;
         for event in events.iter() {
             for delivery in &event.deliveries {
-                if delivery.status == DeliveryStatus::Failed
-                    && delivery.attempts < max_attempts
-                    && delivery.next_retry.is_none_or(|t| t <= now)
-                {
+                if delivery.is_retryable(max_attempts, now) {
                     count += 1;
                 }
             }

@@ -302,14 +302,17 @@ impl EventBusBuilder {
         // Resolve retry config: defaults applied if `with_retry` was not
         // called. Always Some so the engine can use it for first-failure
         // backoff regardless of whether the retry task is enabled.
+        let retry_enabled = self.retry.is_some();
         let retry_config = Arc::new(self.retry.clone().unwrap_or_default());
 
-        let engine = Arc::new(crate::dispatch::DispatchEngine::with_components(
+        let mut engine = crate::dispatch::DispatchEngine::with_components(
             Arc::clone(&store),
             Arc::clone(&registry),
             Arc::clone(&webhook_channel),
             Arc::clone(&retry_config),
-        ));
+        );
+        engine.set_retry_enabled(retry_enabled);
+        let engine = Arc::new(engine);
 
         // Wrap the engine in EventBusImpl. The bus_impl uses the same engine
         // we'll hand to RetryTask, so retry-time subscription lookups see

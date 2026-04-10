@@ -211,9 +211,19 @@ pub struct HttpServer {
 
 impl HttpServer {
     /// Create a new HTTP server with no authentication (development only).
-    /// Constructs its own `WebhookChannel` — prefer
-    /// [`Self::with_webhook_channel`] when called from the builder so the
-    /// engine and HTTP transport share a single channel.
+    /// Constructs its own `WebhookChannel`.
+    ///
+    /// **Deprecated:** This constructor produces an HTTP server whose
+    /// `WebhookChannel` instance is independent from the dispatch engine's,
+    /// so retry-time and live deliveries cannot share state (connection
+    /// pools, future stats). Use [`crate::EventBusBuilder::with_http`] to
+    /// have the builder wire up a single shared channel, or
+    /// [`Self::with_webhook_channel`] for manual wiring.
+    #[deprecated(
+        since = "0.2.0",
+        note = "use EventBusBuilder::with_http or HttpServer::with_webhook_channel \
+                so the engine and HTTP transport share a single WebhookChannel"
+    )]
     pub fn new(
         bus: Arc<dyn EventBus>,
         registry: Arc<ChannelRegistry>,

@@ -217,27 +217,12 @@ impl RetryTask {
                     error = %msg,
                     "retry failed (transient)"
                 );
-                // Compute next_retry from the new attempt count using the
-                // canonical backoff helper.
-                let next_retry = next_retry_after(new_attempts, &self.config);
-                if let Err(e) = self
-                    .store
-                    .record_delivery(
-                        delivery.seq,
-                        &delivery.subscriber_id,
-                        DeliveryStatus::Failed,
-                        Some(msg.clone()),
-                        Some(next_retry),
-                    )
-                    .await
-                {
-                    warn!(seq = delivery.seq, error = %e, "failed to record retry failure");
-                }
-                // If this attempt was the last allowed one, dead-letter
-                // immediately. Otherwise the entry would stop being returned
-                // by query_retryable (which filters attempts < max_attempts)
-                // and would be stuck in Failed state forever.
                 if new_attempts >= self.config.max_attempts {
+                    // Last allowed attempt has just been used up. Skip the
+                    // intermediate Failed write and dead-letter directly
+                    // (was: record Failed then immediately overwrite with
+                    // DeadLettered, which produced two write transactions
+                    // and a brief window where the delivery looked retryable).
                     self.dead_letter(
                         delivery,
                         &format!(
@@ -246,6 +231,23 @@ impl RetryTask {
                         ),
                     )
                     .await;
+                } else {
+                    // Compute next_retry from the new attempt count using
+                    // the canonical backoff helper, then record the failure.
+                    let next_retry = next_retry_after(new_attempts, &self.config);
+                    if let Err(e) = self
+                        .store
+                        .record_delivery(
+                            delivery.seq,
+                            &delivery.subscriber_id,
+                            DeliveryStatus::Failed,
+                            Some(msg.clone()),
+                            Some(next_retry),
+                        )
+                        .await
+                    {
+                        warn!(seq = delivery.seq, error = %e, "failed to record retry failure");
+                    }
                 }
             }
             Err(RetryOutcome::Permanent(msg)) => {

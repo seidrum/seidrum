@@ -255,21 +255,25 @@ impl EventBus for EventBusImpl {
 
     async fn metrics(&self) -> crate::Result<BusMetrics> {
         use std::sync::atomic::Ordering;
-        // Use the dedicated count_retryable method (O(failed events) for
-        // ReDB, O(events) for in-memory) instead of fetching full delivery
-        // records just to count them. Errors are logged so operators see
-        // a signal rather than a silent zero.
-        let pending_retry = match self
-            .engine
-            .store
-            .count_retryable(self.engine.retry_config.max_attempts)
-            .await
-        {
-            Ok(n) => n,
-            Err(e) => {
-                tracing::warn!(error = %e, "metrics: count_retryable failed");
-                0
+        // Only report `events_pending_retry` if a retry task is actually
+        // running. Otherwise the count is meaningless — there's no worker
+        // to drain it. A bus without `with_retry()` reports 0 here so
+        // dashboards don't surface a permanent backlog.
+        let pending_retry = if self.engine.retry_enabled {
+            match self
+                .engine
+                .store
+                .count_retryable(self.engine.retry_config.max_attempts)
+                .await
+            {
+                Ok(n) => n,
+                Err(e) => {
+                    tracing::warn!(error = %e, "metrics: count_retryable failed");
+                    0
+                }
             }
+        } else {
+            0
         };
 
         Ok(BusMetrics {

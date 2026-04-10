@@ -230,22 +230,18 @@ impl EventStore for RedbEventStore {
                 })?;
             }
 
-            // Defensively clean the failed-deliveries index when transitioning
-            // to a terminal state. The invariant is "seq is in the index iff
-            // any delivery is Failed", and a terminal event status implies no
-            // outstanding failures.
-            if matches!(status, EventStatus::Delivered | EventStatus::DeadLettered) {
-                let mut failed_idx =
-                    write_txn
-                        .open_table(FAILED_DELIVERIES_IDX_TABLE)
-                        .map_err(|e| {
-                            StorageError::DatabaseError(format!(
-                                "failed to open failed_deliveries_idx: {}",
-                                e
-                            ))
-                        })?;
-                let _ = failed_idx.remove(seq);
-            }
+            // NOTE: We deliberately do NOT touch failed_deliveries_idx here.
+            // The invariant "seq in index iff any delivery is Failed" is
+            // maintained exclusively by record_delivery, which has full
+            // visibility into the deliveries Vec.
+            //
+            // An earlier version "defensively" purged the index entry on
+            // transitions to terminal status, but update_status does not
+            // mutate the deliveries Vec — so callers like the dispatch
+            // engine's interceptor-Drop path (which records Failed
+            // deliveries before flipping status to Delivered) would silently
+            // strand failed deliveries that the retry task could no longer
+            // see.
 
             write_txn
                 .commit()
@@ -295,14 +291,24 @@ impl EventStore for RedbEventStore {
                     .find(|d| d.subscriber_id == subscriber_id)
                 {
                     delivery.status = status;
-                    // Only count failed retries against attempts; success and
-                    // dead-letter transitions preserve the existing count.
-                    if status == DeliveryStatus::Failed {
+                    // Count attempts that represent a real delivery attempt
+                    // (Failed and DeadLettered) but not Delivered (off-by-one
+                    // observability).
+                    if matches!(
+                        status,
+                        DeliveryStatus::Failed | DeliveryStatus::DeadLettered
+                    ) {
                         delivery.attempts += 1;
                     }
                     delivery.last_attempt = Some(RedbEventStore::current_time_ms());
-                    // Preserve previous error on success transitions.
-                    if error.is_some() {
+                    // Only overwrite the error on Failed/DeadLettered
+                    // transitions. Successful retries preserve the prior
+                    // failure context for diagnostics, regardless of what
+                    // the caller passed.
+                    if matches!(
+                        status,
+                        DeliveryStatus::Failed | DeliveryStatus::DeadLettered
+                    ) {
                         delivery.error = error;
                     }
                     delivery.next_retry = next_retry;
@@ -544,10 +550,7 @@ impl EventStore for RedbEventStore {
                 })?;
 
                 for delivery in &event.deliveries {
-                    if delivery.status == DeliveryStatus::Failed
-                        && delivery.attempts < max_attempts
-                        && delivery.next_retry.is_none_or(|t| t <= now)
-                    {
+                    if delivery.is_retryable(max_attempts, now) {
                         results.push(RetryableDelivery {
                             seq: event.seq,
                             subject: event.subject.clone(),
@@ -563,6 +566,11 @@ impl EventStore for RedbEventStore {
 
             // Sort by next_retry ascending so the earliest-due deliveries
             // come first. None (no retry scheduled) sorts to the front.
+            //
+            // PERF: For very large failed-deliveries backlogs (10k+) this
+            // is O(n log n) where n is the backlog size, then truncated
+            // to `limit`. A bounded min-heap would be O(n log limit) but
+            // is not worth the code complexity at current scale.
             results.sort_by_key(|r| r.next_retry.unwrap_or(0));
             results.truncate(limit);
             Ok(results)
@@ -603,17 +611,20 @@ impl EventStore for RedbEventStore {
                     StorageError::DatabaseError(format!("failed to get event: {}", e))
                 })? {
                     Some(d) => d,
-                    None => continue,
+                    None => {
+                        tracing::warn!(
+                            seq = seq,
+                            "stale failed_deliveries_idx entry: event not found"
+                        );
+                        continue;
+                    }
                 };
                 let bytes = data.value().to_vec();
                 let event: StoredEvent = serde_json::from_slice(&bytes).map_err(|e| {
                     StorageError::OperationFailed(format!("failed to deserialize: {}", e))
                 })?;
                 for delivery in &event.deliveries {
-                    if delivery.status == DeliveryStatus::Failed
-                        && delivery.attempts < max_attempts
-                        && delivery.next_retry.is_none_or(|t| t <= now)
-                    {
+                    if delivery.is_retryable(max_attempts, now) {
                         count += 1;
                     }
                 }
@@ -857,5 +868,60 @@ mod tests {
         let results = store.query_by_subject("test", None, 10).await.unwrap();
         assert_eq!(results[0].deliveries.len(), 1);
         assert_eq!(results[0].deliveries[0].subscriber_id, "sub1");
+    }
+
+    /// Regression test: a Failed delivery must remain queryable via
+    /// `query_retryable` even if the parent event's status was bumped to
+    /// `Delivered` by an unrelated path (e.g., the dispatch engine's
+    /// interceptor-Drop branch). The original Phase 5 implementation had
+    /// `update_status` defensively purge `failed_deliveries_idx`, which
+    /// silently dropped failed deliveries.
+    #[tokio::test]
+    async fn test_redb_update_status_preserves_failed_index() {
+        let temp = TempDir::new().unwrap();
+        let store = RedbEventStore::open(temp.path().join("events.db")).unwrap();
+
+        // Append an event and record a Failed delivery against it.
+        let event = StoredEvent {
+            seq: 0,
+            subject: "test".to_string(),
+            payload: b"data".to_vec(),
+            stored_at: 1000,
+            status: EventStatus::Dispatching,
+            deliveries: vec![],
+            reply_subject: None,
+        };
+        let seq = store.append(&event).await.unwrap();
+        store
+            .record_delivery(
+                seq,
+                "sub1",
+                DeliveryStatus::Failed,
+                Some("boom".to_string()),
+                Some(0), // due immediately
+            )
+            .await
+            .unwrap();
+
+        // Sanity: the failed delivery is visible.
+        let pending = store.query_retryable(10, 100).await.unwrap();
+        assert_eq!(pending.len(), 1);
+        assert_eq!(pending[0].subscriber_id, "sub1");
+
+        // Bump the event status to Delivered (simulating the dispatch
+        // engine's interceptor-Drop branch).
+        store
+            .update_status(seq, EventStatus::Delivered)
+            .await
+            .unwrap();
+
+        // The failed delivery MUST still be retryable.
+        let still_pending = store.query_retryable(10, 100).await.unwrap();
+        assert_eq!(
+            still_pending.len(),
+            1,
+            "Failed delivery should survive update_status -> Delivered"
+        );
+        assert_eq!(still_pending[0].subscriber_id, "sub1");
     }
 }

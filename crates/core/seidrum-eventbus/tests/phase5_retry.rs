@@ -341,36 +341,171 @@ async fn test_retry_task_not_started_without_with_retry() {
 #[tokio::test]
 async fn test_with_retry_poll_interval_order_independent() {
     // Calling with_retry_poll_interval BEFORE with_retry must still apply.
+    // We verify by registering an always-failing channel via the builder,
+    // seeding a failed delivery, and counting how many retry attempts the
+    // task makes within a fixed window. With a 30ms poll interval and a
+    // 200ms window we expect ~6 attempts; with the default 1s interval we
+    // would expect 0.
+
+    use seidrum_eventbus::storage::DeliveryStatus;
+    use seidrum_eventbus::storage::StoredEvent;
+
+    let flaky = FlakyChannel::always_fail();
     let store = Arc::new(InMemoryEventStore::new());
+
+    // Seed the failed delivery first so we can observe retry behavior.
+    let event = StoredEvent {
+        seq: 0,
+        subject: "test.poll_interval".to_string(),
+        payload: b"x".to_vec(),
+        stored_at: 0,
+        status: EventStatus::PartiallyDelivered,
+        deliveries: vec![],
+        reply_subject: None,
+    };
+    let seq = store.append(&event).await.unwrap();
+
     let handles = EventBusBuilder::new()
-        .storage(store)
-        .with_retry_poll_interval(Duration::from_millis(75))
-        .with_retry(RetryConfig::default())
+        .storage(Arc::clone(&store) as Arc<dyn EventStore>)
+        // Order: poll_interval BEFORE with_retry.
+        .with_retry_poll_interval(Duration::from_millis(30))
+        .register_channel("flaky", Arc::clone(&flaky) as Arc<dyn DeliveryChannel>)
+        .with_retry(RetryConfig {
+            max_attempts: 1000, // high enough to keep retrying
+            initial_backoff_ms: 1,
+            max_backoff_ms: 10,
+        })
         .build_with_handles()
         .await
         .unwrap();
 
-    // The retry task is spawned (we can't observe the interval directly,
-    // but the test ensures the chained methods work without panicking
-    // and that with_retry_poll_interval doesn't drop the value).
-    assert!(handles.retry_task.is_some());
+    // Subscribe via the bus so the engine has the trie entry the retry
+    // task needs to look up.
+    let opts = SubscribeOpts {
+        priority: 10,
+        mode: SubscriptionMode::Async,
+        channel: ChannelConfig::Custom {
+            channel_type: "flaky".to_string(),
+            config: serde_json::json!({}),
+        },
+        timeout: Duration::from_secs(5),
+        filter: None,
+    };
+    let sub = handles
+        .bus
+        .subscribe("test.poll_interval", opts)
+        .await
+        .unwrap();
+    let sub_id = sub.id.clone();
+
+    // Now seed a failed delivery for the live subscription.
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis() as u64;
+    store
+        .record_delivery(
+            seq,
+            &sub_id,
+            DeliveryStatus::Failed,
+            Some("seed".to_string()),
+            Some(now),
+        )
+        .await
+        .unwrap();
+
+    // Window: 250ms. With a 30ms poll interval and 1ms backoff we should
+    // see at least 4 retry attempts. With the default 1s interval (the
+    // bug we're guarding against), the channel would be called 0 times.
+    tokio::time::sleep(Duration::from_millis(250)).await;
+    let calls = flaky.calls();
     handles.shutdown_and_join().await;
+
+    assert!(
+        calls >= 3,
+        "expected at least 3 retry calls with 30ms poll interval, got {}",
+        calls
+    );
 }
 
 #[tokio::test]
 async fn test_register_channel_via_builder() {
+    use seidrum_eventbus::storage::DeliveryStatus;
+    use seidrum_eventbus::storage::StoredEvent;
+
+    // FlakyChannel that succeeds on the first call so we can verify the
+    // retry path actually reaches it.
+    let flaky = FlakyChannel::new(0);
     let store = Arc::new(InMemoryEventStore::new());
-    let flaky = FlakyChannel::new(0); // always succeeds
+
+    // Append the event before building so we can record a Failed delivery
+    // against the bus's subscription id afterward.
+    let event = StoredEvent {
+        seq: 0,
+        subject: "test.builder_register".to_string(),
+        payload: b"x".to_vec(),
+        stored_at: 0,
+        status: EventStatus::PartiallyDelivered,
+        deliveries: vec![],
+        reply_subject: None,
+    };
+    let seq = store.append(&event).await.unwrap();
 
     let handles = EventBusBuilder::new()
-        .storage(store)
+        .storage(Arc::clone(&store) as Arc<dyn EventStore>)
         .register_channel("flaky", Arc::clone(&flaky) as Arc<dyn DeliveryChannel>)
-        .with_retry(RetryConfig::default())
+        .with_retry(RetryConfig {
+            max_attempts: 5,
+            initial_backoff_ms: 5,
+            max_backoff_ms: 20,
+        })
+        .with_retry_poll_interval(Duration::from_millis(20))
         .build_with_handles()
         .await
         .unwrap();
 
-    assert!(handles.retry_task.is_some());
+    let opts = SubscribeOpts {
+        priority: 10,
+        mode: SubscriptionMode::Async,
+        channel: ChannelConfig::Custom {
+            channel_type: "flaky".to_string(),
+            config: serde_json::json!({}),
+        },
+        timeout: Duration::from_secs(5),
+        filter: None,
+    };
+    let sub = handles
+        .bus
+        .subscribe("test.builder_register", opts)
+        .await
+        .unwrap();
+
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis() as u64;
+    store
+        .record_delivery(
+            seq,
+            &sub.id,
+            DeliveryStatus::Failed,
+            Some("seed".to_string()),
+            Some(now),
+        )
+        .await
+        .unwrap();
+
+    // Wait for the retry task to call the channel.
+    let deadline = Instant::now() + Duration::from_secs(2);
+    while Instant::now() < deadline && flaky.calls() == 0 {
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    assert!(
+        flaky.calls() >= 1,
+        "registered channel should be called by the retry task, got {}",
+        flaky.calls()
+    );
+
     handles.shutdown_and_join().await;
 }
 
@@ -427,6 +562,188 @@ async fn test_count_retryable_metric() {
 
     let count = store.count_retryable(10).await.unwrap();
     assert_eq!(count, 2);
+}
+
+#[tokio::test]
+async fn test_metrics_pending_retry_via_bus() {
+    use seidrum_eventbus::storage::DeliveryStatus;
+    use seidrum_eventbus::storage::StoredEvent;
+
+    let store = Arc::new(InMemoryEventStore::new());
+
+    // Build a bus WITH retry enabled — otherwise events_pending_retry
+    // is gated to 0.
+    let handles = EventBusBuilder::new()
+        .storage(Arc::clone(&store) as Arc<dyn EventStore>)
+        .with_retry(RetryConfig {
+            max_attempts: 100,
+            initial_backoff_ms: 100,
+            max_backoff_ms: 1000,
+        })
+        .with_retry_poll_interval(Duration::from_secs(60)) // very slow so we don't drain
+        .build_with_handles()
+        .await
+        .unwrap();
+
+    // Subscribe with InProcess so the retry task can find the entry but
+    // the channel is unconditionally retryable. We'll seed a Failed
+    // delivery for this subscription id.
+    let opts = SubscribeOpts {
+        priority: 10,
+        mode: SubscriptionMode::Async,
+        channel: ChannelConfig::InProcess,
+        timeout: Duration::from_secs(5),
+        filter: None,
+    };
+    let sub = handles.bus.subscribe("test.metrics", opts).await.unwrap();
+
+    let event = StoredEvent {
+        seq: 0,
+        subject: "test.metrics".to_string(),
+        payload: b"x".to_vec(),
+        stored_at: 0,
+        status: EventStatus::PartiallyDelivered,
+        deliveries: vec![],
+        reply_subject: None,
+    };
+    let seq = store.append(&event).await.unwrap();
+    let future = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis() as u64
+        + 1_000_000; // far in the future so the retry task can't drain it
+    store
+        .record_delivery(
+            seq,
+            &sub.id,
+            DeliveryStatus::Failed,
+            Some("seed".to_string()),
+            Some(future),
+        )
+        .await
+        .unwrap();
+
+    // The seeded delivery has next_retry in the future, so count_retryable
+    // returns 0 because the delivery isn't yet due. Test the metric path
+    // by lowering next_retry to now.
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis() as u64;
+    store
+        .record_delivery(
+            seq,
+            &sub.id,
+            DeliveryStatus::Failed,
+            Some("retry me".to_string()),
+            Some(now),
+        )
+        .await
+        .unwrap();
+
+    let metrics = handles.bus.metrics().await.unwrap();
+    assert_eq!(
+        metrics.events_pending_retry, 1,
+        "metrics should report 1 pending retry"
+    );
+
+    handles.shutdown_and_join().await;
+}
+
+#[tokio::test]
+async fn test_metrics_pending_retry_zero_when_no_retry_task() {
+    use seidrum_eventbus::storage::DeliveryStatus;
+    use seidrum_eventbus::storage::StoredEvent;
+
+    // No with_retry call — the retry task is not started, so the metric
+    // must report 0 even with failed deliveries on disk.
+    let store = Arc::new(InMemoryEventStore::new());
+    let handles = EventBusBuilder::new()
+        .storage(Arc::clone(&store) as Arc<dyn EventStore>)
+        .build_with_handles()
+        .await
+        .unwrap();
+
+    let event = StoredEvent {
+        seq: 0,
+        subject: "test.no_retry".to_string(),
+        payload: b"x".to_vec(),
+        stored_at: 0,
+        status: EventStatus::PartiallyDelivered,
+        deliveries: vec![],
+        reply_subject: None,
+    };
+    let seq = store.append(&event).await.unwrap();
+    store
+        .record_delivery(
+            seq,
+            "sub",
+            DeliveryStatus::Failed,
+            Some("x".into()),
+            Some(0),
+        )
+        .await
+        .unwrap();
+
+    let metrics = handles.bus.metrics().await.unwrap();
+    assert_eq!(
+        metrics.events_pending_retry, 0,
+        "events_pending_retry should be 0 when no retry task is running"
+    );
+
+    handles.shutdown_and_join().await;
+}
+
+#[tokio::test]
+async fn test_redb_failed_delivery_survives_restart() {
+    // Crash-recovery test: write a Failed delivery to a ReDB store, drop
+    // the store, reopen, and verify the failed delivery is still queryable.
+    // This is the core durability guarantee of Phase 5.
+    use seidrum_eventbus::storage::redb_store::RedbEventStore;
+    use seidrum_eventbus::storage::DeliveryStatus;
+    use seidrum_eventbus::storage::StoredEvent;
+    use tempfile::TempDir;
+
+    let temp = TempDir::new().unwrap();
+    let path = temp.path().join("events.db");
+
+    // Open, append, record failure, drop.
+    let seq = {
+        let store = RedbEventStore::open(&path).unwrap();
+        let event = StoredEvent {
+            seq: 0,
+            subject: "test.crash".to_string(),
+            payload: b"durable".to_vec(),
+            stored_at: 0,
+            status: EventStatus::PartiallyDelivered,
+            deliveries: vec![],
+            reply_subject: None,
+        };
+        let seq = store.append(&event).await.unwrap();
+        store
+            .record_delivery(
+                seq,
+                "sub1",
+                DeliveryStatus::Failed,
+                Some("crash test".to_string()),
+                Some(0), // due immediately
+            )
+            .await
+            .unwrap();
+        seq
+    };
+
+    // Reopen and verify the failed delivery is still in the index.
+    let store2 = RedbEventStore::open(&path).unwrap();
+    let pending = store2.query_retryable(10, 100).await.unwrap();
+    assert_eq!(pending.len(), 1, "failed delivery should survive restart");
+    assert_eq!(pending[0].seq, seq);
+    assert_eq!(pending[0].subscriber_id, "sub1");
+    assert_eq!(pending[0].attempts, 1);
+
+    // count_retryable also reflects the persisted state.
+    let count = store2.count_retryable(10).await.unwrap();
+    assert_eq!(count, 1);
 }
 
 #[tokio::test]
@@ -519,7 +836,11 @@ async fn test_redb_retry_succeeds_after_failures() {
 }
 
 #[tokio::test]
-async fn test_concurrent_retries_independent() {
+async fn test_multi_channel_retry_independent() {
+    // Note: the retry task processes deliveries sequentially within a poll
+    // cycle. This test verifies that two independent channels each retry
+    // their own delivery without interfering, not that retries run in
+    // parallel.
     let registry = Arc::new(ChannelRegistry::new());
     let flaky_a = FlakyChannel::new(1); // fail once, succeed
     let flaky_b = FlakyChannel::new(1);
