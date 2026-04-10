@@ -1,13 +1,15 @@
 //! Background retry task for failed deliveries.
 //!
-//! Periodically polls the event store for retryable deliveries,
-//! re-attempts delivery, and handles backoff logic.
-//!
-//! **Status: Phase 5 stub.** The polling and backoff infrastructure is in
-//! place, but `retry_delivery` does not yet re-invoke delivery channels.
-//! Do not rely on this task for automatic retries until Phase 5 is complete.
+//! Periodically polls the event store for retryable deliveries and re-attempts
+//! them via the [`crate::dispatch::DispatchEngine`]. The engine looks up the
+//! live subscription, routes to the correct delivery channel, and reports
+//! the outcome. Successful retries are recorded as `Delivered`; transient
+//! failures are recorded as `Failed` (retried after exponential backoff);
+//! permanent failures and exhausted attempts are recorded as `DeadLettered`.
 
-use crate::storage::{EventStore, RetryableDelivery};
+use crate::dispatch::engine::RetryOutcome;
+use crate::dispatch::DispatchEngine;
+use crate::storage::{DeliveryStatus, EventStatus, EventStore, RetryableDelivery};
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 use std::time::Duration;
@@ -47,15 +49,17 @@ pub fn calculate_backoff(attempt: u32, initial_ms: u64, max_ms: u64) -> Duration
 
 /// Background task for retrying failed deliveries.
 ///
-/// **Phase 5 stub:** The task polls the store and computes backoff, but
-/// `retry_delivery` currently logs a warning and skips actual re-delivery.
-/// Wire up delivery channel lookup + re-invocation in Phase 5.
+/// Polls the store on a fixed interval, calls
+/// [`DispatchEngine::retry_to_subscriber`] for each retryable delivery,
+/// and updates the store with the outcome.
+///
+/// Backoff timing is computed by the store implementation in
+/// `record_delivery` (currently 100ms × 2^attempts capped at 30s).
 pub struct RetryTask {
     store: Arc<dyn EventStore>,
+    engine: Arc<DispatchEngine>,
     max_attempts: u32,
     poll_interval: Duration,
-    initial_backoff_ms: u64,
-    max_backoff_ms: u64,
     shutdown_rx: watch::Receiver<bool>,
 }
 
@@ -63,18 +67,16 @@ impl RetryTask {
     /// Create a new retry task.
     pub fn new(
         store: Arc<dyn EventStore>,
+        engine: Arc<DispatchEngine>,
         max_attempts: u32,
         poll_interval: Duration,
-        initial_backoff_ms: u64,
-        max_backoff_ms: u64,
         shutdown_rx: watch::Receiver<bool>,
     ) -> Self {
         Self {
             store,
+            engine,
             max_attempts,
             poll_interval,
-            initial_backoff_ms,
-            max_backoff_ms,
             shutdown_rx,
         }
     }
@@ -129,27 +131,164 @@ impl RetryTask {
     }
 
     async fn retry_delivery(&self, delivery: &RetryableDelivery) {
-        // TODO(phase5): Implement actual retry delivery logic.
-        // This requires:
-        //   1. Looking up the delivery channel for this subscriber
-        //   2. Calling deliver() on it with the original payload
-        //   3. Recording success/failure in the store
-        //   4. Applying backoff on failure
-        // For now, log a warning so operators know retries are not yet active.
-        warn!(
-            "Retry delivery is a stub — skipping seq={} subscriber={} attempt={}",
-            delivery.seq, delivery.subscriber_id, delivery.attempts
+        debug!(
+            seq = delivery.seq,
+            subscriber = delivery.subscriber_id,
+            attempt = delivery.attempts,
+            "retrying delivery"
         );
 
-        let backoff = calculate_backoff(
-            delivery.attempts,
-            self.initial_backoff_ms,
-            self.max_backoff_ms,
-        );
-        debug!(
-            "Next retry would be scheduled in {:?} for seq={}",
-            backoff, delivery.seq
-        );
+        // If we've already exhausted attempts, dead-letter immediately.
+        // (query_retryable filters by attempts < max_attempts, so this is
+        // a defensive check.)
+        if delivery.attempts >= self.max_attempts {
+            self.dead_letter(delivery, "max attempts exceeded").await;
+            return;
+        }
+
+        // Attempt the retry via the engine
+        let result = self
+            .engine
+            .retry_to_subscriber(
+                &delivery.subscriber_id,
+                &delivery.subject,
+                &delivery.payload,
+            )
+            .await;
+
+        match result {
+            Ok(()) => {
+                debug!(
+                    seq = delivery.seq,
+                    subscriber = delivery.subscriber_id,
+                    "retry succeeded"
+                );
+                if let Err(e) = self
+                    .store
+                    .record_delivery(
+                        delivery.seq,
+                        &delivery.subscriber_id,
+                        DeliveryStatus::Delivered,
+                        None,
+                    )
+                    .await
+                {
+                    warn!(seq = delivery.seq, error = %e, "failed to record retry success");
+                }
+                // Re-evaluate the parent event's status now that one more
+                // subscriber is delivered.
+                self.maybe_finalize_event(delivery.seq).await;
+            }
+            Err(RetryOutcome::Transient(msg)) => {
+                let new_attempts = delivery.attempts + 1;
+                debug!(
+                    seq = delivery.seq,
+                    subscriber = delivery.subscriber_id,
+                    attempt = new_attempts,
+                    error = %msg,
+                    "retry failed (transient)"
+                );
+                // record_delivery increments attempts and computes next_retry
+                // backoff via the store implementation.
+                if let Err(e) = self
+                    .store
+                    .record_delivery(
+                        delivery.seq,
+                        &delivery.subscriber_id,
+                        DeliveryStatus::Failed,
+                        Some(msg.clone()),
+                    )
+                    .await
+                {
+                    warn!(seq = delivery.seq, error = %e, "failed to record retry failure");
+                }
+                // If this attempt was the last allowed one, dead-letter
+                // immediately. Otherwise the entry would stop being returned
+                // by query_retryable (which filters attempts < max_attempts)
+                // and would be stuck in Failed state forever.
+                if new_attempts >= self.max_attempts {
+                    self.dead_letter(
+                        delivery,
+                        &format!("max attempts ({}) exhausted: {}", self.max_attempts, msg),
+                    )
+                    .await;
+                }
+            }
+            Err(RetryOutcome::Permanent(msg)) => {
+                debug!(
+                    seq = delivery.seq,
+                    subscriber = delivery.subscriber_id,
+                    error = %msg,
+                    "retry failed (permanent), dead-lettering"
+                );
+                self.dead_letter(delivery, &msg).await;
+            }
+        }
+    }
+
+    /// Mark a delivery as dead-lettered and update the parent event status
+    /// if all subscribers are now in a terminal state.
+    async fn dead_letter(&self, delivery: &RetryableDelivery, reason: &str) {
+        if let Err(e) = self
+            .store
+            .record_delivery(
+                delivery.seq,
+                &delivery.subscriber_id,
+                DeliveryStatus::DeadLettered,
+                Some(format!("dead-lettered: {}", reason)),
+            )
+            .await
+        {
+            warn!(seq = delivery.seq, error = %e, "failed to record dead-letter");
+        }
+        self.maybe_finalize_event(delivery.seq).await;
+    }
+
+    /// If every delivery for an event is in a terminal state (Delivered or
+    /// DeadLettered), update the event status accordingly. Sets the event
+    /// to `DeadLettered` if any delivery is dead-lettered, otherwise
+    /// `Delivered`.
+    async fn maybe_finalize_event(&self, seq: u64) {
+        // Read the event back from the store to inspect its delivery records.
+        let events = match self
+            .store
+            .query_by_status(EventStatus::PartiallyDelivered, 10_000)
+            .await
+        {
+            Ok(events) => events,
+            Err(e) => {
+                warn!(seq = seq, error = %e, "failed to query events for finalization");
+                return;
+            }
+        };
+        let event = match events.into_iter().find(|e| e.seq == seq) {
+            Some(e) => e,
+            None => return, // Already finalized or not found
+        };
+
+        // Check if every delivery is terminal (Delivered or DeadLettered).
+        let all_terminal = event.deliveries.iter().all(|d| {
+            matches!(
+                d.status,
+                DeliveryStatus::Delivered | DeliveryStatus::DeadLettered
+            )
+        });
+        if !all_terminal {
+            return;
+        }
+
+        let any_dead = event
+            .deliveries
+            .iter()
+            .any(|d| d.status == DeliveryStatus::DeadLettered);
+        let final_status = if any_dead {
+            EventStatus::DeadLettered
+        } else {
+            EventStatus::Delivered
+        };
+        if let Err(e) = self.store.update_status(seq, final_status).await {
+            warn!(seq = seq, error = %e, "failed to finalize event status");
+        }
     }
 }
 

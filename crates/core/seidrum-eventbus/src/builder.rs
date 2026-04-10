@@ -1,5 +1,5 @@
 use crate::bus::{EventBus, EventBusImpl, SubscribeOpts, Subscription};
-use crate::delivery::ChannelRegistry;
+use crate::delivery::{ChannelRegistry, RetryConfig, RetryTask};
 use crate::dispatch::{EventFilter, Interceptor, SubscriptionInfo};
 use crate::request_reply::RequestSubscription;
 use crate::storage::compaction::CompactionTask;
@@ -77,12 +77,22 @@ pub struct EventBusBuilder {
     retention: Duration,
     ws_addr: Option<SocketAddr>,
     http_addr: Option<SocketAddr>,
+    retry: Option<RetryTaskConfig>,
 }
 
 /// Default compaction interval: 1 hour.
 const DEFAULT_COMPACTION_INTERVAL: Duration = Duration::from_secs(3600);
 /// Default retention period for delivered events: 24 hours.
 const DEFAULT_RETENTION: Duration = Duration::from_secs(86400);
+/// Default poll interval for the retry task: 1 second.
+const DEFAULT_RETRY_POLL_INTERVAL: Duration = Duration::from_secs(1);
+
+/// Internal config for the retry task — combines retry parameters with poll interval.
+#[derive(Debug, Clone)]
+struct RetryTaskConfig {
+    retry: RetryConfig,
+    poll_interval: Duration,
+}
 
 /// Handles to background tasks spawned by the builder.
 ///
@@ -98,6 +108,8 @@ pub struct BusHandles {
     pub ws_server: Option<JoinHandle<()>>,
     /// Handle to the HTTP server task, if configured.
     pub http_server: Option<JoinHandle<()>>,
+    /// Handle to the retry task, if `with_retry()` was called.
+    pub retry_task: Option<JoinHandle<()>>,
     /// Send `true` to gracefully shut down all transport servers.
     shutdown_tx: watch::Sender<bool>,
 }
@@ -117,6 +129,7 @@ impl EventBusBuilder {
             retention: DEFAULT_RETENTION,
             ws_addr: None,
             http_addr: None,
+            retry: None,
         }
     }
 
@@ -150,6 +163,30 @@ impl EventBusBuilder {
         self
     }
 
+    /// Enable the background retry task with the given config.
+    ///
+    /// Polls the store every second by default; use [`Self::with_retry_poll_interval`]
+    /// to change the interval. Failed deliveries are retried via the dispatch
+    /// engine, which looks up the live subscription and routes through the
+    /// configured channel. Deliveries whose attempt count reaches
+    /// `retry.max_attempts` (or hit a permanent error) are dead-lettered.
+    pub fn with_retry(mut self, retry: RetryConfig) -> Self {
+        self.retry = Some(RetryTaskConfig {
+            retry,
+            poll_interval: DEFAULT_RETRY_POLL_INTERVAL,
+        });
+        self
+    }
+
+    /// Override the retry task's polling interval. Has no effect unless
+    /// [`Self::with_retry`] was also called.
+    pub fn with_retry_poll_interval(mut self, interval: Duration) -> Self {
+        if let Some(cfg) = self.retry.as_mut() {
+            cfg.poll_interval = interval;
+        }
+        self
+    }
+
     /// Build the EventBus, returning only the bus (dropping task handles).
     ///
     /// Background tasks (compaction, transport servers) are spawned and will run
@@ -177,9 +214,15 @@ impl EventBusBuilder {
             .store
             .ok_or_else(|| EventBusError::Config("storage backend is required".to_string()))?;
 
-        let bus = Arc::new(EventBusImpl::new(Arc::clone(&store)));
+        // Shared registry between the dispatch engine (for retry channel
+        // lookups) and the HTTP transport (for webhook subscriptions).
+        let registry = Arc::new(ChannelRegistry::new());
 
-        // Shared shutdown signal for all transport servers
+        let bus_impl = EventBusImpl::with_registry(Arc::clone(&store), Arc::clone(&registry));
+        let engine = bus_impl.engine();
+        let bus: Arc<dyn EventBus> = Arc::new(bus_impl);
+
+        // Shared shutdown signal for all background tasks
         let (shutdown_tx, shutdown_rx) = watch::channel(false);
 
         // Start compaction task
@@ -192,6 +235,25 @@ impl EventBusBuilder {
         let compaction_handle = tokio::spawn(async move {
             compaction_task.run().await;
         });
+
+        // Start retry task if configured.
+        // Backoff parameters in `cfg.retry` (initial_backoff_ms, max_backoff_ms)
+        // are currently informational; the store hardcodes 100ms × 2^attempts
+        // capped at 30s. Future work: thread these into the store layer.
+        let retry_handle = if let Some(cfg) = self.retry {
+            let task = RetryTask::new(
+                Arc::clone(&store),
+                Arc::clone(&engine),
+                cfg.retry.max_attempts,
+                cfg.poll_interval,
+                shutdown_rx.clone(),
+            );
+            Some(tokio::spawn(async move {
+                task.run().await;
+            }))
+        } else {
+            None
+        };
 
         // Start WebSocket server if configured
         let ws_handle = if let Some(addr) = self.ws_addr {
@@ -210,10 +272,10 @@ impl EventBusBuilder {
         // Start HTTP server if configured
         let http_handle = if let Some(addr) = self.http_addr {
             let bus_clone = Arc::clone(&bus);
-            let registry = Arc::new(ChannelRegistry::new());
+            let registry_clone = Arc::clone(&registry);
             let rx = shutdown_rx.clone();
             Some(tokio::spawn(async move {
-                let http_server = HttpServer::new(bus_clone, registry, rx);
+                let http_server = HttpServer::new(bus_clone, registry_clone, rx);
                 if let Err(e) = http_server.start(addr).await {
                     tracing::error!("HTTP server error: {}", e);
                 }
@@ -227,6 +289,7 @@ impl EventBusBuilder {
             compaction: compaction_handle,
             ws_server: ws_handle,
             http_server: http_handle,
+            retry_task: retry_handle,
             shutdown_tx,
         })
     }

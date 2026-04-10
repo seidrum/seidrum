@@ -84,6 +84,13 @@ pub trait EventStore: Send + Sync + 'static {
     /// Compact: remove fully-delivered events older than the retention threshold.
     /// Returns the number of events removed.
     async fn compact(&self, older_than: Duration) -> StorageResult<u64>;
+
+    /// Query dead-lettered events for inspection or replay.
+    ///
+    /// Convenience wrapper around `query_by_status(EventStatus::DeadLettered, limit)`.
+    async fn query_dead_lettered(&self, limit: usize) -> StorageResult<Vec<StoredEvent>> {
+        self.query_by_status(EventStatus::DeadLettered, limit).await
+    }
 }
 
 #[cfg(test)]

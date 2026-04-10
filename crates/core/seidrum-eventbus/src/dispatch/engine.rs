@@ -79,6 +79,10 @@ pub struct DispatchEngine {
     pub(crate) events_published: AtomicU64,
     /// Counter incremented for every successful subscriber delivery.
     pub(crate) events_delivered: AtomicU64,
+    /// Registry of custom delivery channels for retry execution.
+    pub(crate) channel_registry: Arc<crate::delivery::ChannelRegistry>,
+    /// Built-in webhook delivery channel used by the retry task.
+    pub(crate) webhook_channel: Arc<crate::delivery::WebhookChannel>,
 }
 
 pub(crate) struct DispatchState {
@@ -90,6 +94,13 @@ pub(crate) struct DispatchState {
 
 impl DispatchEngine {
     pub fn new(store: Arc<dyn EventStore>) -> Self {
+        Self::with_registry(store, Arc::new(crate::delivery::ChannelRegistry::new()))
+    }
+
+    pub fn with_registry(
+        store: Arc<dyn EventStore>,
+        channel_registry: Arc<crate::delivery::ChannelRegistry>,
+    ) -> Self {
         Self {
             store,
             state: Arc::new(RwLock::new(DispatchState {
@@ -99,6 +110,8 @@ impl DispatchEngine {
             })),
             events_published: AtomicU64::new(0),
             events_delivered: AtomicU64::new(0),
+            channel_registry,
+            webhook_channel: crate::delivery::WebhookChannel::new(),
         }
     }
 
@@ -595,6 +608,115 @@ impl DispatchEngine {
                 mode: format!("{:?}", e.mode),
             })
             .collect())
+    }
+
+    /// Retry delivery to a specific subscriber. Used by [`crate::delivery::RetryTask`].
+    ///
+    /// Looks up the live subscription by `subscriber_id`, then dispatches the
+    /// payload through the channel configured on that subscription. Returns
+    /// `Ok(())` on successful delivery, `Err(RetryOutcome::Permanent)` if the
+    /// subscriber is gone or the channel cannot be retried (e.g., closed
+    /// WebSocket), or `Err(RetryOutcome::Transient)` if delivery failed and
+    /// can be retried again.
+    pub async fn retry_to_subscriber(
+        &self,
+        subscriber_id: &str,
+        subject: &str,
+        payload: &[u8],
+    ) -> Result<(), RetryOutcome> {
+        // Look up the live subscription
+        let entry = {
+            let state = self.state.read().await;
+            state.index.find_by_id(subscriber_id)
+        };
+        let entry = match entry {
+            Some(e) => e,
+            None => {
+                // Subscription is gone — cannot retry
+                return Err(RetryOutcome::Permanent(format!(
+                    "subscriber {} no longer exists",
+                    subscriber_id
+                )));
+            }
+        };
+
+        match &entry.channel {
+            ChannelConfig::Webhook { .. } => {
+                use crate::delivery::DeliveryChannel;
+                self.webhook_channel
+                    .deliver(payload, subject, &entry.channel)
+                    .await
+                    .map(|_| ())
+                    .map_err(|e| RetryOutcome::Transient(format!("{}", e)))
+            }
+            ChannelConfig::Custom { channel_type, .. } => {
+                let channel_opt = self.channel_registry.get(channel_type).await;
+                let channel = match channel_opt {
+                    Some(c) => c,
+                    None => {
+                        return Err(RetryOutcome::Permanent(format!(
+                            "no channel registered for type '{}'",
+                            channel_type
+                        )));
+                    }
+                };
+                channel
+                    .deliver(payload, subject, &entry.channel)
+                    .await
+                    .map(|_| ())
+                    .map_err(|e| RetryOutcome::Transient(format!("{}", e)))
+            }
+            ChannelConfig::InProcess => {
+                // Try to push through the live mpsc sender. If the consumer
+                // is still draining, this may now succeed even if the original
+                // try_send failed.
+                let state = self.state.read().await;
+                let tx = match state.senders.get(subscriber_id) {
+                    Some(tx) => tx.clone(),
+                    None => {
+                        return Err(RetryOutcome::Permanent(
+                            "in-process sender no longer registered".to_string(),
+                        ));
+                    }
+                };
+                drop(state);
+                let event = crate::request_reply::DispatchedEvent {
+                    payload: payload.to_vec(),
+                    reply_subject: None,
+                    subject: subject.to_string(),
+                    seq: 0, // unknown at retry time
+                };
+                tx.try_send(event)
+                    .map_err(|e| RetryOutcome::Transient(format!("{}", e)))
+            }
+            ChannelConfig::WebSocket => {
+                // WebSocket connections are per-session and cannot survive
+                // a retry — the original connection is gone by the time we
+                // get here. Mark as permanent.
+                Err(RetryOutcome::Permanent(
+                    "WebSocket subscriptions are not retryable".to_string(),
+                ))
+            }
+        }
+    }
+}
+
+/// Outcome of a retry attempt.
+#[derive(Debug, Clone)]
+pub enum RetryOutcome {
+    /// The retry failed but is eligible for further attempts.
+    Transient(String),
+    /// The retry cannot succeed (subscriber gone, channel type not retryable).
+    /// The caller should dead-letter this delivery.
+    Permanent(String),
+}
+
+impl std::fmt::Display for RetryOutcome {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            RetryOutcome::Transient(msg) => write!(f, "transient: {}", msg),
+            RetryOutcome::Permanent(msg) => write!(f, "permanent: {}", msg),
+        }
     }
 }
 

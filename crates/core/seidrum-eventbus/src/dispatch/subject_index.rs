@@ -227,6 +227,41 @@ impl SubjectIndex {
         all
     }
 
+    /// Find a subscription by its ID. O(n) walk over the trie.
+    /// Returns `None` if no subscription with the given ID exists.
+    pub fn find_by_id(&self, id: &str) -> Option<SubscriptionEntry> {
+        let mut found = None;
+        Self::find_by_id_inner(&self.root, id, &mut found);
+        found
+    }
+
+    fn find_by_id_inner(node: &TrieNode, id: &str, out: &mut Option<SubscriptionEntry>) {
+        if out.is_some() {
+            return;
+        }
+        for entry in &node.subscriptions {
+            if entry.id == id {
+                *out = Some(entry.clone());
+                return;
+            }
+        }
+        for entry in &node.terminal_wildcard {
+            if entry.id == id {
+                *out = Some(entry.clone());
+                return;
+            }
+        }
+        for child in node.children.values() {
+            Self::find_by_id_inner(child, id, out);
+            if out.is_some() {
+                return;
+            }
+        }
+        if let Some(ref wildcard) = node.wildcard {
+            Self::find_by_id_inner(wildcard, id, out);
+        }
+    }
+
     fn collect_all(node: &TrieNode, filter: Option<&str>, results: &mut Vec<SubscriptionEntry>) {
         let matches = |entry: &SubscriptionEntry| filter.is_none_or(|f| entry.subject_pattern == f);
         for entry in &node.subscriptions {

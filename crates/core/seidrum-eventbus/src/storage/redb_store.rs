@@ -14,6 +14,11 @@ const SUBJECT_IDX_TABLE: redb::TableDefinition<(&str, u64), ()> =
     redb::TableDefinition::new("subject_idx");
 const STATUS_IDX_TABLE: redb::TableDefinition<(u8, u64), ()> =
     redb::TableDefinition::new("status_idx");
+/// Index of events that have at least one delivery in the `Failed` state.
+/// Key: `seq`. Used by `query_retryable` to skip events with no failed
+/// deliveries instead of full-scanning the events table.
+const FAILED_DELIVERIES_IDX_TABLE: redb::TableDefinition<u64, ()> =
+    redb::TableDefinition::new("failed_deliveries_idx");
 
 /// A durable event store using redb as the backing storage engine.
 pub struct RedbEventStore {
@@ -41,6 +46,14 @@ impl RedbEventStore {
                 let _t3 = write_txn.open_table(STATUS_IDX_TABLE).map_err(|e| {
                     StorageError::DatabaseError(format!("failed to open status_idx table: {}", e))
                 })?;
+                let _t4 = write_txn
+                    .open_table(FAILED_DELIVERIES_IDX_TABLE)
+                    .map_err(|e| {
+                        StorageError::DatabaseError(format!(
+                            "failed to open failed_deliveries_idx table: {}",
+                            e
+                        ))
+                    })?;
             }
             write_txn.commit().map_err(|e| {
                 StorageError::DatabaseError(format!("failed to commit transaction: {}", e))
@@ -213,8 +226,9 @@ impl EventStore for RedbEventStore {
                 StorageError::DatabaseError(format!("failed to begin write: {}", e))
             })?;
 
-            // Read the event
-            let serialized = {
+            // Read the event, mutate the delivery record, and capture the
+            // post-update state of the failed-deliveries index.
+            let (serialized, has_failed_deliveries) = {
                 let events_table = write_txn.open_table(EVENTS_TABLE).map_err(|e| {
                     StorageError::DatabaseError(format!("failed to open events table: {}", e))
                 })?;
@@ -263,12 +277,18 @@ impl EventStore for RedbEventStore {
                     });
                 }
 
-                serde_json::to_vec(&event).map_err(|e| {
+                let has_failed = event
+                    .deliveries
+                    .iter()
+                    .any(|d| d.status == DeliveryStatus::Failed);
+
+                let serialized = serde_json::to_vec(&event).map_err(|e| {
                     StorageError::OperationFailed(format!("failed to serialize event: {}", e))
-                })?
+                })?;
+                (serialized, has_failed)
             };
 
-            // Write back
+            // Write back the event
             {
                 let mut events_table = write_txn.open_table(EVENTS_TABLE).map_err(|e| {
                     StorageError::DatabaseError(format!("failed to open events table: {}", e))
@@ -278,6 +298,30 @@ impl EventStore for RedbEventStore {
                     .map_err(|e| {
                         StorageError::DatabaseError(format!("failed to update event: {}", e))
                     })?;
+            }
+
+            // Maintain the failed-deliveries index: insert if any delivery
+            // is currently Failed, otherwise remove the entry.
+            {
+                let mut failed_idx =
+                    write_txn
+                        .open_table(FAILED_DELIVERIES_IDX_TABLE)
+                        .map_err(|e| {
+                            StorageError::DatabaseError(format!(
+                                "failed to open failed_deliveries_idx: {}",
+                                e
+                            ))
+                        })?;
+                if has_failed_deliveries {
+                    failed_idx.insert(seq, ()).map_err(|e| {
+                        StorageError::DatabaseError(format!(
+                            "failed to insert failed_deliveries_idx: {}",
+                            e
+                        ))
+                    })?;
+                } else {
+                    let _ = failed_idx.remove(seq);
+                }
             }
 
             write_txn
@@ -408,8 +452,6 @@ impl EventStore for RedbEventStore {
     ) -> StorageResult<Vec<RetryableDelivery>> {
         let db = Arc::clone(&self.db);
 
-        // TODO(Phase 2): Add a delivery_idx table keyed by (subscriber_id, seq) → DeliveryStatus
-        // to avoid this full-table scan. Currently O(n) over all events.
         tokio::task::spawn_blocking(move || {
             let read_txn = db
                 .begin_read()
@@ -417,26 +459,42 @@ impl EventStore for RedbEventStore {
             let events_table = read_txn.open_table(EVENTS_TABLE).map_err(|e| {
                 StorageError::DatabaseError(format!("failed to open events table: {}", e))
             })?;
+            let failed_idx = read_txn
+                .open_table(FAILED_DELIVERIES_IDX_TABLE)
+                .map_err(|e| {
+                    StorageError::DatabaseError(format!(
+                        "failed to open failed_deliveries_idx: {}",
+                        e
+                    ))
+                })?;
 
             let mut results = Vec::new();
-            let iter = events_table
+            // Iterate only events known to have at least one Failed delivery.
+            let iter = failed_idx
                 .iter()
                 .map_err(|e| StorageError::DatabaseError(format!("failed to iterate: {}", e)))?;
 
+            let now = RedbEventStore::current_time_ms();
             for item in iter {
-                let (_, data) = item.map_err(|e| {
-                    StorageError::DatabaseError(format!("failed to iterate: {}", e))
-                })?;
                 if results.len() >= limit {
                     break;
                 }
+                let (key, _) = item.map_err(|e| {
+                    StorageError::DatabaseError(format!("failed to iterate: {}", e))
+                })?;
+                let seq: u64 = key.value();
 
+                let data = match events_table.get(seq).map_err(|e| {
+                    StorageError::DatabaseError(format!("failed to get event: {}", e))
+                })? {
+                    Some(d) => d,
+                    None => continue, // Stale index entry
+                };
                 let bytes = data.value().to_vec();
                 let event: StoredEvent = serde_json::from_slice(&bytes).map_err(|e| {
                     StorageError::OperationFailed(format!("failed to deserialize: {}", e))
                 })?;
 
-                let now = RedbEventStore::current_time_ms();
                 for delivery in &event.deliveries {
                     if results.len() >= limit {
                         break;
@@ -524,6 +582,9 @@ impl EventStore for RedbEventStore {
             let mut status_idx = write_txn.open_table(STATUS_IDX_TABLE).map_err(|e| {
                 StorageError::DatabaseError(format!("failed to open status_idx: {}", e))
             })?;
+            let mut failed_idx = write_txn.open_table(FAILED_DELIVERIES_IDX_TABLE).map_err(|e| {
+                StorageError::DatabaseError(format!("failed to open failed_deliveries_idx: {}", e))
+            })?;
 
             for (seq, subject, status_u8) in &to_delete {
                 if let Err(e) = events_table.remove(*seq) {
@@ -535,11 +596,14 @@ impl EventStore for RedbEventStore {
                 if let Err(e) = status_idx.remove((*status_u8, *seq)) {
                     tracing::warn!(seq = seq, status = status_u8, error = %e, "compaction failed to remove status index entry");
                 }
+                // Best-effort: also drop the failed-deliveries index entry.
+                let _ = failed_idx.remove(*seq);
             }
             // Drop the table handles before commit (required by redb borrow rules).
             drop(events_table);
             drop(subject_idx);
             drop(status_idx);
+            drop(failed_idx);
 
             write_txn
                 .commit()

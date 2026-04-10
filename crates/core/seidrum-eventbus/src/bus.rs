@@ -151,6 +151,23 @@ impl EventBusImpl {
             engine: Arc::new(DispatchEngine::new(store)),
         }
     }
+
+    /// Construct an EventBusImpl that shares a [`crate::delivery::ChannelRegistry`]
+    /// with the dispatch engine. The registry is used by the retry task for
+    /// looking up `ChannelConfig::Custom` delivery channels.
+    pub fn with_registry(
+        store: Arc<dyn EventStore>,
+        registry: Arc<crate::delivery::ChannelRegistry>,
+    ) -> Self {
+        Self {
+            engine: Arc::new(DispatchEngine::with_registry(store, registry)),
+        }
+    }
+
+    /// Internal accessor used by the builder to spawn the retry task.
+    pub(crate) fn engine(&self) -> Arc<DispatchEngine> {
+        Arc::clone(&self.engine)
+    }
 }
 
 #[async_trait]
