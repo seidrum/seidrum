@@ -84,6 +84,13 @@ impl RetryTask {
     pub async fn run(mut self) {
         info!("Retry task starting");
 
+        // If shutdown was already signaled before we started, exit immediately
+        // rather than waiting a full poll interval to detect it.
+        if *self.shutdown_rx.borrow() {
+            info!("Retry task shutting down (pre-signaled)");
+            return;
+        }
+
         loop {
             tokio::select! {
                 _ = tokio::time::sleep(self.poll_interval) => {

@@ -18,22 +18,27 @@ pub struct SubscriptionEntry {
     pub filter: Option<crate::dispatch::filter::EventFilter>,
 }
 
-/// Subscription mode: Sync (sequential, with interceptors) or Async (parallel, channel-based).
+/// Subscription mode: `Sync` (sequential, with interceptors) or `Async`
+/// (sequential `try_send`, no payload modification).
 ///
-/// Sync subscriptions receive events through interceptors that run sequentially in priority order.
-/// Interceptors can inspect, modify, or drop events, affecting later subscribers.
+/// Sync subscriptions are processed in priority order (lower first) inside
+/// the sync chain. Sync subscribers with an attached [`crate::Interceptor`]
+/// can inspect, modify, or drop the event; mutations propagate to later
+/// subscribers.
 ///
-/// Async subscriptions receive events through bounded MPSC channels in parallel.
-/// All async subscribers receive the same (possibly mutated by interceptors) payload.
-/// Channel-based async delivery uses try_send, so it is not truly synchronous —
-/// if the channel is full, delivery silently fails.
+/// Async subscriptions are processed sequentially after the sync chain via
+/// non-blocking `try_send` on each subscriber's bounded mpsc channel. They
+/// all receive the same (possibly mutated by interceptors) payload. The
+/// "async" name refers to the absence of interceptor semantics — there is
+/// no parallelism in the fan-out loop, but each `try_send` is non-blocking
+/// so a slow consumer cannot stall others.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SubscriptionMode {
-    /// Sync interceptor mode. The subscription is processed sequentially in priority order.
-    /// Can modify or drop the event, affecting async subscribers and later interceptors.
+    /// Sync mode: processed in priority order in the sync chain. Sync
+    /// subscribers with an interceptor can modify or drop events.
     Sync,
-    /// Async subscriber mode. The subscription receives events through a bounded channel
-    /// in parallel with other async subscribers. Cannot modify or drop events.
+    /// Async mode: processed via non-blocking `try_send` after the sync
+    /// chain. Cannot modify the payload or drop the event.
     Async,
 }
 

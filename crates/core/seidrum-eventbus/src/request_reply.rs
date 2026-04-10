@@ -511,13 +511,21 @@ mod tests {
         assert!(subs_before.iter().any(|s| s.id == sub_id));
 
         drop(sub);
-        // Cleanup is async — give the spawned task time to run
-        tokio::time::sleep(Duration::from_millis(100)).await;
 
-        let subs_after = engine.list_subscriptions(None).await.unwrap();
+        // Cleanup is async — poll for the subscription to disappear instead
+        // of relying on a fixed sleep. This avoids flakiness on slow CI.
+        let mut removed = false;
+        for _ in 0..50 {
+            let subs = engine.list_subscriptions(None).await.unwrap();
+            if !subs.iter().any(|s| s.id == sub_id) {
+                removed = true;
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
         assert!(
-            !subs_after.iter().any(|s| s.id == sub_id),
-            "RequestSubscription drop should remove the subscription"
+            removed,
+            "RequestSubscription drop should remove the subscription within 1s"
         );
     }
 
