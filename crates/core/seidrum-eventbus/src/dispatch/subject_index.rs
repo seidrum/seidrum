@@ -220,13 +220,15 @@ impl SubjectIndex {
     }
 
     fn collect_all(node: &TrieNode, filter: Option<&str>, results: &mut Vec<SubscriptionEntry>) {
+        let matches =
+            |entry: &SubscriptionEntry| filter.is_none_or(|f| entry.subject_pattern.contains(f));
         for entry in &node.subscriptions {
-            if filter.is_none() || entry.subject_pattern.contains(filter.unwrap_or("")) {
+            if matches(entry) {
                 results.push(entry.clone());
             }
         }
         for entry in &node.terminal_wildcard {
-            if filter.is_none() || entry.subject_pattern.contains(filter.unwrap_or("")) {
+            if matches(entry) {
                 results.push(entry.clone());
             }
         }

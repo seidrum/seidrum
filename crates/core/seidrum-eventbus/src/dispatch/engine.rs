@@ -5,26 +5,40 @@
 //! The dispatch pipeline has 6 stages:
 //!
 //! 1. **PERSIST**: Write the event durably to the store (write-ahead logging).
-//! 2. **RESOLVE**: Look up all subscriptions matching the subject using the trie index.
-//! 3. **FILTER**: Apply EventFilter to narrow subscribers to those interested in the payload.
-//! 4. **SYNC CHAIN**: Process sync interceptors in priority order (lower = first).
-//!    - Interceptors can Pass, Modify, or Drop events.
-//!    - Mutations propagate to later subscribers.
-//!    - Drop aborts further processing.
-//! 5. **ASYNC FAN-OUT**: Deliver (possibly mutated) payload to async subscribers in parallel.
-//! 6. **FINALIZE**: Record final delivery status (Delivered, PartiallyDelivered, etc).
+//!    Skipped for ephemeral `_reply.*` subjects.
+//! 2. **RESOLVE**: Look up all subscriptions matching the subject using the
+//!    trie index. The lock is released after lookup.
+//! 3. **FILTER**: Apply each subscription's [`EventFilter`] to the original
+//!    payload. Filters that fail to parse non-JSON payloads pass through.
+//! 4. **SYNC CHAIN**: Process sync interceptors sequentially in priority order
+//!    (lower = first). Interceptors can `Pass`, `Modify`, or `Drop` events.
+//!    Mutations propagate to subsequent subscribers. `Drop` aborts further
+//!    processing entirely.
+//! 5. **ASYNC FAN-OUT**: Deliver the (possibly mutated) payload to async
+//!    subscribers via non-blocking `try_send` on their bounded channels.
+//!    Channel-full and channel-closed errors are recorded as failed deliveries.
+//! 6. **FINALIZE**: Record the final [`EventStatus`] (`Delivered` if all
+//!    subscribers received the event, `PartiallyDelivered` if any delivery
+//!    failed). Skipped for reply events.
 //!
 //! ## Sync vs Async Subscriptions
 //!
-//! - **Sync**: Processed sequentially in priority order. Can modify or drop the event.
-//!   Mutations affect subsequent subscribers.
-//! - **Async**: Processed in parallel after all sync subscribers. Cannot affect event.
-//!   All async subscribers see the same (possibly mutated) payload.
+//! - **Sync**: Processed sequentially in priority order. Sync interceptors
+//!   can modify or drop the event; mutations affect all subsequent
+//!   subscribers (sync and async).
+//! - **Async**: Processed after the sync chain. Each async subscriber
+//!   receives the same (possibly mutated) payload via `try_send`. Async
+//!   subscribers cannot affect the event payload.
 //!
-//! ## Concurrency & Locks
+//! ## Concurrency
 //!
-//! The RwLock is held during trie lookup and delivery dispatch, but released
-//! between major stages to allow concurrent subscriptions/unsubscriptions.
+//! The state RwLock is held only during trie lookup and to snapshot
+//! interceptors/senders. It is released before the sync interceptor chain
+//! executes, so subscribe/unsubscribe operations are not blocked by slow
+//! interceptors. There is a small race window where an interceptor or sender
+//! captured in the snapshot may be invoked after its subscription has been
+//! removed; this is intentional and harmless (the modified payload is local
+//! to this dispatch).
 
 use super::filter::EventFilter;
 use super::interceptor::{InterceptResult, Interceptor};
@@ -116,26 +130,37 @@ impl DispatchEngine {
     /// Publish an event to a subject.
     ///
     /// The publish pipeline:
-    /// 1. **PERSIST**: Event is written durably to storage via write-ahead logging.
-    /// 2. **RESOLVE**: All subscriptions matching the subject pattern are looked up.
-    /// 3. **FILTER**: EventFilter is applied to the original payload. Filters are evaluated before
-    ///    interceptors, so interceptors see the unfiltered payload but modifications from interceptors
-    ///    are applied to the final delivery.
-    /// 4. **SYNC CHAIN**: Sync interceptors run sequentially in priority order (lower = first).
-    ///    Each can Pass, Modify, or Drop the event. Modifications propagate to later subscribers.
-    /// 5. **ASYNC FAN-OUT**: Async subscribers receive the (possibly mutated) payload in parallel.
-    /// 6. **FINALIZE**: Delivery status is recorded (Delivered, PartiallyDelivered, etc.).
+    /// 1. **PERSIST**: Event is written durably to storage via write-ahead
+    ///    logging. Skipped for ephemeral `_reply.*` subjects.
+    /// 2. **RESOLVE**: All subscriptions matching the subject pattern are
+    ///    looked up.
+    /// 3. **FILTER**: [`EventFilter`] is applied to the original payload.
+    ///    Filters are evaluated before interceptors, so interceptors see the
+    ///    unfiltered payload but modifications from interceptors are applied
+    ///    to the final delivery.
+    /// 4. **SYNC CHAIN**: Sync interceptors run sequentially in priority
+    ///    order (lower = first). Each can Pass, Modify, or Drop the event.
+    ///    Modifications propagate to later subscribers.
+    /// 5. **ASYNC FAN-OUT**: Async subscribers receive the (possibly mutated)
+    ///    payload sequentially via non-blocking `try_send`. The fan-out is
+    ///    sequential (not parallel) but each `try_send` is non-blocking.
+    /// 6. **FINALIZE**: Delivery status is recorded (`Delivered`,
+    ///    `PartiallyDelivered`, etc).
     ///
     /// ## Store Operation Failures
-    /// Storage errors during delivery recording are logged as warnings but do not cause publish to fail.
-    /// This implements best-effort persistence: the event is delivered even if recording fails.
-    /// Operators should monitor warn-level logs for `failed to record` messages to detect issues.
+    /// Storage errors during delivery recording are logged as warnings but
+    /// do not cause publish to fail. This implements best-effort persistence:
+    /// the event is delivered even if recording fails. Operators should
+    /// monitor warn-level logs for `failed to record` messages to detect
+    /// issues.
     ///
     /// ## Sync vs Async Delivery
-    /// - **Sync mode**: Uses try_send on bounded channels. Not truly synchronous — if the channel
-    ///   is full, delivery silently fails. Only interceptors (with timeout enforcement) provide
-    ///   true synchronous processing.
-    /// - **Async mode**: Parallel delivery with the same channel limitations as Sync.
+    /// - **Sync mode**: Uses `try_send` on bounded channels. Not truly
+    ///   synchronous — if the channel is full, delivery is recorded as
+    ///   failed. Only interceptors (with timeout enforcement) provide true
+    ///   synchronous processing.
+    /// - **Async mode**: Sequential `try_send` to each subscriber. Same
+    ///   channel-full semantics as Sync.
     ///
     /// Called by the public API with `reply_subject: None`,
     /// and by `request()` with a reply subject set.
@@ -172,12 +197,12 @@ impl DispatchEngine {
 
         // Helper: record delivery only for persisted (non-reply) events.
         let store = &self.store;
-        let try_record = |seq: u64, sub_id: &str, status: DeliveryStatus| {
+        let try_record = |seq: u64, sub_id: &str, status: DeliveryStatus, error: Option<String>| {
             let sub_id = sub_id.to_string();
             let store = Arc::clone(store);
             async move {
                 if !is_reply {
-                    if let Err(e) = store.record_delivery(seq, &sub_id, status).await {
+                    if let Err(e) = store.record_delivery(seq, &sub_id, status, error).await {
                         warn!(seq = seq, subscriber = sub_id, error = %e, "failed to record delivery");
                     }
                 }
@@ -240,6 +265,10 @@ impl DispatchEngine {
             .cloned()
             .collect();
 
+        // Track delivery failures across both sync and async stages so the
+        // final event status reflects partial delivery.
+        let mut any_failed = false;
+
         // 4. SYNC CHAIN: process interceptors sequentially in priority order.
         // Snapshot the interceptors and senders we need, then release the lock
         // so that subscribe/unsubscribe is not blocked during interceptor execution.
@@ -276,15 +305,15 @@ impl DispatchEngine {
 
                     match result {
                         Ok(InterceptResult::Pass) => {
-                            try_record(seq, entry_id, DeliveryStatus::Delivered).await;
+                            try_record(seq, entry_id, DeliveryStatus::Delivered, None).await;
                         }
                         Ok(InterceptResult::Modified) => {
                             debug!(subscriber = entry_id, "interceptor modified payload");
-                            try_record(seq, entry_id, DeliveryStatus::Delivered).await;
+                            try_record(seq, entry_id, DeliveryStatus::Delivered, None).await;
                         }
                         Ok(InterceptResult::Drop) => {
                             debug!(subscriber = entry_id, "interceptor dropped event");
-                            try_record(seq, entry_id, DeliveryStatus::Delivered).await;
+                            try_record(seq, entry_id, DeliveryStatus::Delivered, None).await;
                             dropped = true;
                             break;
                         }
@@ -294,7 +323,17 @@ impl DispatchEngine {
                                 timeout_ms = timeout.as_millis() as u64,
                                 "sync interceptor timed out, skipping"
                             );
-                            try_record(seq, entry_id, DeliveryStatus::Failed).await;
+                            any_failed = true;
+                            try_record(
+                                seq,
+                                entry_id,
+                                DeliveryStatus::Failed,
+                                Some(format!(
+                                    "interceptor timed out after {}ms",
+                                    timeout.as_millis()
+                                )),
+                            )
+                            .await;
                         }
                     }
                 } else if let Some(tx) = sender_opt {
@@ -307,13 +346,35 @@ impl DispatchEngine {
                     };
                     match tx.try_send(event) {
                         Ok(()) => {
-                            try_record(seq, entry_id, DeliveryStatus::Delivered).await;
+                            try_record(seq, entry_id, DeliveryStatus::Delivered, None).await;
                         }
-                        Err(_) => {
-                            warn!(subscriber = entry_id, "sync channel delivery failed");
-                            try_record(seq, entry_id, DeliveryStatus::Failed).await;
+                        Err(e) => {
+                            warn!(subscriber = entry_id, error = %e, "sync channel delivery failed");
+                            any_failed = true;
+                            try_record(
+                                seq,
+                                entry_id,
+                                DeliveryStatus::Failed,
+                                Some(format!("sync channel delivery failed: {}", e)),
+                            )
+                            .await;
                         }
                     }
+                } else {
+                    // Sync entry vanished between snapshot and execution (race
+                    // with unsubscribe). Record as failed and flag.
+                    debug!(
+                        subscriber = entry_id,
+                        "sync entry has neither interceptor nor sender"
+                    );
+                    any_failed = true;
+                    try_record(
+                        seq,
+                        entry_id,
+                        DeliveryStatus::Failed,
+                        Some("subscription removed during dispatch".to_string()),
+                    )
+                    .await;
                 }
             }
         }
@@ -344,7 +405,6 @@ impl DispatchEngine {
                 .collect()
         };
 
-        let mut any_failed = false;
         for (entry_id, tx_opt) in async_senders {
             if let Some(tx) = tx_opt {
                 let event = crate::request_reply::DispatchedEvent {
@@ -355,23 +415,41 @@ impl DispatchEngine {
                 };
                 match tx.try_send(event) {
                     Ok(()) => {
-                        try_record(seq, &entry_id, DeliveryStatus::Delivered).await;
+                        try_record(seq, &entry_id, DeliveryStatus::Delivered, None).await;
                     }
                     Err(mpsc::error::TrySendError::Full(_)) => {
                         warn!(subscriber = entry_id, "delivery failed: channel full");
                         any_failed = true;
-                        try_record(seq, &entry_id, DeliveryStatus::Failed).await;
+                        try_record(
+                            seq,
+                            &entry_id,
+                            DeliveryStatus::Failed,
+                            Some("subscriber channel full".to_string()),
+                        )
+                        .await;
                     }
                     Err(mpsc::error::TrySendError::Closed(_)) => {
                         debug!(subscriber = entry_id, "delivery failed: channel closed");
                         any_failed = true;
-                        try_record(seq, &entry_id, DeliveryStatus::Failed).await;
+                        try_record(
+                            seq,
+                            &entry_id,
+                            DeliveryStatus::Failed,
+                            Some("subscriber channel closed".to_string()),
+                        )
+                        .await;
                     }
                 }
             } else {
                 debug!(subscriber = entry_id, "no sender found");
                 any_failed = true;
-                try_record(seq, &entry_id, DeliveryStatus::Failed).await;
+                try_record(
+                    seq,
+                    &entry_id,
+                    DeliveryStatus::Failed,
+                    Some("no sender registered for subscriber".to_string()),
+                )
+                .await;
             }
         }
 

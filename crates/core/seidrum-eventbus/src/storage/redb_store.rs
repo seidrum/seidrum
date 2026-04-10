@@ -203,6 +203,7 @@ impl EventStore for RedbEventStore {
         seq: u64,
         subscriber_id: &str,
         status: DeliveryStatus,
+        error: Option<String>,
     ) -> StorageResult<()> {
         let db = Arc::clone(&self.db);
         let subscriber_id = subscriber_id.to_string();
@@ -237,6 +238,7 @@ impl EventStore for RedbEventStore {
                     delivery.status = status;
                     delivery.attempts += 1;
                     delivery.last_attempt = Some(RedbEventStore::current_time_ms());
+                    delivery.error = error;
                     delivery.next_retry = if status == DeliveryStatus::Failed {
                         let backoff_ms =
                             100_u64.saturating_mul(2_u64.saturating_pow(delivery.attempts));
@@ -257,7 +259,7 @@ impl EventStore for RedbEventStore {
                         attempts: 1,
                         last_attempt: Some(now),
                         next_retry,
-                        error: None,
+                        error,
                     });
                 }
 
@@ -493,7 +495,11 @@ impl EventStore for RedbEventStore {
                         StorageError::OperationFailed(format!("failed to deserialize: {}", e))
                     })?;
 
-                    if event.status == EventStatus::Delivered && event.stored_at < threshold {
+                    let terminal = matches!(
+                        event.status,
+                        EventStatus::Delivered | EventStatus::DeadLettered
+                    );
+                    if terminal && event.stored_at < threshold {
                         items.push((seq, event.subject, event.status.as_u8()));
                     }
                 }
@@ -508,26 +514,32 @@ impl EventStore for RedbEventStore {
 
             let removed = to_delete.len() as u64;
 
+            // Open tables once outside the loop to avoid repeated handle setup.
+            let mut events_table = write_txn.open_table(EVENTS_TABLE).map_err(|e| {
+                StorageError::DatabaseError(format!("failed to open events table: {}", e))
+            })?;
+            let mut subject_idx = write_txn.open_table(SUBJECT_IDX_TABLE).map_err(|e| {
+                StorageError::DatabaseError(format!("failed to open subject_idx: {}", e))
+            })?;
+            let mut status_idx = write_txn.open_table(STATUS_IDX_TABLE).map_err(|e| {
+                StorageError::DatabaseError(format!("failed to open status_idx: {}", e))
+            })?;
+
             for (seq, subject, status_u8) in &to_delete {
-                {
-                    let mut events_table = write_txn.open_table(EVENTS_TABLE).map_err(|e| {
-                        StorageError::DatabaseError(format!("failed to open events table: {}", e))
-                    })?;
-                    let _ = events_table.remove(*seq);
+                if let Err(e) = events_table.remove(*seq) {
+                    tracing::warn!(seq = seq, error = %e, "compaction failed to remove event");
                 }
-                {
-                    let mut subject_idx = write_txn.open_table(SUBJECT_IDX_TABLE).map_err(|e| {
-                        StorageError::DatabaseError(format!("failed to open subject_idx: {}", e))
-                    })?;
-                    let _ = subject_idx.remove((subject.as_str(), *seq));
+                if let Err(e) = subject_idx.remove((subject.as_str(), *seq)) {
+                    tracing::warn!(seq = seq, subject = %subject, error = %e, "compaction failed to remove subject index entry");
                 }
-                {
-                    let mut status_idx = write_txn.open_table(STATUS_IDX_TABLE).map_err(|e| {
-                        StorageError::DatabaseError(format!("failed to open status_idx: {}", e))
-                    })?;
-                    let _ = status_idx.remove((*status_u8, *seq));
+                if let Err(e) = status_idx.remove((*status_u8, *seq)) {
+                    tracing::warn!(seq = seq, status = status_u8, error = %e, "compaction failed to remove status index entry");
                 }
             }
+            // Drop the table handles before commit (required by redb borrow rules).
+            drop(events_table);
+            drop(subject_idx);
+            drop(status_idx);
 
             write_txn
                 .commit()
@@ -670,7 +682,7 @@ mod tests {
 
         let seq = store.append(&event).await.unwrap();
         store
-            .record_delivery(seq, "sub1", DeliveryStatus::Delivered)
+            .record_delivery(seq, "sub1", DeliveryStatus::Delivered, None)
             .await
             .unwrap();
 

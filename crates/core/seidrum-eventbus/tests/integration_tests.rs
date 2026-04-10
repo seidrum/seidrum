@@ -83,7 +83,7 @@ async fn test_crash_recovery_full() {
 
         // Verify delivery records survive crash
         store
-            .record_delivery(events[0].seq, "sub1", DeliveryStatus::Delivered)
+            .record_delivery(events[0].seq, "sub1", DeliveryStatus::Delivered, None)
             .await
             .unwrap();
         drop(store);

@@ -153,7 +153,7 @@ impl EventBusBuilder {
     /// Build the EventBus, returning only the bus (dropping task handles).
     ///
     /// Background tasks (compaction, transport servers) are spawned and will run
-    /// for the lifetime of the tokio runtime. Use [`build_with_handles`] if you
+    /// for the lifetime of the tokio runtime. Use [`Self::build_with_handles`] if you
     /// need to monitor or await the background tasks.
     pub async fn build(self) -> crate::Result<Arc<dyn EventBus>> {
         let handles = self.build_with_handles().await?;

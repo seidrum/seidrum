@@ -1,15 +1,28 @@
+//! Standalone in-process [`DeliveryChannel`] backed by a tokio mpsc channel.
+//!
+//! This is a self-contained delivery channel that can be used by callers
+//! who want to embed the [`DeliveryChannel`] trait API in their own
+//! pipelines. It is **not** used by the dispatch engine itself — the
+//! engine routes in-process events through bounded mpsc channels owned by
+//! [`crate::bus::Subscription`] handles.
+
 use super::{ChannelConfig, DeliveryChannel, DeliveryError, DeliveryReceipt, DeliveryResult};
 use async_trait::async_trait;
 use std::time::{SystemTime, UNIX_EPOCH};
 use tokio::sync::mpsc::{self, UnboundedReceiver};
 
-/// An in-process delivery channel using a tokio::mpsc bounded channel.
+/// A standalone in-process delivery channel.
+///
+/// Wraps an unbounded tokio mpsc sender. Use [`InProcessChannel::new`] to
+/// construct a paired sender + receiver.
 pub struct InProcessChannel {
     tx: mpsc::UnboundedSender<Vec<u8>>,
 }
 
 impl InProcessChannel {
     /// Create a new in-process channel pair.
+    /// Returns the channel (for `deliver()` calls) and the receiver
+    /// the consumer reads from.
     pub fn new() -> (Self, UnboundedReceiver<Vec<u8>>) {
         let (tx, rx) = mpsc::unbounded_channel();
         (Self { tx }, rx)

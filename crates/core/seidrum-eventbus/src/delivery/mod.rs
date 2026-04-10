@@ -1,3 +1,20 @@
+//! Delivery channels for forwarding events to subscribers.
+//!
+//! The dispatch engine routes in-process events through mpsc channels
+//! returned from [`crate::EventBus::subscribe`]. The types in this module
+//! provide additional delivery targets used by the transport layer:
+//!
+//! - [`webhook::WebhookChannel`] — POST events to an HTTP webhook URL.
+//!   Used by the HTTP transport's `/subscribe` handler.
+//! - [`websocket::WebSocketChannel`] — push events as JSON frames to an
+//!   externally-managed WebSocket connection.
+//! - [`in_process::InProcessChannel`] — standalone in-process channel for
+//!   embedding the [`DeliveryChannel`] trait in custom pipelines.
+//! - [`registry::ChannelRegistry`] — runtime registry of custom channel
+//!   implementations keyed by type name.
+//! - [`retry::RetryTask`] — background task that polls the store for
+//!   retryable failed deliveries (Phase 5 stub).
+
 pub mod in_process;
 pub mod registry;
 pub mod retry;
@@ -33,16 +50,28 @@ pub struct DeliveryReceipt {
 }
 
 /// Configuration for a delivery channel.
+///
+/// `ChannelConfig` is metadata stored on each subscription. It is read by
+/// transport-layer code (e.g., the HTTP webhook delivery task uses
+/// `ChannelConfig::Webhook` to know where to POST events). The dispatch
+/// engine itself does not act on this field — delivery routing for
+/// in-process subscribers always uses the mpsc channel returned by
+/// `subscribe()`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum ChannelConfig {
+    /// In-process delivery via mpsc channel.
     InProcess,
-    WebSocket {
-        connection_id: String,
-    },
+    /// WebSocket connection identified by a server-assigned ID.
+    /// Tagging metadata only — the WS transport server forwards events
+    /// through its own per-connection mpsc channel.
+    WebSocket { connection_id: String },
+    /// HTTP webhook target. Used by the HTTP transport's delivery task
+    /// to POST events to the configured URL.
     Webhook {
         url: String,
         headers: HashMap<String, String>,
     },
+    /// User-defined channel type, looked up via [`ChannelRegistry`].
     Custom {
         channel_type: String,
         config: serde_json::Value,
