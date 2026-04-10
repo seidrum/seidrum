@@ -212,12 +212,15 @@ impl SubjectIndex {
         }
     }
 
-    /// Get all subscriptions, optionally filtered by pattern substring.
+    /// Get all subscriptions, optionally filtered by exact subject pattern.
     ///
-    /// This operation is O(n) where n is the total number of subscriptions in the trie.
-    /// For large deployments with thousands of subscriptions, consider adding a secondary
-    /// index keyed by pattern for faster lookups.
-    // TODO: Optimize list() with a secondary index for large deployments
+    /// When `filter` is `Some`, only subscriptions whose `subject_pattern`
+    /// equals the filter exactly are returned. When `None`, all subscriptions
+    /// in the trie are returned.
+    ///
+    /// This operation is O(n) where n is the total number of subscriptions
+    /// in the trie. For large deployments, consider adding a secondary index
+    /// keyed by pattern for faster lookups.
     pub fn list(&self, filter: Option<&str>) -> Vec<SubscriptionEntry> {
         let mut all = Vec::new();
         Self::collect_all(&self.root, filter, &mut all);
@@ -225,8 +228,7 @@ impl SubjectIndex {
     }
 
     fn collect_all(node: &TrieNode, filter: Option<&str>, results: &mut Vec<SubscriptionEntry>) {
-        let matches =
-            |entry: &SubscriptionEntry| filter.is_none_or(|f| entry.subject_pattern.contains(f));
+        let matches = |entry: &SubscriptionEntry| filter.is_none_or(|f| entry.subject_pattern == f);
         for entry in &node.subscriptions {
             if matches(entry) {
                 results.push(entry.clone());
@@ -407,6 +409,24 @@ mod tests {
         assert_eq!(all.len(), 3);
         let filtered = index.list(Some("test.1"));
         assert_eq!(filtered.len(), 1);
+        assert_eq!(filtered[0].id, "sub1");
+    }
+
+    #[test]
+    fn test_list_exact_match_not_substring() {
+        let mut index = SubjectIndex::new();
+        index.subscribe(make_entry("a", "test.foo", 0)).unwrap();
+        index.subscribe(make_entry("b", "test.foo.bar", 1)).unwrap();
+        index.subscribe(make_entry("c", "other.foo", 2)).unwrap();
+
+        // "test.foo" must match only the exact pattern, not "test.foo.bar"
+        let filtered = index.list(Some("test.foo"));
+        assert_eq!(filtered.len(), 1);
+        assert_eq!(filtered[0].id, "a");
+
+        // "foo" alone must match nothing (no exact pattern equals "foo")
+        let filtered = index.list(Some("foo"));
+        assert!(filtered.is_empty());
     }
 
     #[test]

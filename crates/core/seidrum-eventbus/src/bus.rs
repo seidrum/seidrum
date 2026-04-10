@@ -127,7 +127,10 @@ pub trait EventBus: Send + Sync + 'static {
         timeout: Option<Duration>,
     ) -> crate::Result<String>;
 
-    /// List active subscriptions, optionally filtered by pattern substring.
+    /// List active subscriptions, optionally filtered by exact subject pattern.
+    ///
+    /// When `filter` is `Some`, only subscriptions whose `subject_pattern`
+    /// equals the filter exactly are returned.
     async fn list_subscriptions(
         &self,
         filter: Option<&str>,
@@ -223,11 +226,22 @@ impl EventBus for EventBusImpl {
     }
 
     async fn metrics(&self) -> crate::Result<BusMetrics> {
-        // TODO: Phase 3+ will track detailed publish/deliver counters
+        use std::sync::atomic::Ordering;
+        // events_pending_retry: query the store. We use u32::MAX as the
+        // "give me everything that could ever retry" upper bound and a large
+        // limit so the count is approximate but useful.
+        let pending_retry = self
+            .engine
+            .store
+            .query_retryable(u32::MAX, 10_000)
+            .await
+            .map(|v| v.len() as u64)
+            .unwrap_or(0);
+
         Ok(BusMetrics {
-            events_published: 0,
-            events_delivered: 0,
-            events_pending_retry: 0,
+            events_published: self.engine.events_published.load(Ordering::Relaxed),
+            events_delivered: self.engine.events_delivered.load(Ordering::Relaxed),
+            events_pending_retry: pending_retry,
             subscription_count: self.list_subscriptions(None).await?.len() as u64,
         })
     }
@@ -296,6 +310,37 @@ mod tests {
         let bus = EventBusImpl::new(store);
         let metrics = bus.metrics().await.unwrap();
         assert_eq!(metrics.subscription_count, 0);
+        assert_eq!(metrics.events_published, 0);
+        assert_eq!(metrics.events_delivered, 0);
+    }
+
+    #[tokio::test]
+    async fn test_metrics_publish_deliver_counters() {
+        let store = Arc::new(InMemoryEventStore::new());
+        let bus = EventBusImpl::new(store);
+
+        let opts = SubscribeOpts {
+            priority: 10,
+            mode: SubscriptionMode::Async,
+            channel: ChannelConfig::InProcess,
+            timeout: Duration::from_secs(5),
+            filter: None,
+        };
+        let mut sub = bus.subscribe("test.metrics", opts).await.unwrap();
+
+        bus.publish("test.metrics", b"a").await.unwrap();
+        bus.publish("test.metrics", b"b").await.unwrap();
+        bus.publish("test.metrics", b"c").await.unwrap();
+
+        // Drain so the channel doesn't fill
+        for _ in 0..3 {
+            let _ = tokio::time::timeout(Duration::from_millis(100), sub.rx.recv()).await;
+        }
+
+        let metrics = bus.metrics().await.unwrap();
+        assert_eq!(metrics.events_published, 3);
+        assert_eq!(metrics.events_delivered, 3);
+        assert_eq!(metrics.subscription_count, 1);
     }
 
     #[tokio::test]

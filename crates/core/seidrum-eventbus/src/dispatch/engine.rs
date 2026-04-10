@@ -47,6 +47,7 @@ use crate::delivery::ChannelConfig;
 use crate::storage::{DeliveryStatus, EventStatus, EventStore, StoredEvent};
 use crate::EventBusError;
 use std::collections::HashMap;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::mpsc;
@@ -74,6 +75,10 @@ pub struct DispatchEngine {
     pub(crate) store: Arc<dyn EventStore>,
     /// Combined lock for index + senders + interceptors to prevent desync.
     pub(crate) state: Arc<RwLock<DispatchState>>,
+    /// Counter incremented on every successful publish (excluding `_reply.*`).
+    pub(crate) events_published: AtomicU64,
+    /// Counter incremented for every successful subscriber delivery.
+    pub(crate) events_delivered: AtomicU64,
 }
 
 pub(crate) struct DispatchState {
@@ -92,6 +97,8 @@ impl DispatchEngine {
                 senders: HashMap::new(),
                 interceptors: HashMap::new(),
             })),
+            events_published: AtomicU64::new(0),
+            events_delivered: AtomicU64::new(0),
         }
     }
 
@@ -191,16 +198,22 @@ impl DispatchEngine {
                 reply_subject: reply_subject.clone(),
             };
             // 1. PERSIST (write-ahead)
-            self.store.append(&event).await?
+            let s = self.store.append(&event).await?;
+            self.events_published.fetch_add(1, Ordering::Relaxed);
+            s
         };
         let event_reply_subject = reply_subject;
 
         // Helper: record delivery only for persisted (non-reply) events.
         let store = &self.store;
+        let delivered_counter = &self.events_delivered;
         let try_record = |seq: u64, sub_id: &str, status: DeliveryStatus, error: Option<String>| {
             let sub_id = sub_id.to_string();
             let store = Arc::clone(store);
             async move {
+                if status == DeliveryStatus::Delivered {
+                    delivered_counter.fetch_add(1, Ordering::Relaxed);
+                }
                 if !is_reply {
                     if let Err(e) = store.record_delivery(seq, &sub_id, status, error).await {
                         warn!(seq = seq, subscriber = sub_id, error = %e, "failed to record delivery");
@@ -536,14 +549,13 @@ impl DispatchEngine {
 
         let mut state = self.state.write().await;
 
-        // Check if we're adding too many interceptors for this specific pattern
+        // Check if we're adding too many interceptors for this specific pattern.
+        // list() returns exact-pattern matches only.
         let existing_for_pattern = state
             .index
             .list(Some(subject_pattern))
             .iter()
-            .filter(|e| {
-                e.subject_pattern == subject_pattern && state.interceptors.contains_key(&e.id)
-            })
+            .filter(|e| state.interceptors.contains_key(&e.id))
             .count();
         if existing_for_pattern >= MAX_INTERCEPTORS_PER_SUBJECT {
             return Err(EventBusError::Internal(format!(

@@ -61,10 +61,11 @@ pub struct DeliveryReceipt {
 pub enum ChannelConfig {
     /// In-process delivery via mpsc channel.
     InProcess,
-    /// WebSocket connection identified by a server-assigned ID.
-    /// Tagging metadata only — the WS transport server forwards events
-    /// through its own per-connection mpsc channel.
-    WebSocket { connection_id: String },
+    /// WebSocket subscription tag. The WS transport server forwards events
+    /// through its own per-connection mpsc channel; this variant exists
+    /// purely as metadata so callers can identify WS-backed subscriptions
+    /// when inspecting [`crate::SubscribeOpts`].
+    WebSocket,
     /// HTTP webhook target. Used by the HTTP transport's delivery task
     /// to POST events to the configured URL.
     Webhook {
