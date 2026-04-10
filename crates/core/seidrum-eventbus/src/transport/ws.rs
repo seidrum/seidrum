@@ -28,7 +28,6 @@ use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::{mpsc, watch};
 use tokio::task::JoinHandle;
 use tracing::{debug, info, warn};
-use ulid::Ulid;
 
 /// Maximum number of subscriptions a single WebSocket connection may hold.
 const MAX_SUBSCRIPTIONS_PER_CONNECTION: usize = 64;
@@ -221,23 +220,48 @@ impl WebSocketServer {
                     let bus = Arc::clone(&self.bus);
                     let auth = Arc::clone(&self.authenticator);
                     tokio::spawn(async move {
-                        // Authenticate before upgrading.
-                        // TODO(phase5): Use accept_hdr_async to extract HTTP upgrade
-                        // headers and populate AuthRequest.headers for token-based auth.
-                        // Currently only peer_addr is available.
-                        let auth_req = AuthRequest {
-                            peer_addr,
-                            headers: HashMap::new(),
+                        // Capture HTTP upgrade headers via accept_hdr_async's callback,
+                        // then authenticate before serving any messages.
+                        let captured_headers: Arc<std::sync::Mutex<HashMap<String, String>>> =
+                            Arc::new(std::sync::Mutex::new(HashMap::new()));
+                        let captured_clone = Arc::clone(&captured_headers);
+
+                        let upgrade = tokio_tungstenite::accept_hdr_async(
+                            socket,
+                            #[allow(clippy::result_large_err)]
+                            move |req: &tokio_tungstenite::tungstenite::handshake::server::Request,
+                                  resp: tokio_tungstenite::tungstenite::handshake::server::Response| {
+                                let mut map = captured_clone.lock().unwrap();
+                                for (name, value) in req.headers().iter() {
+                                    if let Ok(v) = value.to_str() {
+                                        map.insert(name.as_str().to_string(), v.to_string());
+                                    }
+                                }
+                                Ok(resp)
+                            },
+                        )
+                        .await;
+
+                        let ws = match upgrade {
+                            Ok(ws) => ws,
+                            Err(e) => {
+                                warn!("WebSocket upgrade failed from {}: {}", peer_addr, e);
+                                return;
+                            }
                         };
+
+                        let headers = std::mem::take(&mut *captured_headers.lock().unwrap());
+                        let auth_req = AuthRequest { peer_addr, headers };
                         if let Err(reason) = auth.authenticate(&auth_req).await {
                             warn!(
                                 "WebSocket connection rejected from {}: {}",
                                 peer_addr, reason
                             );
+                            // Drop the upgraded socket without serving messages.
                             return;
                         }
 
-                        if let Err(e) = handle_connection(socket, peer_addr, bus).await {
+                        if let Err(e) = serve_connection(ws, peer_addr, bus).await {
                             warn!(
                                 "Error handling WebSocket connection from {}: {}",
                                 peer_addr, e
@@ -263,19 +287,14 @@ struct ConnectionSubscription {
     forwarder: JoinHandle<()>,
 }
 
-async fn handle_connection(
-    socket: TcpStream,
+async fn serve_connection(
+    ws: tokio_tungstenite::WebSocketStream<TcpStream>,
     peer_addr: std::net::SocketAddr,
     bus: Arc<dyn EventBus>,
 ) -> crate::Result<()> {
     debug!("WebSocket client connected: {}", peer_addr);
 
-    let ws = tokio_tungstenite::accept_async(socket)
-        .await
-        .map_err(|e| crate::EventBusError::Internal(format!("WebSocket upgrade failed: {}", e)))?;
-
     let (mut sender, mut receiver) = ws.split();
-    let connection_id = Ulid::new().to_string();
     let mut subscriptions: HashMap<String, ConnectionSubscription> = HashMap::new();
 
     // Channel for forwarding subscription events to the WebSocket sender.
@@ -327,7 +346,6 @@ async fn handle_connection(
                     Ok(op) => {
                         if let Err(e) = handle_operation(
                             &bus,
-                            &connection_id,
                             &mut subscriptions,
                             &mut sender,
                             &forward_tx,
@@ -419,7 +437,6 @@ fn validate_and_decode_payload(payload: &str) -> crate::Result<Vec<u8>> {
 
 async fn handle_operation(
     bus: &Arc<dyn EventBus>,
-    connection_id: &str,
     subscriptions: &mut HashMap<String, ConnectionSubscription>,
     sender: &mut futures_util::stream::SplitSink<
         tokio_tungstenite::WebSocketStream<TcpStream>,
@@ -461,14 +478,10 @@ async fn handle_operation(
                 )));
             }
 
-            let channel = ChannelConfig::WebSocket {
-                connection_id: connection_id.to_string(),
-            };
-
             let subscribe_opts = SubscribeOpts {
                 priority: opts.priority,
                 mode: SubscriptionMode::Async,
-                channel,
+                channel: ChannelConfig::WebSocket,
                 timeout: Duration::from_secs(5),
                 filter: None,
             };

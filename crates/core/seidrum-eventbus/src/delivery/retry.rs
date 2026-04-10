@@ -11,6 +11,7 @@ use crate::storage::{EventStore, RetryableDelivery};
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 use std::time::Duration;
+use tokio::sync::watch;
 use tracing::{debug, error, info, warn};
 
 /// Configuration for delivery retries (backoff parameters).
@@ -55,6 +56,7 @@ pub struct RetryTask {
     poll_interval: Duration,
     initial_backoff_ms: u64,
     max_backoff_ms: u64,
+    shutdown_rx: watch::Receiver<bool>,
 }
 
 impl RetryTask {
@@ -65,6 +67,7 @@ impl RetryTask {
         poll_interval: Duration,
         initial_backoff_ms: u64,
         max_backoff_ms: u64,
+        shutdown_rx: watch::Receiver<bool>,
     ) -> Self {
         Self {
             store,
@@ -72,19 +75,35 @@ impl RetryTask {
             poll_interval,
             initial_backoff_ms,
             max_backoff_ms,
+            shutdown_rx,
         }
     }
 
-    /// Run the retry task continuously.
+    /// Run the retry task continuously until a shutdown signal is received.
     /// This task polls the store periodically and retries failed deliveries.
-    pub async fn run(self) -> ! {
+    pub async fn run(mut self) {
         info!("Retry task starting");
 
-        loop {
-            tokio::time::sleep(self.poll_interval).await;
+        // If shutdown was already signaled before we started, exit immediately
+        // rather than waiting a full poll interval to detect it.
+        if *self.shutdown_rx.borrow() {
+            info!("Retry task shutting down (pre-signaled)");
+            return;
+        }
 
-            if let Err(e) = self.poll_and_retry().await {
-                error!("Error during retry poll: {}", e);
+        loop {
+            tokio::select! {
+                _ = tokio::time::sleep(self.poll_interval) => {
+                    if let Err(e) = self.poll_and_retry().await {
+                        error!("Error during retry poll: {}", e);
+                    }
+                }
+                result = self.shutdown_rx.changed() => {
+                    if result.is_err() || *self.shutdown_rx.borrow() {
+                        info!("Retry task shutting down");
+                        break;
+                    }
+                }
             }
         }
     }

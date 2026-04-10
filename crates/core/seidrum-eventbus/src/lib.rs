@@ -1,8 +1,82 @@
-//! seidrum-eventbus: A purpose-built event bus for Seidrum.
+//! seidrum-eventbus: a purpose-built event bus for Seidrum.
 //!
-//! This crate provides a high-performance, durable event bus with support for
-//! in-process delivery, subject-based routing, crash recovery, and remote
-//! access via WebSocket and HTTP transports.
+//! `seidrum-eventbus` is a durable, in-process event bus with subject-based
+//! routing, wildcard pattern matching, sync/async delivery modes, request/reply
+//! semantics, and optional WebSocket/HTTP transports for remote clients.
+//!
+//! # Features
+//!
+//! - **Durable storage**: Events are persisted via the [`EventStore`] trait
+//!   before dispatch (write-ahead). Backends include
+//!   [`storage::memory_store::InMemoryEventStore`] for tests and
+//!   [`storage::redb_store::RedbEventStore`] for production.
+//! - **Subject routing**: NATS-style subjects (`channel.telegram.inbound`) with
+//!   `*` (single-token) and `>` (multi-token) wildcards.
+//! - **Sync interceptors**: Modify or drop events before delivery to async
+//!   subscribers, with timeout enforcement.
+//! - **Event filters**: JSON path-based predicates (`FieldEquals`,
+//!   `FieldContains`, `All`/`Any` combinators) to narrow subscriptions.
+//! - **Request/reply**: Built on top of pub/sub via dynamically-generated
+//!   `_reply.{ulid}` reply subjects.
+//! - **Remote transports**: Optional [`transport::WebSocketServer`] and
+//!   [`transport::HttpServer`] for cross-process clients.
+//! - **Crash recovery**: Pending events on disk are rediscovered on restart
+//!   via [`EventStore::query_by_status`].
+//!
+//! # Quick start
+//!
+//! ```no_run
+//! use seidrum_eventbus::{EventBusBuilder, SubscribeOpts, SubscriptionMode, ChannelConfig};
+//! use seidrum_eventbus::storage::memory_store::InMemoryEventStore;
+//! use std::sync::Arc;
+//! use std::time::Duration;
+//!
+//! # async fn example() -> seidrum_eventbus::Result<()> {
+//! let store = Arc::new(InMemoryEventStore::new());
+//! let bus = EventBusBuilder::new().storage(store).build().await?;
+//!
+//! let opts = SubscribeOpts {
+//!     priority: 10,
+//!     mode: SubscriptionMode::Async,
+//!     channel: ChannelConfig::InProcess,
+//!     timeout: Duration::from_secs(5),
+//!     filter: None,
+//! };
+//! let mut sub = bus.subscribe("channel.>", opts).await?;
+//!
+//! bus.publish("channel.telegram.inbound", b"hello").await?;
+//!
+//! if let Some(event) = sub.rx.recv().await {
+//!     assert_eq!(event.payload, b"hello");
+//! }
+//! # Ok(())
+//! # }
+//! ```
+//!
+//! # Architecture
+//!
+//! Publishing an event walks a 6-stage pipeline:
+//!
+//! 1. **PERSIST** — write the event to the [`EventStore`] (write-ahead).
+//! 2. **RESOLVE** — look up matching subscriptions in the trie-based
+//!    [`dispatch::subject_index::SubjectIndex`].
+//! 3. **FILTER** — apply each subscription's [`EventFilter`] to the original
+//!    payload.
+//! 4. **SYNC CHAIN** — run sync [`Interceptor`]s sequentially in priority
+//!    order. Interceptors can `Pass`, `Modify`, or `Drop` the event.
+//! 5. **ASYNC FAN-OUT** — deliver the (possibly mutated) payload to all
+//!    async subscribers.
+//! 6. **FINALIZE** — record the final [`EventStatus`] (`Delivered`,
+//!    `PartiallyDelivered`, etc).
+//!
+//! See [`dispatch::engine`] for full details.
+//!
+//! # Reserved subjects
+//!
+//! Subjects beginning with `_reply.` are reserved for internal request/reply
+//! routing. Direct calls to [`EventBus::publish`] with such subjects return
+//! [`EventBusError::InvalidSubject`]. Reply events are not persisted to the
+//! store.
 
 pub mod builder;
 pub mod bus;
@@ -49,6 +123,10 @@ pub enum EventBusError {
     /// A request timed out while waiting for a reply.
     #[error("request timed out")]
     RequestTimeout,
+
+    /// The reply channel was closed before a reply was received.
+    #[error("reply channel closed")]
+    ReplyChannelClosed,
 
     /// An internal error.
     #[error("internal error: {0}")]

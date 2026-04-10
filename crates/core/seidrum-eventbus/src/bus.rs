@@ -9,7 +9,10 @@ use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 use std::time::Duration;
 
-/// Metrics from the bus.
+/// Aggregate runtime metrics for an [`EventBus`] instance.
+///
+/// Currently only `subscription_count` is populated; the other counters
+/// are placeholders for a future metrics overhaul.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct BusMetrics {
     pub events_published: u64,
@@ -18,14 +21,31 @@ pub struct BusMetrics {
     pub subscription_count: u64,
 }
 
-/// A subscription returned from subscribe().
+/// Handle returned from [`EventBus::subscribe`].
+///
+/// Contains the subscription `id` (used to call [`EventBus::unsubscribe`])
+/// and an `rx` channel for receiving dispatched events. Dropping the
+/// `Subscription` does **not** unsubscribe — call `unsubscribe(id)` to
+/// release the entry from the bus.
 #[derive(Debug)]
 pub struct Subscription {
     pub id: String,
     pub rx: tokio::sync::mpsc::Receiver<crate::request_reply::DispatchedEvent>,
 }
 
-/// Options for subscribing.
+/// Options passed to [`EventBus::subscribe`].
+///
+/// - `priority`: lower values run first in the sync chain. Async subscribers
+///   are unordered relative to each other but always after the sync chain.
+/// - `mode`: [`SubscriptionMode::Sync`] (interceptor-style, can modify the
+///   payload) or [`SubscriptionMode::Async`] (typical pub/sub).
+/// - `channel`: tagging metadata describing how the subscription is wired
+///   (e.g. in-process, webhook, websocket). Currently used by the transport
+///   layer; the dispatch engine routes to the in-process mpsc channel
+///   regardless.
+/// - `timeout`: per-interceptor timeout for sync subscribers; ignored for
+///   pure async subscribers.
+/// - `filter`: optional [`EventFilter`] to narrow the subscription.
 #[derive(Debug, Clone)]
 pub struct SubscribeOpts {
     pub priority: u32,
@@ -35,15 +55,27 @@ pub struct SubscribeOpts {
     pub filter: Option<EventFilter>,
 }
 
-/// The EventBus trait is the public API for the entire event bus.
+/// The `EventBus` trait is the public API for the entire event bus.
+///
+/// Implementations must be `Send + Sync + 'static` so the bus can be
+/// shared across tasks via `Arc<dyn EventBus>`.
 #[async_trait]
 pub trait EventBus: Send + Sync + 'static {
-    /// Publish an event to a subject. The event is persisted durably
-    /// before dispatch begins. Returns the assigned sequence number.
+    /// Publish an event to a subject.
+    ///
+    /// The event is persisted durably (write-ahead) before dispatch begins.
+    /// Returns the assigned sequence number on success.
+    ///
+    /// Subjects beginning with `_reply.` are reserved for internal
+    /// request/reply routing and are rejected with
+    /// [`crate::EventBusError::InvalidSubject`].
     async fn publish(&self, subject: &str, payload: &[u8]) -> crate::Result<u64>;
 
-    /// Subscribe to a subject pattern with the given options.
-    /// Returns a Subscription handle for receiving events.
+    /// Subscribe to a subject pattern.
+    ///
+    /// `pattern` may contain `*` (single-token wildcard) or `>`
+    /// (multi-token tail wildcard, must be the last token). Returns a
+    /// [`Subscription`] handle whose `rx` channel receives matching events.
     async fn subscribe(&self, pattern: &str, opts: SubscribeOpts) -> crate::Result<Subscription>;
 
     /// Remove a subscription by ID.
@@ -51,10 +83,12 @@ pub trait EventBus: Send + Sync + 'static {
 
     /// Publish a request and wait for a reply.
     ///
-    /// Generates a unique reply subject, publishes the request to the target
-    /// subject with the reply_subject set, and waits for a response.
-    /// Returns the reply payload or `Err(RequestTimeout)` if no reply arrives
-    /// within the timeout duration.
+    /// Generates a unique `_reply.{ulid}` reply subject, publishes the
+    /// request with `reply_subject` set, and waits for a response.
+    /// Returns the reply payload, [`crate::EventBusError::RequestTimeout`]
+    /// if no reply arrives within `timeout`, or
+    /// [`crate::EventBusError::ReplyChannelClosed`] if the reply
+    /// subscription is dropped before a reply arrives.
     async fn request(
         &self,
         subject: &str,
@@ -62,17 +96,29 @@ pub trait EventBus: Send + Sync + 'static {
         timeout: Duration,
     ) -> crate::Result<Vec<u8>>;
 
-    /// Register a request handler on a subject.
+    /// Register a request handler on a subject pattern.
     ///
-    /// Similar to subscribe(), but the returned RequestSubscription yields
-    /// (RequestMessage, Replier) pairs. The handler can call replier.reply()
-    /// to send a response to the requester.
-    async fn serve(&self, subject: &str, opts: SubscribeOpts)
-        -> crate::Result<RequestSubscription>;
+    /// Similar to [`subscribe`](Self::subscribe), but the returned
+    /// [`RequestSubscription`] yields `(RequestMessage, Replier)` pairs.
+    /// The handler calls [`crate::Replier::reply`] to send a response.
+    ///
+    /// The handler always uses [`SubscriptionMode::Async`] internally with
+    /// in-process delivery. Use `priority` to control ordering relative to
+    /// other subscribers on the same subject. The `subject` parameter
+    /// supports the same wildcards as `subscribe`.
+    async fn serve(
+        &self,
+        subject: &str,
+        priority: u32,
+        timeout: Duration,
+        filter: Option<EventFilter>,
+    ) -> crate::Result<RequestSubscription>;
 
     /// Register a sync interceptor for a subject pattern.
+    ///
     /// Returns the subscription ID. The interceptor runs in priority order
-    /// during the sync chain and can modify or drop events.
+    /// during the sync chain and can `Pass`, `Modify`, or `Drop` events.
+    /// `timeout` defaults to 5 seconds if not specified.
     async fn intercept(
         &self,
         pattern: &str,
@@ -81,13 +127,16 @@ pub trait EventBus: Send + Sync + 'static {
         timeout: Option<Duration>,
     ) -> crate::Result<String>;
 
-    /// List active subscriptions, optionally filtered by pattern.
+    /// List active subscriptions, optionally filtered by exact subject pattern.
+    ///
+    /// When `filter` is `Some`, only subscriptions whose `subject_pattern`
+    /// equals the filter exactly are returned.
     async fn list_subscriptions(
         &self,
         filter: Option<&str>,
     ) -> crate::Result<Vec<SubscriptionInfo>>;
 
-    /// Get bus metrics.
+    /// Get aggregate bus metrics.
     async fn metrics(&self) -> crate::Result<BusMetrics>;
 }
 
@@ -150,11 +199,11 @@ impl EventBus for EventBusImpl {
     async fn serve(
         &self,
         subject: &str,
-        opts: SubscribeOpts,
+        priority: u32,
+        timeout: Duration,
+        filter: Option<EventFilter>,
     ) -> crate::Result<RequestSubscription> {
-        self.engine
-            .serve(subject, opts.priority, opts.timeout, opts.filter)
-            .await
+        self.engine.serve(subject, priority, timeout, filter).await
     }
 
     async fn intercept(
@@ -177,11 +226,22 @@ impl EventBus for EventBusImpl {
     }
 
     async fn metrics(&self) -> crate::Result<BusMetrics> {
-        // TODO: Phase 3+ will track detailed publish/deliver counters
+        use std::sync::atomic::Ordering;
+        // events_pending_retry: query the store. We use u32::MAX as the
+        // "give me everything that could ever retry" upper bound and a large
+        // limit so the count is approximate but useful.
+        let pending_retry = self
+            .engine
+            .store
+            .query_retryable(u32::MAX, 10_000)
+            .await
+            .map(|v| v.len() as u64)
+            .unwrap_or(0);
+
         Ok(BusMetrics {
-            events_published: 0,
-            events_delivered: 0,
-            events_pending_retry: 0,
+            events_published: self.engine.events_published.load(Ordering::Relaxed),
+            events_delivered: self.engine.events_delivered.load(Ordering::Relaxed),
+            events_pending_retry: pending_retry,
             subscription_count: self.list_subscriptions(None).await?.len() as u64,
         })
     }
@@ -250,6 +310,37 @@ mod tests {
         let bus = EventBusImpl::new(store);
         let metrics = bus.metrics().await.unwrap();
         assert_eq!(metrics.subscription_count, 0);
+        assert_eq!(metrics.events_published, 0);
+        assert_eq!(metrics.events_delivered, 0);
+    }
+
+    #[tokio::test]
+    async fn test_metrics_publish_deliver_counters() {
+        let store = Arc::new(InMemoryEventStore::new());
+        let bus = EventBusImpl::new(store);
+
+        let opts = SubscribeOpts {
+            priority: 10,
+            mode: SubscriptionMode::Async,
+            channel: ChannelConfig::InProcess,
+            timeout: Duration::from_secs(5),
+            filter: None,
+        };
+        let mut sub = bus.subscribe("test.metrics", opts).await.unwrap();
+
+        bus.publish("test.metrics", b"a").await.unwrap();
+        bus.publish("test.metrics", b"b").await.unwrap();
+        bus.publish("test.metrics", b"c").await.unwrap();
+
+        // Drain so the channel doesn't fill
+        for _ in 0..3 {
+            let _ = tokio::time::timeout(Duration::from_millis(100), sub.rx.recv()).await;
+        }
+
+        let metrics = bus.metrics().await.unwrap();
+        assert_eq!(metrics.events_published, 3);
+        assert_eq!(metrics.events_delivered, 3);
+        assert_eq!(metrics.subscription_count, 1);
     }
 
     #[tokio::test]
@@ -291,5 +382,19 @@ mod tests {
             msg.map(|e| e.payload),
             Some(b"[intercepted] hello".to_vec())
         );
+    }
+
+    #[tokio::test]
+    async fn test_publish_reply_subject_rejected() {
+        let store = Arc::new(InMemoryEventStore::new());
+        let bus = EventBusImpl::new(store);
+
+        // Direct publish to _reply.* must be rejected — these subjects are
+        // reserved for internal request/reply routing.
+        let result = bus.publish("_reply.foo", b"data").await;
+        assert!(matches!(
+            result,
+            Err(crate::EventBusError::InvalidSubject(_))
+        ));
     }
 }

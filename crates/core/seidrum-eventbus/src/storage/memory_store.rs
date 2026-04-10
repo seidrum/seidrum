@@ -3,23 +3,23 @@ use super::{
     StoredEvent,
 };
 use async_trait::async_trait;
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, SystemTime};
 use tokio::sync::RwLock;
 
 /// An in-memory event store backed by a Vec. Useful for testing.
+///
+/// Sequence generation and insertion happen under the same write lock to
+/// guarantee that events are stored in seq order even under concurrent appends.
 pub struct InMemoryEventStore {
     /// Internal events storage. `pub(crate)` for test access to simulate time manipulation.
     pub(crate) events: Arc<RwLock<Vec<StoredEvent>>>,
-    next_seq: AtomicU64,
 }
 
 impl InMemoryEventStore {
     pub fn new() -> Self {
         Self {
             events: Arc::new(RwLock::new(Vec::new())),
-            next_seq: AtomicU64::new(1),
         }
     }
 
@@ -40,14 +40,14 @@ impl Default for InMemoryEventStore {
 #[async_trait]
 impl EventStore for InMemoryEventStore {
     async fn append(&self, event: &StoredEvent) -> StorageResult<u64> {
-        let seq = self.next_seq.fetch_add(1, Ordering::SeqCst);
+        // Acquire the write lock first, then derive seq from current length
+        // so that seq generation and insertion are atomic.
+        let mut events = self.events.write().await;
+        let seq = events.last().map(|e| e.seq + 1).unwrap_or(1);
         let mut stored = event.clone();
         stored.seq = seq;
         stored.stored_at = Self::current_time_ms();
-
-        let mut events = self.events.write().await;
         events.push(stored);
-
         Ok(seq)
     }
 
@@ -66,6 +66,7 @@ impl EventStore for InMemoryEventStore {
         seq: u64,
         subscriber_id: &str,
         status: DeliveryStatus,
+        error: Option<String>,
     ) -> StorageResult<()> {
         let mut events = self.events.write().await;
         if let Some(event) = events.iter_mut().find(|e| e.seq == seq) {
@@ -78,14 +79,29 @@ impl EventStore for InMemoryEventStore {
                 delivery.status = status;
                 delivery.attempts += 1;
                 delivery.last_attempt = Some(Self::current_time_ms());
+                delivery.error = error;
+                delivery.next_retry = if status == DeliveryStatus::Failed {
+                    // Exponential backoff: 100ms * 2^attempts, capped at 30s
+                    let backoff_ms =
+                        100_u64.saturating_mul(2_u64.saturating_pow(delivery.attempts));
+                    Some(Self::current_time_ms() + backoff_ms.min(30_000))
+                } else {
+                    None
+                };
             } else {
+                let now = Self::current_time_ms();
+                let next_retry = if status == DeliveryStatus::Failed {
+                    Some(now + 100) // first retry after 100ms
+                } else {
+                    None
+                };
                 event.deliveries.push(DeliveryRecord {
                     subscriber_id: subscriber_id.to_string(),
                     status,
                     attempts: 1,
-                    last_attempt: Some(Self::current_time_ms()),
-                    next_retry: None,
-                    error: None,
+                    last_attempt: Some(now),
+                    next_retry,
+                    error,
                 });
             }
             Ok(())
@@ -131,9 +147,13 @@ impl EventStore for InMemoryEventStore {
         let events = self.events.read().await;
         let mut retryable = Vec::new();
 
+        let now = Self::current_time_ms();
         for event in events.iter() {
             for delivery in &event.deliveries {
-                if delivery.status == DeliveryStatus::Failed && delivery.attempts < max_attempts {
+                if delivery.status == DeliveryStatus::Failed
+                    && delivery.attempts < max_attempts
+                    && delivery.next_retry.is_none_or(|t| t <= now)
+                {
                     retryable.push(RetryableDelivery {
                         seq: event.seq,
                         subject: event.subject.clone(),
@@ -150,13 +170,15 @@ impl EventStore for InMemoryEventStore {
 
     async fn compact(&self, older_than: Duration) -> StorageResult<u64> {
         let now = Self::current_time_ms();
-        let threshold = now - older_than.as_millis() as u64;
+        let threshold = now.saturating_sub(older_than.as_millis() as u64);
 
         let mut events = self.events.write().await;
         let original_len = events.len();
         events.retain(|e| {
-            // Keep events that are not fully delivered, or are newer than threshold
-            !(e.status == EventStatus::Delivered && e.stored_at < threshold)
+            // Keep events that are not in a terminal state, or are newer than threshold.
+            // Terminal states (Delivered, DeadLettered) are eligible for compaction.
+            let terminal = matches!(e.status, EventStatus::Delivered | EventStatus::DeadLettered);
+            !(terminal && e.stored_at < threshold)
         });
 
         Ok((original_len - events.len()) as u64)

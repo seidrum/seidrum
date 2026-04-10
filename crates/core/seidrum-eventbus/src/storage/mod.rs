@@ -1,3 +1,15 @@
+//! Storage layer for the event bus.
+//!
+//! Defines the [`EventStore`] trait and provides two implementations:
+//! - [`memory_store::InMemoryEventStore`] — `Vec`-backed, no persistence,
+//!   useful for tests.
+//! - [`redb_store::RedbEventStore`] — durable on-disk store backed by
+//!   [`redb`](https://docs.rs/redb).
+//!
+//! All events flow through `append()` (write-ahead) before dispatch. The
+//! [`compaction::CompactionTask`] periodically removes events in terminal
+//! states (`Delivered`, `DeadLettered`) older than the retention threshold.
+
 mod types;
 pub use types::*;
 
@@ -9,6 +21,7 @@ use async_trait::async_trait;
 use std::time::Duration;
 use thiserror::Error;
 
+/// Errors returned by [`EventStore`] implementations.
 #[derive(Debug, Error)]
 pub enum StorageError {
     #[error("storage operation failed: {0}")]
@@ -19,9 +32,13 @@ pub enum StorageError {
     DatabaseError(String),
 }
 
+/// Convenience alias for [`EventStore`] return values.
 pub type StorageResult<T> = Result<T, StorageError>;
 
-/// The EventStore trait defines how events are persisted and queried.
+/// The `EventStore` trait defines how events are persisted and queried.
+///
+/// Implementations must be `Send + Sync + 'static` so the bus can share
+/// them across tasks via `Arc<dyn EventStore>`.
 #[async_trait]
 pub trait EventStore: Send + Sync + 'static {
     /// Persist an event. Returns the assigned sequence number.
@@ -32,11 +49,13 @@ pub trait EventStore: Send + Sync + 'static {
     async fn update_status(&self, seq: u64, status: EventStatus) -> StorageResult<()>;
 
     /// Record delivery outcome for one subscriber.
+    /// `error` carries an optional human-readable error message for failed deliveries.
     async fn record_delivery(
         &self,
         seq: u64,
         subscriber_id: &str,
         status: DeliveryStatus,
+        error: Option<String>,
     ) -> StorageResult<()>;
 
     /// Query events by status (for crash recovery and retry).
@@ -165,7 +184,7 @@ mod tests {
 
         let seq = store.append(&event).await.unwrap();
         store
-            .record_delivery(seq, "sub1", DeliveryStatus::Delivered)
+            .record_delivery(seq, "sub1", DeliveryStatus::Delivered, None)
             .await
             .unwrap();
 

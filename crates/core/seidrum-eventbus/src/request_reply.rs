@@ -16,6 +16,7 @@
 use crate::dispatch::DispatchEngine;
 use crate::EventBusError;
 use serde::{Deserialize, Serialize};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::mpsc;
@@ -35,14 +36,24 @@ pub struct DispatchedEvent {
 }
 
 /// A handle for sending a reply to a request.
+///
+/// A reply can only be sent once. Subsequent calls to [`Self::reply`] return an error.
 pub struct Replier {
     engine: Arc<DispatchEngine>,
     reply_subject: String,
+    replied: AtomicBool,
 }
 
 impl Replier {
     /// Send a reply to the requester.
+    ///
+    /// Returns an error if a reply has already been sent.
     pub async fn reply(&self, payload: &[u8]) -> crate::Result<u64> {
+        if self.replied.swap(true, Ordering::AcqRel) {
+            return Err(EventBusError::Internal(
+                "reply already sent for this request".to_string(),
+            ));
+        }
         self.engine.publish(&self.reply_subject, payload).await
     }
 }
@@ -69,16 +80,32 @@ pub struct RequestMessage {
 /// A subscription for handling requests.
 ///
 /// When you call serve(), you get a RequestSubscription that allows you to
-/// receive incoming requests and send replies. Drop it to unsubscribe.
+/// receive incoming requests and send replies. Dropping it unsubscribes from
+/// the bus and cleans up the bridge task.
 pub struct RequestSubscription {
     /// The subscription ID (for cleanup).
     pub id: String,
     /// Channel for receiving request messages with repliers.
     pub rx: mpsc::Receiver<(RequestMessage, Replier)>,
+    /// Engine reference for unsubscribe on drop.
+    engine: Arc<DispatchEngine>,
 }
 
 impl Drop for RequestSubscription {
     fn drop(&mut self) {
+        let engine = Arc::clone(&self.engine);
+        let id = self.id.clone();
+        // Spawn cleanup task — the async unsubscribe removes the trie entry
+        // and sender, which causes the bridge task's event_rx to close.
+        // Use try_current() to avoid panicking if dropped outside a runtime
+        // (e.g., during test teardown or after runtime shutdown).
+        if let Ok(handle) = tokio::runtime::Handle::try_current() {
+            handle.spawn(async move {
+                if let Err(e) = engine.unsubscribe(&id).await {
+                    debug!(subscription_id = %id, error = %e, "RequestSubscription cleanup failed");
+                }
+            });
+        }
         debug!(subscription_id = %self.id, "RequestSubscription dropped");
     }
 }
@@ -148,7 +175,7 @@ impl DispatchEngine {
             }
             Ok(None) => {
                 warn!(subject = %subject, "reply channel closed without message");
-                Err(EventBusError::RequestTimeout)
+                Err(EventBusError::ReplyChannelClosed)
             }
             Err(_timeout) => {
                 warn!(subject = %subject, "request timed out");
@@ -221,6 +248,7 @@ impl DispatchEngine {
                 let replier = Replier {
                     engine: Arc::clone(&engine),
                     reply_subject,
+                    replied: AtomicBool::new(false),
                 };
 
                 if req_tx.send((req_msg, replier)).await.is_err() {
@@ -234,6 +262,7 @@ impl DispatchEngine {
         Ok(RequestSubscription {
             id: sub_id,
             rx: req_rx,
+            engine: Arc::clone(self),
         })
     }
 }
@@ -434,5 +463,106 @@ mod tests {
             result.is_err(),
             "serve() should skip events without reply_subject"
         );
+    }
+
+    #[tokio::test]
+    async fn test_replier_double_reply_rejected() {
+        let store = Arc::new(InMemoryEventStore::new());
+        let engine = Arc::new(DispatchEngine::new(store));
+
+        let handler_engine = Arc::clone(&engine);
+        let (ready_tx, ready_rx) = tokio::sync::oneshot::channel();
+        tokio::spawn(async move {
+            let mut sub = handler_engine
+                .serve("test.dbl", 10, Duration::from_secs(5), None)
+                .await
+                .unwrap();
+            ready_tx.send(()).unwrap();
+
+            if let Some((_, replier)) = sub.rx.recv().await {
+                let first = replier.reply(b"first").await;
+                assert!(first.is_ok(), "first reply should succeed");
+                let second = replier.reply(b"second").await;
+                assert!(second.is_err(), "second reply should be rejected");
+            }
+        });
+
+        ready_rx.await.unwrap();
+        let reply = engine
+            .request("test.dbl", b"hello", Duration::from_secs(1))
+            .await
+            .unwrap();
+        assert_eq!(reply, b"first".to_vec());
+    }
+
+    #[tokio::test]
+    async fn test_request_subscription_drop_unsubscribes() {
+        let store = Arc::new(InMemoryEventStore::new());
+        let engine = Arc::new(DispatchEngine::new(store));
+
+        let sub = engine
+            .serve("test.drop", 10, Duration::from_secs(5), None)
+            .await
+            .unwrap();
+        let sub_id = sub.id.clone();
+
+        // Verify the subscription exists
+        let subs_before = engine.list_subscriptions(None).await.unwrap();
+        assert!(subs_before.iter().any(|s| s.id == sub_id));
+
+        drop(sub);
+
+        // Cleanup is async — poll for the subscription to disappear instead
+        // of relying on a fixed sleep. This avoids flakiness on slow CI.
+        let mut removed = false;
+        for _ in 0..50 {
+            let subs = engine.list_subscriptions(None).await.unwrap();
+            if !subs.iter().any(|s| s.id == sub_id) {
+                removed = true;
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        assert!(
+            removed,
+            "RequestSubscription drop should remove the subscription within 1s"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_concurrent_requests_correct_replies() {
+        let store = Arc::new(InMemoryEventStore::new());
+        let engine = Arc::new(DispatchEngine::new(store));
+
+        let handler_engine = Arc::clone(&engine);
+        let (ready_tx, ready_rx) = tokio::sync::oneshot::channel();
+        tokio::spawn(async move {
+            let mut sub = handler_engine
+                .serve("test.echo", 10, Duration::from_secs(5), None)
+                .await
+                .unwrap();
+            ready_tx.send(()).unwrap();
+            while let Some((req_msg, replier)) = sub.rx.recv().await {
+                // Echo: send back the request payload prefixed with "re: "
+                let mut response = b"re: ".to_vec();
+                response.extend_from_slice(&req_msg.payload);
+                let _ = replier.reply(&response).await;
+            }
+        });
+        ready_rx.await.unwrap();
+
+        let e1 = Arc::clone(&engine);
+        let e2 = Arc::clone(&engine);
+        let e3 = Arc::clone(&engine);
+        let (r1, r2, r3) = tokio::join!(
+            e1.request("test.echo", b"req1", Duration::from_secs(2)),
+            e2.request("test.echo", b"req2", Duration::from_secs(2)),
+            e3.request("test.echo", b"req3", Duration::from_secs(2)),
+        );
+
+        // Verify each request got its OWN reply, not mixed with others
+        assert_eq!(r1.unwrap(), b"re: req1".to_vec());
+        assert_eq!(r2.unwrap(), b"re: req2".to_vec());
+        assert_eq!(r3.unwrap(), b"re: req3".to_vec());
     }
 }

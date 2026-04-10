@@ -18,22 +18,27 @@ pub struct SubscriptionEntry {
     pub filter: Option<crate::dispatch::filter::EventFilter>,
 }
 
-/// Subscription mode: Sync (sequential, with interceptors) or Async (parallel, channel-based).
+/// Subscription mode: `Sync` (sequential, with interceptors) or `Async`
+/// (sequential `try_send`, no payload modification).
 ///
-/// Sync subscriptions receive events through interceptors that run sequentially in priority order.
-/// Interceptors can inspect, modify, or drop events, affecting later subscribers.
+/// Sync subscriptions are processed in priority order (lower first) inside
+/// the sync chain. Sync subscribers with an attached [`crate::Interceptor`]
+/// can inspect, modify, or drop the event; mutations propagate to later
+/// subscribers.
 ///
-/// Async subscriptions receive events through bounded MPSC channels in parallel.
-/// All async subscribers receive the same (possibly mutated by interceptors) payload.
-/// Channel-based async delivery uses try_send, so it is not truly synchronous —
-/// if the channel is full, delivery silently fails.
+/// Async subscriptions are processed sequentially after the sync chain via
+/// non-blocking `try_send` on each subscriber's bounded mpsc channel. They
+/// all receive the same (possibly mutated by interceptors) payload. The
+/// "async" name refers to the absence of interceptor semantics — there is
+/// no parallelism in the fan-out loop, but each `try_send` is non-blocking
+/// so a slow consumer cannot stall others.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SubscriptionMode {
-    /// Sync interceptor mode. The subscription is processed sequentially in priority order.
-    /// Can modify or drop the event, affecting async subscribers and later interceptors.
+    /// Sync mode: processed in priority order in the sync chain. Sync
+    /// subscribers with an interceptor can modify or drop events.
     Sync,
-    /// Async subscriber mode. The subscription receives events through a bounded channel
-    /// in parallel with other async subscribers. Cannot modify or drop events.
+    /// Async mode: processed via non-blocking `try_send` after the sync
+    /// chain. Cannot modify the payload or drop the event.
     Async,
 }
 
@@ -207,12 +212,15 @@ impl SubjectIndex {
         }
     }
 
-    /// Get all subscriptions, optionally filtered by pattern substring.
+    /// Get all subscriptions, optionally filtered by exact subject pattern.
     ///
-    /// This operation is O(n) where n is the total number of subscriptions in the trie.
-    /// For large deployments with thousands of subscriptions, consider adding a secondary
-    /// index keyed by pattern for faster lookups.
-    // TODO: Optimize list() with a secondary index for large deployments
+    /// When `filter` is `Some`, only subscriptions whose `subject_pattern`
+    /// equals the filter exactly are returned. When `None`, all subscriptions
+    /// in the trie are returned.
+    ///
+    /// This operation is O(n) where n is the total number of subscriptions
+    /// in the trie. For large deployments, consider adding a secondary index
+    /// keyed by pattern for faster lookups.
     pub fn list(&self, filter: Option<&str>) -> Vec<SubscriptionEntry> {
         let mut all = Vec::new();
         Self::collect_all(&self.root, filter, &mut all);
@@ -220,13 +228,14 @@ impl SubjectIndex {
     }
 
     fn collect_all(node: &TrieNode, filter: Option<&str>, results: &mut Vec<SubscriptionEntry>) {
+        let matches = |entry: &SubscriptionEntry| filter.is_none_or(|f| entry.subject_pattern == f);
         for entry in &node.subscriptions {
-            if filter.is_none() || entry.subject_pattern.contains(filter.unwrap_or("")) {
+            if matches(entry) {
                 results.push(entry.clone());
             }
         }
         for entry in &node.terminal_wildcard {
-            if filter.is_none() || entry.subject_pattern.contains(filter.unwrap_or("")) {
+            if matches(entry) {
                 results.push(entry.clone());
             }
         }
@@ -400,6 +409,24 @@ mod tests {
         assert_eq!(all.len(), 3);
         let filtered = index.list(Some("test.1"));
         assert_eq!(filtered.len(), 1);
+        assert_eq!(filtered[0].id, "sub1");
+    }
+
+    #[test]
+    fn test_list_exact_match_not_substring() {
+        let mut index = SubjectIndex::new();
+        index.subscribe(make_entry("a", "test.foo", 0)).unwrap();
+        index.subscribe(make_entry("b", "test.foo.bar", 1)).unwrap();
+        index.subscribe(make_entry("c", "other.foo", 2)).unwrap();
+
+        // "test.foo" must match only the exact pattern, not "test.foo.bar"
+        let filtered = index.list(Some("test.foo"));
+        assert_eq!(filtered.len(), 1);
+        assert_eq!(filtered[0].id, "a");
+
+        // "foo" alone must match nothing (no exact pattern equals "foo")
+        let filtered = index.list(Some("foo"));
+        assert!(filtered.is_empty());
     }
 
     #[test]

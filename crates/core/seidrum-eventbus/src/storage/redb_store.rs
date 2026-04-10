@@ -203,6 +203,7 @@ impl EventStore for RedbEventStore {
         seq: u64,
         subscriber_id: &str,
         status: DeliveryStatus,
+        error: Option<String>,
     ) -> StorageResult<()> {
         let db = Arc::clone(&self.db);
         let subscriber_id = subscriber_id.to_string();
@@ -237,14 +238,28 @@ impl EventStore for RedbEventStore {
                     delivery.status = status;
                     delivery.attempts += 1;
                     delivery.last_attempt = Some(RedbEventStore::current_time_ms());
+                    delivery.error = error;
+                    delivery.next_retry = if status == DeliveryStatus::Failed {
+                        let backoff_ms =
+                            100_u64.saturating_mul(2_u64.saturating_pow(delivery.attempts));
+                        Some(RedbEventStore::current_time_ms() + backoff_ms.min(30_000))
+                    } else {
+                        None
+                    };
                 } else {
+                    let now = RedbEventStore::current_time_ms();
+                    let next_retry = if status == DeliveryStatus::Failed {
+                        Some(now + 100)
+                    } else {
+                        None
+                    };
                     event.deliveries.push(DeliveryRecord {
                         subscriber_id,
                         status,
                         attempts: 1,
-                        last_attempt: Some(RedbEventStore::current_time_ms()),
-                        next_retry: None,
-                        error: None,
+                        last_attempt: Some(now),
+                        next_retry,
+                        error,
                     });
                 }
 
@@ -316,7 +331,10 @@ impl EventStore for RedbEventStore {
                     let event: StoredEvent = serde_json::from_slice(&bytes).map_err(|e| {
                         StorageError::OperationFailed(format!("failed to deserialize: {}", e))
                     })?;
-                    results.push(event);
+                    // Verify actual status matches index (guards against stale entries).
+                    if event.status == status {
+                        results.push(event);
+                    }
                 }
             }
 
@@ -418,11 +436,14 @@ impl EventStore for RedbEventStore {
                     StorageError::OperationFailed(format!("failed to deserialize: {}", e))
                 })?;
 
+                let now = RedbEventStore::current_time_ms();
                 for delivery in &event.deliveries {
                     if results.len() >= limit {
                         break;
                     }
-                    if delivery.status == DeliveryStatus::Failed && delivery.attempts < max_attempts
+                    if delivery.status == DeliveryStatus::Failed
+                        && delivery.attempts < max_attempts
+                        && delivery.next_retry.is_none_or(|t| t <= now)
                     {
                         results.push(RetryableDelivery {
                             seq: event.seq,
@@ -447,12 +468,15 @@ impl EventStore for RedbEventStore {
             RedbEventStore::current_time_ms().saturating_sub(older_than.as_millis() as u64);
 
         tokio::task::spawn_blocking(move || {
-            // First pass: read and collect items to delete
+            // Single write transaction: identify candidates and delete atomically.
+            // This prevents TOCTOU races where an event's status could change
+            // between identification and deletion.
+            let write_txn = db.begin_write().map_err(|e| {
+                StorageError::DatabaseError(format!("failed to begin write: {}", e))
+            })?;
+
             let to_delete: Vec<(u64, String, u8)> = {
-                let read_txn = db.begin_read().map_err(|e| {
-                    StorageError::DatabaseError(format!("failed to begin read: {}", e))
-                })?;
-                let events_table = read_txn.open_table(EVENTS_TABLE).map_err(|e| {
+                let events_table = write_txn.open_table(EVENTS_TABLE).map_err(|e| {
                     StorageError::DatabaseError(format!("failed to open events table: {}", e))
                 })?;
 
@@ -471,7 +495,11 @@ impl EventStore for RedbEventStore {
                         StorageError::OperationFailed(format!("failed to deserialize: {}", e))
                     })?;
 
-                    if event.status == EventStatus::Delivered && event.stored_at < threshold {
+                    let terminal = matches!(
+                        event.status,
+                        EventStatus::Delivered | EventStatus::DeadLettered
+                    );
+                    if terminal && event.stored_at < threshold {
                         items.push((seq, event.subject, event.status.as_u8()));
                     }
                 }
@@ -479,36 +507,39 @@ impl EventStore for RedbEventStore {
             };
 
             if to_delete.is_empty() {
+                // Abort the write transaction — nothing to do.
+                let _ = write_txn.abort();
                 return Ok(0);
             }
 
-            // Second pass: delete collected items
-            let write_txn = db.begin_write().map_err(|e| {
-                StorageError::DatabaseError(format!("failed to begin write: {}", e))
-            })?;
-
             let removed = to_delete.len() as u64;
 
+            // Open tables once outside the loop to avoid repeated handle setup.
+            let mut events_table = write_txn.open_table(EVENTS_TABLE).map_err(|e| {
+                StorageError::DatabaseError(format!("failed to open events table: {}", e))
+            })?;
+            let mut subject_idx = write_txn.open_table(SUBJECT_IDX_TABLE).map_err(|e| {
+                StorageError::DatabaseError(format!("failed to open subject_idx: {}", e))
+            })?;
+            let mut status_idx = write_txn.open_table(STATUS_IDX_TABLE).map_err(|e| {
+                StorageError::DatabaseError(format!("failed to open status_idx: {}", e))
+            })?;
+
             for (seq, subject, status_u8) in &to_delete {
-                {
-                    let mut events_table = write_txn.open_table(EVENTS_TABLE).map_err(|e| {
-                        StorageError::DatabaseError(format!("failed to open events table: {}", e))
-                    })?;
-                    let _ = events_table.remove(*seq);
+                if let Err(e) = events_table.remove(*seq) {
+                    tracing::warn!(seq = seq, error = %e, "compaction failed to remove event");
                 }
-                {
-                    let mut subject_idx = write_txn.open_table(SUBJECT_IDX_TABLE).map_err(|e| {
-                        StorageError::DatabaseError(format!("failed to open subject_idx: {}", e))
-                    })?;
-                    let _ = subject_idx.remove((subject.as_str(), *seq));
+                if let Err(e) = subject_idx.remove((subject.as_str(), *seq)) {
+                    tracing::warn!(seq = seq, subject = %subject, error = %e, "compaction failed to remove subject index entry");
                 }
-                {
-                    let mut status_idx = write_txn.open_table(STATUS_IDX_TABLE).map_err(|e| {
-                        StorageError::DatabaseError(format!("failed to open status_idx: {}", e))
-                    })?;
-                    let _ = status_idx.remove((*status_u8, *seq));
+                if let Err(e) = status_idx.remove((*status_u8, *seq)) {
+                    tracing::warn!(seq = seq, status = status_u8, error = %e, "compaction failed to remove status index entry");
                 }
             }
+            // Drop the table handles before commit (required by redb borrow rules).
+            drop(events_table);
+            drop(subject_idx);
+            drop(status_idx);
 
             write_txn
                 .commit()
@@ -651,7 +682,7 @@ mod tests {
 
         let seq = store.append(&event).await.unwrap();
         store
-            .record_delivery(seq, "sub1", DeliveryStatus::Delivered)
+            .record_delivery(seq, "sub1", DeliveryStatus::Delivered, None)
             .await
             .unwrap();
 
