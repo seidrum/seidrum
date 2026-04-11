@@ -10,7 +10,6 @@ path = "src/main.rs"
 [dependencies]
 seidrum-common = { path = "../../core/seidrum-common" }
 tokio = { version = "1", features = ["full"] }
-async-nats = "0.38"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 reqwest = { version = "0.12", features = ["json", "rustls-tls"], default-features = false }

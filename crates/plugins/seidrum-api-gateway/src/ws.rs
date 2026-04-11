@@ -5,12 +5,12 @@ use std::time::{Duration, Instant};
 
 use axum::extract::ws::{Message, WebSocket};
 use futures::{SinkExt, StreamExt};
+use seidrum_common::bus_client::BusClient;
 use seidrum_common::events::{
     PluginDeregister, PluginRegister, StorageDeleteRequest, StorageDeleteResponse,
     StorageGetRequest, StorageGetResponse, StorageListRequest, StorageListResponse,
     StorageSetRequest, StorageSetResponse, ToolCallRequest,
 };
-use seidrum_common::nats_utils::NatsClient;
 use tokio::sync::mpsc;
 use tracing::{error, info, warn};
 
@@ -23,7 +23,7 @@ const CAPABILITY_TIMEOUT_SECS: u64 = 30;
 const HEALTH_TIMEOUT_SECS: u64 = 5;
 
 /// Handle a single WebSocket connection.
-pub async fn handle_ws(socket: WebSocket, nats: NatsClient, connections: ConnectionManager) {
+pub async fn handle_ws(socket: WebSocket, nats: BusClient, connections: ConnectionManager) {
     let (mut ws_sender, mut ws_receiver) = socket.split();
     let (tx, mut rx) = mpsc::unbounded_channel::<ServerMessage>();
 
@@ -193,7 +193,7 @@ pub async fn handle_ws(socket: WebSocket, nats: NatsClient, connections: Connect
 
 async fn handle_register(
     plugin: &PluginInfo,
-    nats: &NatsClient,
+    nats: &BusClient,
     connections: &ConnectionManager,
     sender: mpsc::UnboundedSender<ServerMessage>,
 ) -> Result<(), String> {
@@ -225,28 +225,24 @@ async fn handle_register(
 
 async fn handle_register_capability(
     capability: &serde_json::Value,
-    nats: &NatsClient,
+    nats: &BusClient,
 ) -> Result<(), String> {
     let bytes =
         serde_json::to_vec(capability).map_err(|e| format!("Failed to serialize: {}", e))?;
-    nats.inner()
-        .publish("capability.register".to_string(), bytes.into())
+    nats.publish_bytes("capability.register", bytes)
         .await
         .map_err(|e| format!("Failed to publish capability.register: {}", e))?;
     Ok(())
 }
 
-async fn handle_deregister(plugin_id: &str, nats: &NatsClient, connections: &ConnectionManager) {
+async fn handle_deregister(plugin_id: &str, nats: &BusClient, connections: &ConnectionManager) {
     connections.deregister(plugin_id).await;
 
     let dereg = PluginDeregister {
         id: plugin_id.to_string(),
     };
     if let Ok(bytes) = serde_json::to_vec(&dereg) {
-        let _ = nats
-            .inner()
-            .publish("plugin.deregister".to_string(), bytes.into())
-            .await;
+        let _ = nats.publish_bytes("plugin.deregister", bytes).await;
     }
 
     info!(%plugin_id, "External plugin deregistered via gateway");
@@ -258,16 +254,16 @@ async fn handle_deregister(plugin_id: &str, nats: &NatsClient, connections: &Con
 
 async fn spawn_capability_listener(
     plugin_id: &str,
-    nats: &NatsClient,
+    nats: &BusClient,
     connections: &ConnectionManager,
 ) {
     let subject = format!("capability.call.{}", plugin_id);
-    let nats_client = nats.inner().clone();
+    let nats_client = nats.clone();
     let conn_inner = connections.clone();
     let pid = plugin_id.to_string();
 
     let handle = tokio::spawn(async move {
-        let mut sub = match nats_client.subscribe(subject.clone()).await {
+        let mut sub = match nats_client.subscribe(&subject).await {
             Ok(s) => s,
             Err(err) => {
                 error!(%err, %subject, "Failed to subscribe to capability calls");
@@ -314,18 +310,14 @@ async fn spawn_capability_listener(
     connections.add_subscription(plugin_id, handle).await;
 }
 
-async fn spawn_health_listener(
-    plugin_id: &str,
-    nats: &NatsClient,
-    connections: &ConnectionManager,
-) {
+async fn spawn_health_listener(plugin_id: &str, nats: &BusClient, connections: &ConnectionManager) {
     let subject = format!("plugin.{}.health", plugin_id);
-    let nats_client = nats.inner().clone();
+    let nats_client = nats.clone();
     let conn_inner = connections.clone();
     let pid = plugin_id.to_string();
 
     let handle = tokio::spawn(async move {
-        let mut sub = match nats_client.subscribe(subject.clone()).await {
+        let mut sub = match nats_client.subscribe(&subject).await {
             Ok(s) => s,
             Err(err) => {
                 error!(%err, %subject, "Failed to subscribe to health checks");
@@ -373,7 +365,7 @@ async fn handle_pending_response(
         if let Ok(bytes) = serde_json::to_vec(response) {
             let _ = pending
                 .nats_client
-                .publish(pending.reply_subject, bytes.into())
+                .reply_to(&pending.reply_subject, bytes)
                 .await;
         }
     } else {
@@ -390,7 +382,7 @@ async fn handle_pending_health_response(
         if let Ok(bytes) = serde_json::to_vec(response) {
             let _ = pending
                 .nats_client
-                .publish(pending.reply_subject, bytes.into())
+                .reply_to(&pending.reply_subject, bytes)
                 .await;
         }
     } else {
@@ -405,17 +397,17 @@ async fn handle_pending_health_response(
 async fn handle_subscribe(
     plugin_id: &str,
     subjects: &[String],
-    nats: &NatsClient,
+    nats: &BusClient,
     connections: &ConnectionManager,
 ) {
     for subject in subjects {
-        let nats_client = nats.inner().clone();
+        let nats_client = nats.clone();
         let conn_inner = connections.clone();
         let pid = plugin_id.to_string();
         let subj = subject.clone();
 
         let handle = tokio::spawn(async move {
-            let mut sub = match nats_client.subscribe(subj.clone()).await {
+            let mut sub = match nats_client.subscribe(&subj).await {
                 Ok(s) => s,
                 Err(err) => {
                     error!(%err, %subj, "Failed to subscribe");
@@ -468,7 +460,7 @@ async fn handle_publish(
     plugin_id: &str,
     subject: &str,
     payload: &serde_json::Value,
-    nats: &NatsClient,
+    nats: &BusClient,
 ) {
     if !is_subject_allowed(subject) {
         warn!(%plugin_id, %subject, "Plugin attempted to publish to blocked subject — rejected");
@@ -489,7 +481,7 @@ async fn handle_storage_get(
     request_id: &str,
     namespace: &Option<String>,
     key: &str,
-    nats: &NatsClient,
+    nats: &BusClient,
     tx: &mpsc::UnboundedSender<ServerMessage>,
 ) {
     let req = StorageGetRequest {
@@ -521,7 +513,7 @@ async fn handle_storage_set(
     namespace: &Option<String>,
     key: &str,
     value: &serde_json::Value,
-    nats: &NatsClient,
+    nats: &BusClient,
     tx: &mpsc::UnboundedSender<ServerMessage>,
 ) {
     let req = StorageSetRequest {
@@ -553,7 +545,7 @@ async fn handle_storage_delete(
     request_id: &str,
     namespace: &Option<String>,
     key: &str,
-    nats: &NatsClient,
+    nats: &BusClient,
     tx: &mpsc::UnboundedSender<ServerMessage>,
 ) {
     let req = StorageDeleteRequest {
@@ -583,7 +575,7 @@ async fn handle_storage_list(
     plugin_id: &str,
     request_id: &str,
     namespace: &Option<String>,
-    nats: &NatsClient,
+    nats: &BusClient,
     tx: &mpsc::UnboundedSender<ServerMessage>,
 ) {
     let req = StorageListRequest {

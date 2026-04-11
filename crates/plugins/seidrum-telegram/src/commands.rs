@@ -3,12 +3,12 @@ use std::time::Duration;
 
 use anyhow::Result;
 use futures::StreamExt;
+use seidrum_common::bus_client::BusClient;
 use seidrum_common::events::{
     PluginRegister, StorageDeleteRequest, StorageDeleteResponse, StorageGetRequest,
     StorageGetResponse, StorageSetRequest, StorageSetResponse, ToolCallRequest, ToolCallResponse,
     ToolSearchRequest, ToolSearchResponse,
 };
-use seidrum_common::nats_utils::NatsClient;
 use serde::{Deserialize, Serialize};
 use teloxide::prelude::*;
 use teloxide::types::{BotCommand, ThreadId};
@@ -151,7 +151,7 @@ fn builtin_commands() -> Vec<CommandEntry> {
 }
 
 /// Discover commands at boot time by querying the capability registry.
-pub async fn discover_commands(nats: &NatsClient) -> CommandRegistry {
+pub async fn discover_commands(nats: &BusClient) -> CommandRegistry {
     let mut commands = builtin_commands();
 
     // Query for capabilities with kind "command" and "both"
@@ -167,7 +167,7 @@ pub async fn discover_commands(nats: &NatsClient) -> CommandRegistry {
 }
 
 /// Query NATS capability.search for command-type capabilities.
-async fn query_capability_commands(nats: &NatsClient) -> Vec<CommandEntry> {
+async fn query_capability_commands(nats: &BusClient) -> Vec<CommandEntry> {
     let mut entries = Vec::new();
 
     let mut seen_ids = std::collections::HashSet::new();
@@ -223,7 +223,7 @@ async fn query_capability_commands(nats: &NatsClient) -> Vec<CommandEntry> {
 }
 
 /// Fetch plugin_id and call_subject for a capability via capability.describe.
-async fn fetch_capability_details(nats: &NatsClient, tool_id: &str) -> (String, String) {
+async fn fetch_capability_details(nats: &BusClient, tool_id: &str) -> (String, String) {
     use seidrum_common::events::{ToolDescribeRequest, ToolDescribeResponse};
 
     let req = ToolDescribeRequest {
@@ -287,7 +287,7 @@ pub async fn execute_command(
     user_id: u64,
     registry: &CommandRegistry,
     bot: &Bot,
-    nats: &NatsClient,
+    nats: &BusClient,
 ) -> Result<()> {
     // Strip bot username suffix if present (e.g., "/help@my_bot" -> "help")
     let cmd_name = command
@@ -347,7 +347,7 @@ async fn execute_builtin(
     user_id: u64,
     registry: &CommandRegistry,
     bot: &Bot,
-    nats: &NatsClient,
+    nats: &BusClient,
 ) -> Result<()> {
     match command {
         "start" => {
@@ -547,7 +547,7 @@ async fn execute_builtin(
 
 /// Look up the linked project directory for a thread via plugin storage.
 async fn get_thread_working_dir(
-    nats: &NatsClient,
+    nats: &BusClient,
     chat_id: i64,
     thread_id: Option<ThreadId>,
 ) -> Option<String> {
@@ -582,7 +582,7 @@ async fn execute_capability(
     chat_id: i64,
     thread_id: Option<ThreadId>,
     bot: &Bot,
-    nats: &NatsClient,
+    nats: &BusClient,
 ) -> Result<()> {
     let mut arguments = serde_json::json!({
         "args": args,
@@ -724,7 +724,7 @@ struct CapabilityDeregistered {
 
 /// Spawn a background task that listens for `capability.registered` and
 /// `capability.deregistered` events to keep the command registry in sync.
-pub async fn spawn_capability_listener(nats: NatsClient, registry: CommandRegistry, bot: Bot) {
+pub async fn spawn_capability_listener(nats: BusClient, registry: CommandRegistry, bot: Bot) {
     tokio::spawn(async move {
         let mut reg_sub = match nats.subscribe("capability.registered").await {
             Ok(sub) => sub,

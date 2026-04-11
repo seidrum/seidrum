@@ -8,7 +8,7 @@ use seidrum_common::events::{ToolCallRequest, ToolCallResponse};
 
 /// Call a built-in capability via capability.call.consciousness
 async fn call_builtin(
-    nats: &async_nats::Client,
+    nats: &seidrum_common::bus_client::BusClient,
     tool_id: &str,
     arguments: serde_json::Value,
 ) -> ToolCallResponse {

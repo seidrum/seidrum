@@ -60,7 +60,7 @@ struct Cli {
 }
 
 /// Poll IMAP for new unseen emails and publish them as inbound events.
-async fn poll_imap(cli: &Cli, nats: &async_nats::Client) -> Result<()> {
+async fn poll_imap(cli: &Cli, nats: &seidrum_common::bus_client::BusClient) -> Result<()> {
     let addr = (cli.imap_host.as_str(), cli.imap_port);
     let tcp_stream = tokio::net::TcpStream::connect(addr).await?;
     // Wrap tokio TcpStream with compat layer for futures AsyncRead/AsyncWrite
@@ -187,7 +187,7 @@ async fn poll_imap(cli: &Cli, nats: &async_nats::Client) -> Result<()> {
         let envelope = EventEnvelope::new("channel.email.inbound", "email", None, None, &inbound)?;
 
         let bytes = serde_json::to_vec(&envelope)?;
-        nats.publish("channel.email.inbound", bytes.into()).await?;
+        nats.publish_bytes("channel.email.inbound", bytes).await?;
         info!(from = %from, "Published channel.email.inbound event");
     }
 
@@ -289,7 +289,7 @@ async fn main() -> Result<()> {
     );
 
     // Connect to NATS
-    let nats = async_nats::connect(&cli.nats_url).await?;
+    let nats = seidrum_common::bus_client::BusClient::connect(&cli.nats_url, "email").await?;
     info!("Connected to NATS at {}", cli.nats_url);
 
     // Register plugin
@@ -307,7 +307,7 @@ async fn main() -> Result<()> {
     };
     let register_envelope = EventEnvelope::new("plugin.register", "email", None, None, &register)?;
     let register_bytes = serde_json::to_vec(&register_envelope)?;
-    nats.publish("plugin.register", register_bytes.into())
+    nats.publish_bytes("plugin.register", register_bytes)
         .await?;
     info!("Published plugin.register event");
 
@@ -344,11 +344,8 @@ async fn main() -> Result<()> {
         "kind": "tool"
     });
 
-    nats.publish(
-        "capability.register",
-        serde_json::to_vec(&send_email_tool)?.into(),
-    )
-    .await?;
+    nats.publish_bytes("capability.register", serde_json::to_vec(&send_email_tool)?)
+        .await?;
     info!("Tool 'send-email' registered with kernel");
 
     // Subscribe to outbound emails
@@ -463,11 +460,9 @@ async fn main() -> Result<()> {
                         is_error: true,
                     };
                     if let Err(e) = tool_nats
-                        .publish(
+                        .publish_bytes(
                             reply,
-                            serde_json::to_vec(&error_response)
-                                .unwrap_or_default()
-                                .into(),
+                            serde_json::to_vec(&error_response).unwrap_or_default(),
                         )
                         .await
                     {
@@ -536,11 +531,9 @@ async fn main() -> Result<()> {
             };
 
             if let Err(err) = tool_nats
-                .publish(
+                .publish_bytes(
                     reply,
-                    serde_json::to_vec(&tool_response)
-                        .unwrap_or_default()
-                        .into(),
+                    serde_json::to_vec(&tool_response).unwrap_or_default(),
                 )
                 .await
             {

@@ -22,8 +22,8 @@ use axum::routing::{delete, get, post, put};
 use axum::Router;
 use clap::Parser;
 use rust_embed::Embed;
+use seidrum_common::bus_client::BusClient;
 use seidrum_common::events::PluginRegister;
-use seidrum_common::nats_utils::NatsClient;
 use tower_http::cors::CorsLayer;
 use tower_http::trace::TraceLayer;
 use tracing::{info, warn};
@@ -73,7 +73,7 @@ struct Cli {
 /// Shared application state.
 #[derive(Clone)]
 pub struct AppState {
-    pub nats: NatsClient,
+    pub nats: BusClient,
     pub connections: ConnectionManager,
     pub api_key: String,
     pub auth_handler: AuthHandler,
@@ -97,7 +97,7 @@ async fn main() -> Result<()> {
     info!(plugin = PLUGIN_ID, "Starting API gateway");
 
     // Connect to NATS
-    let nats = NatsClient::connect(&cli.nats_url, PLUGIN_ID).await?;
+    let nats = BusClient::connect(&cli.nats_url, PLUGIN_ID).await?;
     info!(url = %cli.nats_url, "Connected to NATS");
 
     // Register self as a plugin
@@ -1580,39 +1580,32 @@ async fn get_trace(
         auth_source: Some("api-gateway".to_string()),
     };
     match serde_json::to_vec(&req) {
-        Ok(req_bytes) => {
-            match state
-                .nats
-                .inner()
-                .request("trace.get".to_string(), req_bytes.into())
-                .await
-            {
-                Ok(msg) => {
-                    match serde_json::from_slice::<Option<event_stream::trace_collector::Trace>>(
-                        &msg.payload,
-                    ) {
-                        Ok(Some(trace)) => (StatusCode::OK, axum::Json(trace)).into_response(),
-                        Ok(None) => (
-                            StatusCode::NOT_FOUND,
-                            axum::Json(serde_json::json!({"error": "trace not found"})),
-                        )
-                            .into_response(),
-                        Err(e) => (
-                            StatusCode::INTERNAL_SERVER_ERROR,
-                            axum::Json(serde_json::json!({"error": format!("failed to parse trace: {}", e)})),
-                        )
-                            .into_response(),
-                    }
+        Ok(req_bytes) => match state.nats.request_bytes("trace.get", req_bytes).await {
+            Ok(payload) => {
+                match serde_json::from_slice::<Option<event_stream::trace_collector::Trace>>(
+                    &payload,
+                ) {
+                    Ok(Some(trace)) => (StatusCode::OK, axum::Json(trace)).into_response(),
+                    Ok(None) => (
+                        StatusCode::NOT_FOUND,
+                        axum::Json(serde_json::json!({"error": "trace not found"})),
+                    )
+                        .into_response(),
+                    Err(e) => (
+                        StatusCode::INTERNAL_SERVER_ERROR,
+                        axum::Json(
+                            serde_json::json!({"error": format!("failed to parse trace: {}", e)}),
+                        ),
+                    )
+                        .into_response(),
                 }
-                Err(e) => (
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    axum::Json(
-                        serde_json::json!({"error": format!("failed to query trace: {}", e)}),
-                    ),
-                )
-                    .into_response(),
             }
-        }
+            Err(e) => (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                axum::Json(serde_json::json!({"error": format!("failed to query trace: {}", e)})),
+            )
+                .into_response(),
+        },
         Err(e) => (
             StatusCode::INTERNAL_SERVER_ERROR,
             axum::Json(serde_json::json!({"error": format!("failed to serialize request: {}", e)})),
@@ -1641,34 +1634,27 @@ async fn list_traces(
         auth_source: Some("api-gateway".to_string()),
     };
     match serde_json::to_vec(&req) {
-        Ok(req_bytes) => {
-            match state
-                .nats
-                .inner()
-                .request("trace.list".to_string(), req_bytes.into())
-                .await
-            {
-                Ok(msg) => {
-                    match serde_json::from_slice::<event_stream::trace_collector::TraceListResponse>(
-                        &msg.payload,
-                    ) {
-                        Ok(response) => (StatusCode::OK, axum::Json(response)).into_response(),
-                        Err(e) => (
-                            StatusCode::INTERNAL_SERVER_ERROR,
-                            axum::Json(serde_json::json!({"error": format!("failed to parse traces: {}", e)})),
-                        )
-                            .into_response(),
-                    }
+        Ok(req_bytes) => match state.nats.request_bytes("trace.list", req_bytes).await {
+            Ok(payload) => {
+                match serde_json::from_slice::<event_stream::trace_collector::TraceListResponse>(
+                    &payload,
+                ) {
+                    Ok(response) => (StatusCode::OK, axum::Json(response)).into_response(),
+                    Err(e) => (
+                        StatusCode::INTERNAL_SERVER_ERROR,
+                        axum::Json(
+                            serde_json::json!({"error": format!("failed to parse traces: {}", e)}),
+                        ),
+                    )
+                        .into_response(),
                 }
-                Err(e) => (
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    axum::Json(
-                        serde_json::json!({"error": format!("failed to query traces: {}", e)}),
-                    ),
-                )
-                    .into_response(),
             }
-        }
+            Err(e) => (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                axum::Json(serde_json::json!({"error": format!("failed to query traces: {}", e)})),
+            )
+                .into_response(),
+        },
         Err(e) => (
             StatusCode::INTERNAL_SERVER_ERROR,
             axum::Json(serde_json::json!({"error": format!("failed to serialize request: {}", e)})),

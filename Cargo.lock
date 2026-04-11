@@ -286,39 +286,6 @@ dependencies = [
 
 [[package]]
 name = "async-nats"
-version = "0.35.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "ab8df97cb8fc4a884af29ab383e9292ea0939cfcdd7d2a17179086dc6c427e7f"
-dependencies = [
- "base64 0.22.1",
- "bytes",
- "futures",
- "memchr",
- "nkeys",
- "nuid",
- "once_cell",
- "portable-atomic",
- "rand 0.8.5",
- "regex",
- "ring",
- "rustls-native-certs 0.7.3",
- "rustls-pemfile 2.2.0",
- "rustls-webpki 0.102.8",
- "serde",
- "serde_json",
- "serde_nanos",
- "serde_repr",
- "thiserror 1.0.69",
- "time",
- "tokio",
- "tokio-rustls",
- "tracing",
- "tryhard",
- "url",
-]
-
-[[package]]
-name = "async-nats"
 version = "0.38.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "76433c4de73442daedb3a59e991d94e85c14ebfc33db53dfcd347a21cd6ef4f8"
@@ -3746,7 +3713,6 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "argon2",
- "async-nats 0.38.0",
  "axum",
  "base64 0.22.1",
  "chrono",
@@ -3774,7 +3740,6 @@ name = "seidrum-calendar"
 version = "0.1.0"
 dependencies = [
  "anyhow",
- "async-nats 0.38.0",
  "chrono",
  "clap",
  "dirs 5.0.1",
@@ -3793,7 +3758,6 @@ name = "seidrum-claude-code"
 version = "0.1.0"
 dependencies = [
  "anyhow",
- "async-nats 0.38.0",
  "clap",
  "futures",
  "seidrum-common",
@@ -3809,7 +3773,6 @@ name = "seidrum-cli"
 version = "0.1.0"
 dependencies = [
  "anyhow",
- "async-nats 0.38.0",
  "clap",
  "futures",
  "seidrum-common",
@@ -3824,7 +3787,6 @@ name = "seidrum-code-executor"
 version = "0.1.0"
 dependencies = [
  "anyhow",
- "async-nats 0.38.0",
  "clap",
  "futures",
  "seidrum-common",
@@ -3840,7 +3802,8 @@ name = "seidrum-common"
 version = "0.1.0"
 dependencies = [
  "anyhow",
- "async-nats 0.38.0",
+ "async-nats",
+ "bytes",
  "chrono",
  "clap",
  "serde",
@@ -3858,7 +3821,6 @@ name = "seidrum-content-ingester"
 version = "0.1.0"
 dependencies = [
  "anyhow",
- "async-nats 0.38.0",
  "chrono",
  "clap",
  "futures",
@@ -3876,7 +3838,6 @@ name = "seidrum-daemon"
 version = "0.1.0"
 dependencies = [
  "anyhow",
- "async-nats 0.35.1",
  "chrono",
  "clap",
  "dialoguer",
@@ -3887,6 +3848,7 @@ dependencies = [
  "libc",
  "rand 0.8.5",
  "reqwest 0.12.28",
+ "seidrum-common",
  "serde",
  "serde_json",
  "serde_yaml",
@@ -3906,7 +3868,6 @@ name = "seidrum-e2e"
 version = "0.1.0"
 dependencies = [
  "anyhow",
- "async-nats 0.38.0",
  "chrono",
  "seidrum-common",
  "serde",
@@ -3922,7 +3883,6 @@ dependencies = [
  "anyhow",
  "async-imap",
  "async-native-tls",
- "async-nats 0.38.0",
  "chrono",
  "clap",
  "futures",
@@ -3942,7 +3902,6 @@ name = "seidrum-entity-extractor"
 version = "0.1.0"
 dependencies = [
  "anyhow",
- "async-nats 0.38.0",
  "chrono",
  "clap",
  "dirs 5.0.1",
@@ -3961,7 +3920,6 @@ name = "seidrum-event-emitter"
 version = "0.1.0"
 dependencies = [
  "anyhow",
- "async-nats 0.38.0",
  "chrono",
  "clap",
  "futures",
@@ -4002,7 +3960,6 @@ name = "seidrum-fact-extractor"
 version = "0.1.0"
 dependencies = [
  "anyhow",
- "async-nats 0.38.0",
  "chrono",
  "clap",
  "dirs 5.0.1",
@@ -4021,7 +3978,6 @@ name = "seidrum-feedback-extractor"
 version = "0.1.0"
 dependencies = [
  "anyhow",
- "async-nats 0.38.0",
  "chrono",
  "clap",
  "futures",
@@ -4040,7 +3996,6 @@ name = "seidrum-graph-context-loader"
 version = "0.1.0"
 dependencies = [
  "anyhow",
- "async-nats 0.38.0",
  "chrono",
  "clap",
  "futures",
@@ -4059,7 +4014,6 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "arangors",
- "async-nats 0.38.0",
  "axum",
  "base64 0.22.1",
  "chrono",
@@ -4090,7 +4044,6 @@ name = "seidrum-llm-anthropic"
 version = "0.1.0"
 dependencies = [
  "anyhow",
- "async-nats 0.38.0",
  "chrono",
  "clap",
  "futures",
@@ -4108,7 +4061,6 @@ name = "seidrum-llm-google"
 version = "0.1.0"
 dependencies = [
  "anyhow",
- "async-nats 0.38.0",
  "chrono",
  "clap",
  "dirs 5.0.1",
@@ -4127,7 +4079,6 @@ name = "seidrum-llm-ollama"
 version = "0.1.0"
 dependencies = [
  "anyhow",
- "async-nats 0.38.0",
  "chrono",
  "clap",
  "futures",
@@ -4145,7 +4096,6 @@ name = "seidrum-llm-openai"
 version = "0.1.0"
 dependencies = [
  "anyhow",
- "async-nats 0.38.0",
  "chrono",
  "clap",
  "futures",
@@ -4163,7 +4113,6 @@ name = "seidrum-llm-router"
 version = "0.2.0"
 dependencies = [
  "anyhow",
- "async-nats 0.38.0",
  "chrono",
  "clap",
  "futures",
@@ -4182,7 +4131,6 @@ name = "seidrum-notification"
 version = "0.1.0"
 dependencies = [
  "anyhow",
- "async-nats 0.38.0",
  "chrono",
  "clap",
  "futures",
@@ -4199,7 +4147,6 @@ name = "seidrum-response-formatter"
 version = "0.1.0"
 dependencies = [
  "anyhow",
- "async-nats 0.38.0",
  "chrono",
  "clap",
  "futures",
@@ -4216,7 +4163,6 @@ name = "seidrum-scope-classifier"
 version = "0.1.0"
 dependencies = [
  "anyhow",
- "async-nats 0.38.0",
  "chrono",
  "clap",
  "dirs 5.0.1",
@@ -4235,7 +4181,6 @@ name = "seidrum-task-detector"
 version = "0.1.0"
 dependencies = [
  "anyhow",
- "async-nats 0.38.0",
  "chrono",
  "clap",
  "dirs 5.0.1",
@@ -4254,7 +4199,6 @@ name = "seidrum-telegram"
 version = "0.1.0"
 dependencies = [
  "anyhow",
- "async-nats 0.38.0",
  "base64 0.22.1",
  "chrono",
  "clap",
@@ -4276,7 +4220,6 @@ name = "seidrum-tool-dispatcher"
 version = "0.1.0"
 dependencies = [
  "anyhow",
- "async-nats 0.38.0",
  "clap",
  "futures",
  "seidrum-common",

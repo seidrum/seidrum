@@ -3,7 +3,7 @@ use std::path::PathBuf;
 /// Shared state available to all management API handlers.
 #[derive(Clone)]
 pub struct ManagementState {
-    pub nats: async_nats::Client,
+    pub nats: seidrum_common::bus_client::BusClient,
     pub config_dir: PathBuf,
     pub agents_dir: PathBuf,
     pub workflows_dir: PathBuf,
@@ -13,7 +13,7 @@ pub struct ManagementState {
 
 impl ManagementState {
     pub fn new(
-        nats: async_nats::Client,
+        nats: seidrum_common::bus_client::BusClient,
         config_dir: PathBuf,
         agents_dir: PathBuf,
         workflows_dir: PathBuf,

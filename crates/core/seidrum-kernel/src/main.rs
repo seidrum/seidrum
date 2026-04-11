@@ -88,11 +88,11 @@ async fn run_serve() -> anyhow::Result<()> {
 
     info!("NATS URL: {}", nats_url);
 
-    // 2. Connect to NATS.
-    let nats_client = async_nats::connect(&nats_url)
+    // 2. Connect to the bus.
+    let nats_client = seidrum_common::bus_client::BusClient::connect(&nats_url, "kernel")
         .await
-        .map_err(|e| anyhow::anyhow!("failed to connect to NATS at {}: {}", nats_url, e))?;
-    info!("connected to NATS");
+        .map_err(|e| anyhow::anyhow!("failed to connect to bus at {}: {}", nats_url, e))?;
+    info!("connected to bus");
 
     // 3. Spawn the registry service.
     let registry = RegistryService::new();

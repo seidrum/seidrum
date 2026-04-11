@@ -98,7 +98,7 @@ pub fn meta_tools() -> Vec<ToolSchema> {
 /// Returns discovered tools as Vec<ToolSchema>.
 /// Only searches for capabilities with kind "tool" (LLM-invocable).
 pub async fn query_tool_registry(
-    nats: &async_nats::Client,
+    nats: &seidrum_common::bus_client::BusClient,
     message_text: &str,
     max_tools: u32,
 ) -> Vec<ToolSchema> {
@@ -118,11 +118,11 @@ pub async fn query_tool_registry(
 
     match tokio::time::timeout(
         Duration::from_secs(5),
-        nats.request("capability.search", payload.into()),
+        nats.request_bytes("capability.search", payload),
     )
     .await
     {
-        Ok(Ok(response)) => match serde_json::from_slice::<ToolSearchResponse>(&response.payload) {
+        Ok(Ok(response)) => match serde_json::from_slice::<ToolSearchResponse>(&response) {
             Ok(resp) => {
                 let tools: Vec<ToolSchema> = resp
                     .tools

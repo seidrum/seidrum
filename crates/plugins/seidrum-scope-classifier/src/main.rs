@@ -121,7 +121,7 @@ async fn main() -> Result<()> {
     );
 
     // Connect to NATS
-    let client = async_nats::connect(&args.nats_url)
+    let client = seidrum_common::bus_client::BusClient::connect(&args.nats_url, "scope-classifier")
         .await
         .context("Failed to connect to NATS")?;
 
@@ -145,10 +145,7 @@ async fn main() -> Result<()> {
         EventEnvelope::new("plugin.register", PLUGIN_ID, None, None, &register)?;
 
     client
-        .publish(
-            "plugin.register",
-            serde_json::to_vec(&register_envelope)?.into(),
-        )
+        .publish_bytes("plugin.register", serde_json::to_vec(&register_envelope)?)
         .await
         .context("Failed to publish plugin.register")?;
 
@@ -210,7 +207,7 @@ async fn main() -> Result<()> {
 }
 
 async fn process_content(
-    nats: &async_nats::Client,
+    nats: &seidrum_common::bus_client::BusClient,
     http: &reqwest::Client,
     api_key: &str,
     model: &str,
@@ -248,14 +245,11 @@ async fn process_content(
     )?;
 
     let response = nats
-        .request(
-            "brain.query.request",
-            serde_json::to_vec(&query_envelope)?.into(),
-        )
+        .request_bytes("brain.query.request", serde_json::to_vec(&query_envelope)?)
         .await
         .context("brain.query.request timed out or failed")?;
 
-    let response_envelope: EventEnvelope = serde_json::from_slice(&response.payload)
+    let response_envelope: EventEnvelope = serde_json::from_slice(&response)
         .context("Failed to deserialize brain.query.response envelope")?;
 
     let query_response: seidrum_common::events::BrainQueryResponse =
@@ -309,14 +303,11 @@ async fn process_content(
     )?;
 
     let scopes_response = nats
-        .request(
-            "brain.query.request",
-            serde_json::to_vec(&scopes_envelope)?.into(),
-        )
+        .request_bytes("brain.query.request", serde_json::to_vec(&scopes_envelope)?)
         .await
         .context("brain.query.request for scopes timed out or failed")?;
 
-    let scopes_response_envelope: EventEnvelope = serde_json::from_slice(&scopes_response.payload)
+    let scopes_response_envelope: EventEnvelope = serde_json::from_slice(&scopes_response)
         .context("Failed to deserialize scopes query response envelope")?;
 
     let scopes_query_response: seidrum_common::events::BrainQueryResponse =
@@ -363,12 +354,9 @@ async fn process_content(
             &assign,
         )?;
 
-        nats.publish(
-            "brain.scope.assign",
-            serde_json::to_vec(&assign_envelope)?.into(),
-        )
-        .await
-        .context("Failed to publish brain.scope.assign")?;
+        nats.publish_bytes("brain.scope.assign", serde_json::to_vec(&assign_envelope)?)
+            .await
+            .context("Failed to publish brain.scope.assign")?;
 
         info!(
             scope_key = %classification.scope_key,
