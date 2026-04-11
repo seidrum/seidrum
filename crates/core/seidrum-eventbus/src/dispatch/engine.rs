@@ -69,6 +69,50 @@ const DEFAULT_INTERCEPTOR_TIMEOUT: Duration = Duration::from_secs(5);
 /// Maximum number of interceptors per subscription to prevent DoS.
 const MAX_INTERCEPTORS_PER_SUBJECT: usize = 100;
 
+tokio::task_local! {
+    /// Subject currently being processed by a sync interceptor on this task.
+    ///
+    /// Set when the dispatch engine spawns an interceptor task and used by
+    /// `publish_event` to detect re-entrant publishes from inside an
+    /// interceptor. PROJECT.md L101-103 forbids sync interceptors from
+    /// publishing to subjects they intercept (it would loop). The detection
+    /// returns `EventBusError::Internal` so the interceptor's recursive
+    /// `bus.publish()` call gets a clean error rather than deadlocking or
+    /// recursing forever.
+    ///
+    /// **Limitation (M4):** task-locals do NOT inherit across `tokio::spawn`.
+    /// An interceptor that does:
+    /// ```ignore
+    /// async fn intercept(&self, ...) -> InterceptResult {
+    ///     let bus = self.bus.clone();
+    ///     tokio::spawn(async move {
+    ///         bus.publish("same.subject", payload).await; // NOT detected
+    ///     });
+    ///     InterceptResult::Pass
+    /// }
+    /// ```
+    /// will produce unbounded recursion because the spawned task starts
+    /// with no `INTERCEPTING_SUBJECT` set. The same applies to any
+    /// publish reached via a fresh task. The detection only catches
+    /// **direct** re-entry from within the same interceptor future.
+    /// Document this in interceptor implementations and consider an
+    /// async-aware backstop (e.g. depth counter) if you need stronger
+    /// guarantees.
+    pub static INTERCEPTING_SUBJECT: String;
+
+    /// Sequence number of the event currently flowing through the sync
+    /// interceptor chain. Set by the engine in the same scope as
+    /// `INTERCEPTING_SUBJECT`. Read by remote interceptor proxies
+    /// (e.g. `WebhookInterceptor`) so the outbound envelope can carry
+    /// `seq` for correlation with persisted events.
+    pub static INTERCEPTING_SEQ: u64;
+
+    /// `stored_at` (unix-millis) of the event currently flowing through
+    /// the sync interceptor chain. Same purpose as
+    /// [`INTERCEPTING_SEQ`].
+    pub static INTERCEPTING_STORED_AT: u64;
+}
+
 /// The dispatch engine routes published events to matching subscribers.
 /// Implements the full pipeline: persist → resolve → filter → sync chain → async fan-out → finalize.
 pub struct DispatchEngine {
@@ -241,6 +285,21 @@ impl DispatchEngine {
         Self::validate_subject(subject)?;
         Self::validate_payload(payload)?;
 
+        // Re-entrant publish detection: if we're inside a sync interceptor
+        // for this same subject, refuse to publish (it would loop). The
+        // task-local is set by the interceptor wrapper in the sync chain
+        // below.
+        if let Ok(intercepting) = INTERCEPTING_SUBJECT.try_with(|s| s.clone()) {
+            if intercepting == subject {
+                return Err(EventBusError::Internal(format!(
+                    "re-entrant publish from sync interceptor on subject '{}' \
+                     would loop; sync interceptors must not publish to \
+                     subjects they intercept",
+                    subject
+                )));
+            }
+        }
+
         // Skip persistence for ephemeral _reply.* subjects (request/reply responses).
         // These are one-shot messages consumed immediately; persisting them would
         // cause unbounded storage growth with no benefit.
@@ -387,27 +446,107 @@ impl DispatchEngine {
                 if let Some(interceptor) = interceptor_opt {
                     let interceptor = Arc::clone(interceptor);
 
-                    let result = tokio::time::timeout(
-                        *timeout,
-                        interceptor.intercept(subject, &mut current_payload),
-                    )
-                    .await;
+                    // Spawn the interceptor in a tokio task so panics are
+                    // converted to JoinErrors instead of unwinding the
+                    // dispatch loop. The payload is cloned in and moved
+                    // back out on success — on panic, the original
+                    // payload is preserved and the chain continues.
+                    //
+                    // INTERCEPTING_SUBJECT.scope wraps the interceptor's
+                    // future so any recursive bus.publish() call from
+                    // within can detect that it's running inside a sync
+                    // interceptor for this subject and refuse.
+                    //
+                    // **F9:** also scope INTERCEPTING_SEQ and
+                    // INTERCEPTING_STORED_AT so remote interceptor proxies
+                    // (e.g. WebhookInterceptor) can read them and include
+                    // the values in their outbound envelopes for
+                    // correlation with persisted events.
+                    let payload_clone = current_payload.clone();
+                    let subject_owned = subject.to_string();
+                    let subject_for_scope = subject_owned.clone();
+                    let scoped_seq = seq;
+                    let scoped_stored_at = std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .map(|d| d.as_millis() as u64)
+                        .unwrap_or(0);
+                    let handle =
+                        tokio::spawn(INTERCEPTING_SUBJECT.scope(subject_for_scope, async move {
+                            INTERCEPTING_SEQ
+                                .scope(scoped_seq, async move {
+                                    INTERCEPTING_STORED_AT
+                                        .scope(scoped_stored_at, async move {
+                                            let mut payload = payload_clone;
+                                            let result = interceptor
+                                                .intercept(&subject_owned, &mut payload)
+                                                .await;
+                                            (result, payload)
+                                        })
+                                        .await
+                                })
+                                .await
+                        }));
+                    let abort_handle = handle.abort_handle();
+                    let result = tokio::time::timeout(*timeout, handle).await;
 
                     match result {
-                        Ok(InterceptResult::Pass) => {
-                            try_record(seq, entry_id, DeliveryStatus::Delivered, None).await;
+                        Ok(Ok((intercept_result, new_payload))) => {
+                            // Move the (possibly mutated) payload back.
+                            current_payload = new_payload;
+                            match intercept_result {
+                                InterceptResult::Pass => {
+                                    try_record(seq, entry_id, DeliveryStatus::Delivered, None)
+                                        .await;
+                                }
+                                InterceptResult::Modified => {
+                                    debug!(subscriber = entry_id, "interceptor modified payload");
+                                    try_record(seq, entry_id, DeliveryStatus::Delivered, None)
+                                        .await;
+                                }
+                                InterceptResult::Drop => {
+                                    debug!(subscriber = entry_id, "interceptor dropped event");
+                                    try_record(seq, entry_id, DeliveryStatus::Delivered, None)
+                                        .await;
+                                    dropped = true;
+                                    break;
+                                }
+                            }
                         }
-                        Ok(InterceptResult::Modified) => {
-                            debug!(subscriber = entry_id, "interceptor modified payload");
-                            try_record(seq, entry_id, DeliveryStatus::Delivered, None).await;
+                        Ok(Err(join_error)) if join_error.is_panic() => {
+                            warn!(
+                                subscriber = entry_id,
+                                "sync interceptor panicked, skipping (chain continues)"
+                            );
+                            any_failed = true;
+                            // Interceptors are terminal: the retry task
+                            // can't resurrect a panicked interceptor, so
+                            // mark dead-lettered with a clear reason.
+                            try_record(
+                                seq,
+                                entry_id,
+                                DeliveryStatus::DeadLettered,
+                                Some("dead-lettered: interceptor panicked".to_string()),
+                            )
+                            .await;
                         }
-                        Ok(InterceptResult::Drop) => {
-                            debug!(subscriber = entry_id, "interceptor dropped event");
-                            try_record(seq, entry_id, DeliveryStatus::Delivered, None).await;
-                            dropped = true;
-                            break;
+                        Ok(Err(_)) => {
+                            // Cancelled (not a panic). Treat as a transient
+                            // failure but still terminal for the interceptor.
+                            warn!(subscriber = entry_id, "sync interceptor was cancelled");
+                            any_failed = true;
+                            try_record(
+                                seq,
+                                entry_id,
+                                DeliveryStatus::DeadLettered,
+                                Some("dead-lettered: interceptor cancelled".to_string()),
+                            )
+                            .await;
                         }
                         Err(_timeout) => {
+                            // Abort the spawned task so it doesn't keep
+                            // running and consume resources after the
+                            // timeout fires.
+                            abort_handle.abort();
                             warn!(
                                 subscriber = entry_id,
                                 timeout_ms = timeout.as_millis() as u64,
@@ -1037,6 +1176,145 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(msg.map(|e| e.payload), Some(b"hello".to_vec()));
+    }
+
+    /// QUALITY.md L108 + PROJECT.md L101-103: a sync interceptor that
+    /// recursively publishes to a subject it intercepts must get an
+    /// `EventBusError::Internal` instead of looping or deadlocking.
+    #[tokio::test]
+    async fn test_interceptor_reentrant_publish_rejected() {
+        use std::sync::atomic::{AtomicBool, Ordering as AOrdering};
+
+        struct ReentrantInterceptor {
+            engine: std::sync::Mutex<Option<Arc<DispatchEngine>>>,
+            recursive_call_errored: Arc<AtomicBool>,
+        }
+
+        #[async_trait::async_trait]
+        impl Interceptor for ReentrantInterceptor {
+            async fn intercept(&self, _subject: &str, _payload: &mut Vec<u8>) -> InterceptResult {
+                let engine = self.engine.lock().unwrap().clone().unwrap();
+                // This recursive publish to the SAME subject must error.
+                let result = engine.publish("test.reentry", b"recursive").await;
+                if matches!(result, Err(EventBusError::Internal(_))) {
+                    self.recursive_call_errored.store(true, AOrdering::SeqCst);
+                }
+                InterceptResult::Pass
+            }
+        }
+
+        let store = Arc::new(InMemoryEventStore::new());
+        let engine = Arc::new(DispatchEngine::new(store));
+
+        let recursive_call_errored = Arc::new(AtomicBool::new(false));
+        let interceptor = Arc::new(ReentrantInterceptor {
+            engine: std::sync::Mutex::new(Some(Arc::clone(&engine))),
+            recursive_call_errored: Arc::clone(&recursive_call_errored),
+        });
+
+        engine
+            .intercept("test.reentry", 5, interceptor, None)
+            .await
+            .unwrap();
+
+        // The outer publish should succeed (the recursive one inside the
+        // interceptor errors out, but that's the interceptor's problem).
+        engine.publish("test.reentry", b"outer").await.unwrap();
+
+        assert!(
+            recursive_call_errored.load(AOrdering::SeqCst),
+            "recursive publish to intercepted subject should return Err(Internal)"
+        );
+    }
+
+    /// Re-entrant publish to a DIFFERENT subject is allowed (no loop).
+    #[tokio::test]
+    async fn test_interceptor_reentrant_publish_different_subject_ok() {
+        use std::sync::atomic::{AtomicBool, Ordering as AOrdering};
+
+        struct CrossPublishInterceptor {
+            engine: std::sync::Mutex<Option<Arc<DispatchEngine>>>,
+            recursive_call_succeeded: Arc<AtomicBool>,
+        }
+
+        #[async_trait::async_trait]
+        impl Interceptor for CrossPublishInterceptor {
+            async fn intercept(&self, _subject: &str, _payload: &mut Vec<u8>) -> InterceptResult {
+                let engine = self.engine.lock().unwrap().clone().unwrap();
+                let result = engine.publish("other.subject", b"cross").await;
+                if result.is_ok() {
+                    self.recursive_call_succeeded.store(true, AOrdering::SeqCst);
+                }
+                InterceptResult::Pass
+            }
+        }
+
+        let store = Arc::new(InMemoryEventStore::new());
+        let engine = Arc::new(DispatchEngine::new(store));
+
+        let succeeded = Arc::new(AtomicBool::new(false));
+        let interceptor = Arc::new(CrossPublishInterceptor {
+            engine: std::sync::Mutex::new(Some(Arc::clone(&engine))),
+            recursive_call_succeeded: Arc::clone(&succeeded),
+        });
+
+        engine
+            .intercept("test.cross", 5, interceptor, None)
+            .await
+            .unwrap();
+
+        engine.publish("test.cross", b"outer").await.unwrap();
+
+        assert!(
+            succeeded.load(AOrdering::SeqCst),
+            "publishing to a DIFFERENT subject from inside an interceptor should be allowed"
+        );
+    }
+
+    /// QUALITY.md L105: a panicking sync interceptor must be caught and
+    /// the chain must continue. Async subscribers downstream of the
+    /// panicked interceptor still receive the original payload.
+    #[tokio::test]
+    async fn test_interceptor_panic_recovery() {
+        struct PanicInterceptor;
+
+        #[async_trait::async_trait]
+        impl Interceptor for PanicInterceptor {
+            async fn intercept(&self, _subject: &str, _payload: &mut Vec<u8>) -> InterceptResult {
+                panic!("intentional panic for test");
+            }
+        }
+
+        let store = Arc::new(InMemoryEventStore::new());
+        let engine = DispatchEngine::new(store);
+
+        // Sync interceptor at priority 5 — will panic
+        engine
+            .intercept("test.panic", 5, Arc::new(PanicInterceptor), None)
+            .await
+            .unwrap();
+
+        // Async subscriber at priority 10 — should still receive the event
+        let (_id, mut rx) = engine
+            .subscribe(
+                "test.panic",
+                10,
+                SubscriptionMode::Async,
+                ChannelConfig::InProcess,
+                Duration::from_secs(5),
+                None,
+            )
+            .await
+            .unwrap();
+
+        // The publish call must NOT panic — the interceptor's panic is
+        // caught and converted to a dead-letter for that subscriber.
+        engine.publish("test.panic", b"survives").await.unwrap();
+
+        let msg = tokio::time::timeout(Duration::from_secs(1), rx.recv())
+            .await
+            .unwrap();
+        assert_eq!(msg.map(|e| e.payload), Some(b"survives".to_vec()));
     }
 
     #[tokio::test]

@@ -16,10 +16,32 @@ axum = "0.8"
 tokio-tungstenite = "0.26"
 futures-util = "0.3"
 reqwest = { version = "0.12", features = ["json"] }
+url = "2"
 tower = "0.5"
 tower-http = { version = "0.6", features = ["cors", "limit"] }
 rand = "0.9"
 base64 = "0.22"
+
+[features]
+default = []
+# Public test utilities (mock servers, recording interceptors, helpers).
+# Gated behind a feature so production binaries don't pull the helpers
+# into release builds. The crate's own integration tests in `tests/` enable
+# this via `required-features` on each test target below.
+test-utils = []
+
+[[test]]
+name = "phase4_transport"
+path = "tests/phase4_transport.rs"
+required-features = ["test-utils"]
+
+[[test]]
+name = "integration_tests"
+path = "tests/integration_tests.rs"
+
+[[test]]
+name = "phase5_retry"
+path = "tests/phase5_retry.rs"
 
 [dev-dependencies]
 tempfile = "3"

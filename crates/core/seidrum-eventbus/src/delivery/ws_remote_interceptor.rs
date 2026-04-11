@@ -1,0 +1,507 @@
+//! Proxy [`Interceptor`] that forwards intercept calls over a WebSocket connection.
+//!
+//! Mirrors the design of [`crate::delivery::WsRemoteChannel`]: when a remote
+//! WebSocket client sends a `register_interceptor` operation, the WS server
+//! installs an instance of [`WsRemoteInterceptor`] into the bus's interceptor
+//! chain via [`crate::EventBus::intercept`]. Subsequent events whose subjects
+//! match the registered pattern are dispatched to the remote client over the
+//! existing WS connection, and the remote responds with a Pass/Modify/Drop
+//! decision.
+//!
+//! # Wire protocol
+//!
+//! Server → client: `{"op":"intercept","request_id":"...","subject":"...","payload":"<b64>"}`
+//!
+//! Client → server: `{"op":"intercept_result","request_id":"...","action":"pass"|"modify"|"drop","payload":"<b64>?"}`
+//!
+//! # Timeout behaviour
+//!
+//! If the client does not respond within `intercept_timeout`, the interceptor
+//! returns [`InterceptResult::Pass`] so the in-process dispatch chain
+//! continues. This matches the spec's "sync interceptors that exceed their
+//! timeout are skipped" rule and avoids silently dropping events when a
+//! remote handler is slow.
+//!
+//! # Disconnect behaviour
+//!
+//! When the WS connection drops, the connection's cleanup code calls
+//! [`WsRemoteInterceptor::cancel_all`], which fails any in-flight
+//! `intercept()` calls with a `Pass` result so they don't hang the
+//! dispatch loop.
+
+use crate::delivery::WsOutboundFrame;
+use crate::dispatch::{InterceptResult, Interceptor};
+use async_trait::async_trait;
+use std::collections::HashMap;
+use std::sync::Arc;
+use std::time::Duration;
+use tokio::sync::{mpsc, oneshot, Mutex};
+use tracing::{debug, warn};
+
+/// Maximum concurrent in-flight intercept calls per remote interceptor.
+/// Caps memory growth when a remote client is slow or malicious — once
+/// this many calls are awaiting a reply, new intercept calls return
+/// `Pass` immediately so dispatch keeps flowing.
+pub const MAX_PENDING_INTERCEPTS: usize = 1024;
+
+/// Action returned by the remote client in response to an `intercept`
+/// frame. Mirrors [`InterceptResult`] over the wire.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum WsInterceptAction {
+    Pass,
+    Modify(Vec<u8>),
+    Drop,
+}
+
+/// Reply signaled from the WS connection's read loop back to the awaiting
+/// `intercept()` call. Wraps the action plus an optional error message.
+#[derive(Debug)]
+pub struct WsInterceptReply {
+    pub action: WsInterceptAction,
+    /// Set when the connection drops or the read loop cancels pending
+    /// replies before the client responded.
+    pub error: Option<String>,
+}
+
+/// Remote interceptor proxy.
+///
+/// Holds the outbound queue (shared with [`crate::delivery::WsRemoteChannel`]
+/// instances on the same connection) and a per-instance pending-replies map.
+pub struct WsRemoteInterceptor {
+    /// Pattern this interceptor was registered under (for logging).
+    pattern: String,
+    /// Outbound frame queue. The connection's writer task drains this and
+    /// writes frames to the WebSocket. Cloned from `forward_tx` in the
+    /// connection handler.
+    outbound: mpsc::Sender<WsOutboundFrame>,
+    /// Pending intercept replies, keyed by request id.
+    pending_replies: Arc<Mutex<HashMap<String, oneshot::Sender<WsInterceptReply>>>>,
+    /// Per-call timeout. If the remote client doesn't respond in this
+    /// window, the interceptor returns `Pass` and logs a warning.
+    intercept_timeout: Duration,
+}
+
+impl WsRemoteInterceptor {
+    /// Create a new remote interceptor proxy.
+    pub fn new(pattern: String, outbound: mpsc::Sender<WsOutboundFrame>) -> Self {
+        Self {
+            pattern,
+            outbound,
+            pending_replies: Arc::new(Mutex::new(HashMap::new())),
+            intercept_timeout: Duration::from_secs(5),
+        }
+    }
+
+    /// Override the per-call timeout. Default 5 seconds.
+    pub fn with_timeout(mut self, timeout: Duration) -> Self {
+        self.intercept_timeout = timeout;
+        self
+    }
+
+    /// Get a handle to the pending replies map. The WS connection's read
+    /// loop uses this to signal `intercept_result` messages back to
+    /// awaiting `intercept()` calls.
+    pub fn pending_replies(
+        &self,
+    ) -> Arc<Mutex<HashMap<String, oneshot::Sender<WsInterceptReply>>>> {
+        Arc::clone(&self.pending_replies)
+    }
+
+    /// Cancel all pending intercept calls with a "pass" result so the
+    /// dispatch loop continues. Called when the connection drops.
+    pub async fn cancel_all(&self, reason: &str) {
+        let mut pending = self.pending_replies.lock().await;
+        let count = pending.len();
+        for (_, tx) in pending.drain() {
+            let _ = tx.send(WsInterceptReply {
+                action: WsInterceptAction::Pass,
+                error: Some(reason.to_string()),
+            });
+        }
+        if count > 0 {
+            debug!(
+                pattern = %self.pattern,
+                cancelled = count,
+                reason = reason,
+                "WsRemoteInterceptor cancelled pending intercept calls"
+            );
+        }
+    }
+}
+
+/// RAII guard that removes the request_id from `pending_replies` on drop.
+///
+/// **Why this exists (H1 fix):** the dispatch engine wraps each sync
+/// interceptor call in `tokio::spawn` and applies its own timeout via
+/// `abort_handle.abort()`. When the engine's timer fires, it cancels the
+/// `intercept()` future *mid-await* — none of the manual cleanup branches
+/// in `intercept()` will run, so a `pending_replies.remove(...)` call
+/// guarded by an `if`/`match` arm is unreachable.
+///
+/// The `Drop` guard runs even on cancellation, so the entry is always
+/// reclaimed regardless of whether the engine, the proxy timeout, or a
+/// successful reply ended the call.
+struct PendingGuard {
+    pending: Arc<Mutex<HashMap<String, oneshot::Sender<WsInterceptReply>>>>,
+    request_id: String,
+    armed: bool,
+}
+
+impl PendingGuard {
+    /// Disarm the guard once the entry has already been removed by another
+    /// path (e.g. cancel_all, intercept_result handler).
+    fn disarm(mut self) {
+        self.armed = false;
+    }
+}
+
+impl Drop for PendingGuard {
+    fn drop(&mut self) {
+        if !self.armed {
+            return;
+        }
+        // Best-effort: try to remove without blocking. If we can't acquire
+        // the lock immediately, spawn a task to do it. This avoids blocking
+        // the caller's drop path even under contention.
+        let pending = Arc::clone(&self.pending);
+        let request_id = std::mem::take(&mut self.request_id);
+        let removed = if let Ok(mut guard) = pending.try_lock() {
+            guard.remove(&request_id);
+            true
+        } else {
+            false
+        };
+        if !removed {
+            tokio::spawn(async move {
+                pending.lock().await.remove(&request_id);
+            });
+        }
+    }
+}
+
+#[async_trait]
+impl Interceptor for WsRemoteInterceptor {
+    async fn intercept(&self, subject: &str, payload: &mut Vec<u8>) -> InterceptResult {
+        let request_id = ulid::Ulid::new().to_string();
+
+        // Register a oneshot to receive the client's reply, with a cap so a
+        // misbehaving client can't OOM the server (M2). The cap is checked
+        // while we hold the lock so the count is consistent under load.
+        let (tx, rx) = oneshot::channel::<WsInterceptReply>();
+        {
+            let mut pending = self.pending_replies.lock().await;
+            if pending.len() >= MAX_PENDING_INTERCEPTS {
+                warn!(
+                    pattern = %self.pattern,
+                    cap = MAX_PENDING_INTERCEPTS,
+                    "WsRemoteInterceptor pending cap reached; passing event through"
+                );
+                return InterceptResult::Pass;
+            }
+            pending.insert(request_id.clone(), tx);
+        }
+
+        // Arm the Drop guard immediately so cancellation/panic always
+        // reclaims the pending entry.
+        let guard = PendingGuard {
+            pending: Arc::clone(&self.pending_replies),
+            request_id: request_id.clone(),
+            armed: true,
+        };
+
+        // Build the intercept frame and push it to the outbound queue.
+        use base64::Engine;
+        let payload_b64 = base64::engine::general_purpose::STANDARD.encode(payload.as_slice());
+        let frame = serde_json::json!({
+            "op": "intercept",
+            "request_id": request_id,
+            "subject": subject,
+            "payload": payload_b64,
+        });
+        let frame_str = match serde_json::to_string(&frame) {
+            Ok(s) => s,
+            Err(e) => {
+                drop(guard);
+                warn!(
+                    pattern = %self.pattern,
+                    error = %e,
+                    "WsRemoteInterceptor failed to encode frame; passing event through"
+                );
+                return InterceptResult::Pass;
+            }
+        };
+
+        if self.outbound.send(frame_str).await.is_err() {
+            // Outbound queue closed — connection is gone.
+            drop(guard);
+            warn!(
+                pattern = %self.pattern,
+                "WsRemoteInterceptor outbound closed; passing event through"
+            );
+            return InterceptResult::Pass;
+        }
+
+        // Wait for the client's reply with a timeout.
+        let reply = match tokio::time::timeout(self.intercept_timeout, rx).await {
+            Ok(Ok(reply)) => {
+                // The intercept_result handler removed the entry already;
+                // disarm the guard so we don't double-remove it.
+                guard.disarm();
+                reply
+            }
+            Ok(Err(_)) => {
+                // oneshot sender dropped without a value — typically
+                // because cancel_all drained the map. Drop guard reclaims
+                // the entry if it's still there.
+                drop(guard);
+                warn!(
+                    pattern = %self.pattern,
+                    "WsRemoteInterceptor reply channel closed; passing event through"
+                );
+                return InterceptResult::Pass;
+            }
+            Err(_) => {
+                drop(guard);
+                warn!(
+                    pattern = %self.pattern,
+                    request_id = request_id,
+                    "WsRemoteInterceptor timed out; passing event through"
+                );
+                return InterceptResult::Pass;
+            }
+        };
+
+        // Translate the wire-level action into the in-process result.
+        // For Modified, we swap the new payload into the caller's buffer.
+        match reply.action {
+            WsInterceptAction::Pass => InterceptResult::Pass,
+            WsInterceptAction::Drop => InterceptResult::Drop,
+            WsInterceptAction::Modify(new_payload) => {
+                *payload = new_payload;
+                InterceptResult::Modified
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn test_intercept_pass_round_trip() {
+        let (tx, mut rx) = mpsc::channel::<WsOutboundFrame>(8);
+        let interceptor = Arc::new(WsRemoteInterceptor::new("test.pass".to_string(), tx));
+
+        // Simulate the WS read loop replying with Pass.
+        let pending = interceptor.pending_replies();
+        tokio::spawn(async move {
+            let frame = rx.recv().await.unwrap();
+            let parsed: serde_json::Value = serde_json::from_str(&frame).unwrap();
+            let request_id = parsed["request_id"].as_str().unwrap().to_string();
+            assert_eq!(parsed["op"], "intercept");
+            assert_eq!(parsed["subject"], "test.pass");
+
+            let mut p = pending.lock().await;
+            if let Some(reply_tx) = p.remove(&request_id) {
+                let _ = reply_tx.send(WsInterceptReply {
+                    action: WsInterceptAction::Pass,
+                    error: None,
+                });
+            }
+        });
+
+        let mut payload = b"hello".to_vec();
+        let result = interceptor.intercept("test.pass", &mut payload).await;
+        assert_eq!(result, InterceptResult::Pass);
+        assert_eq!(payload, b"hello"); // unchanged
+    }
+
+    #[tokio::test]
+    async fn test_intercept_modify_swaps_payload() {
+        let (tx, mut rx) = mpsc::channel::<WsOutboundFrame>(8);
+        let interceptor = Arc::new(WsRemoteInterceptor::new("test.modify".to_string(), tx));
+
+        let pending = interceptor.pending_replies();
+        tokio::spawn(async move {
+            let frame = rx.recv().await.unwrap();
+            let parsed: serde_json::Value = serde_json::from_str(&frame).unwrap();
+            let request_id = parsed["request_id"].as_str().unwrap().to_string();
+
+            let mut p = pending.lock().await;
+            if let Some(reply_tx) = p.remove(&request_id) {
+                let _ = reply_tx.send(WsInterceptReply {
+                    action: WsInterceptAction::Modify(b"replaced!".to_vec()),
+                    error: None,
+                });
+            }
+        });
+
+        let mut payload = b"original".to_vec();
+        let result = interceptor.intercept("test.modify", &mut payload).await;
+        assert_eq!(result, InterceptResult::Modified);
+        assert_eq!(payload, b"replaced!");
+    }
+
+    #[tokio::test]
+    async fn test_intercept_drop_propagates() {
+        let (tx, mut rx) = mpsc::channel::<WsOutboundFrame>(8);
+        let interceptor = Arc::new(WsRemoteInterceptor::new("test.drop".to_string(), tx));
+
+        let pending = interceptor.pending_replies();
+        tokio::spawn(async move {
+            let frame = rx.recv().await.unwrap();
+            let parsed: serde_json::Value = serde_json::from_str(&frame).unwrap();
+            let request_id = parsed["request_id"].as_str().unwrap().to_string();
+
+            let mut p = pending.lock().await;
+            if let Some(reply_tx) = p.remove(&request_id) {
+                let _ = reply_tx.send(WsInterceptReply {
+                    action: WsInterceptAction::Drop,
+                    error: None,
+                });
+            }
+        });
+
+        let mut payload = b"toxic".to_vec();
+        let result = interceptor.intercept("test.drop", &mut payload).await;
+        assert_eq!(result, InterceptResult::Drop);
+    }
+
+    #[tokio::test]
+    async fn test_intercept_timeout_passes_through() {
+        let (tx, _rx) = mpsc::channel::<WsOutboundFrame>(8);
+        let interceptor = WsRemoteInterceptor::new("test.timeout".to_string(), tx)
+            .with_timeout(Duration::from_millis(50));
+
+        // No task to handle the reply — should time out and Pass.
+        let mut payload = b"x".to_vec();
+        let result = interceptor.intercept("test.timeout", &mut payload).await;
+        assert_eq!(result, InterceptResult::Pass);
+        // Payload preserved.
+        assert_eq!(payload, b"x");
+    }
+
+    #[tokio::test]
+    async fn test_cancel_all_returns_pass() {
+        let (tx, _rx) = mpsc::channel::<WsOutboundFrame>(8);
+        let interceptor = Arc::new(WsRemoteInterceptor::new("test.cancel".to_string(), tx));
+
+        let interceptor_clone = Arc::clone(&interceptor);
+        let task = tokio::spawn(async move {
+            let mut p = b"x".to_vec();
+            interceptor_clone.intercept("test.cancel", &mut p).await
+        });
+
+        // Give the intercept call time to register its pending reply.
+        tokio::time::sleep(Duration::from_millis(20)).await;
+
+        interceptor.cancel_all("disconnect test").await;
+
+        let result = task.await.unwrap();
+        assert_eq!(result, InterceptResult::Pass);
+    }
+
+    #[tokio::test]
+    async fn test_outbound_closed_passes_through() {
+        let (tx, rx) = mpsc::channel::<WsOutboundFrame>(8);
+        let interceptor = WsRemoteInterceptor::new("test.closed".to_string(), tx);
+
+        // Drop the receiver so the next send() fails.
+        drop(rx);
+
+        let mut payload = b"x".to_vec();
+        let result = interceptor.intercept("test.closed", &mut payload).await;
+        assert_eq!(result, InterceptResult::Pass);
+    }
+
+    /// **N8b / M2 regression**: filling pending_replies to the cap
+    /// causes new intercept calls to return Pass immediately instead of
+    /// growing memory unboundedly. We don't insert MAX_PENDING_INTERCEPTS
+    /// real entries (1024) — that would be slow — instead we directly
+    /// populate the map and call intercept on the same proxy.
+    #[tokio::test]
+    async fn test_pending_intercepts_cap_returns_pass() {
+        let (tx, _rx) = mpsc::channel::<WsOutboundFrame>(8);
+        let interceptor = Arc::new(
+            WsRemoteInterceptor::new("test.cap".to_string(), tx)
+                .with_timeout(Duration::from_millis(100)),
+        );
+
+        // Fill the map directly with dummy entries.
+        {
+            let pending = interceptor.pending_replies();
+            let mut guard = pending.lock().await;
+            for i in 0..MAX_PENDING_INTERCEPTS {
+                let (tx, _rx) = oneshot::channel::<WsInterceptReply>();
+                guard.insert(format!("dummy-{}", i), tx);
+            }
+        }
+
+        let mut payload = b"y".to_vec();
+        let result = interceptor.intercept("test.cap", &mut payload).await;
+        assert_eq!(
+            result,
+            InterceptResult::Pass,
+            "intercept must return Pass when pending_replies is at cap"
+        );
+        // Payload preserved.
+        assert_eq!(payload, b"y");
+    }
+
+    /// **N8b / H1 regression**: when the engine aborts the spawned
+    /// interceptor task mid-await, the PendingGuard's Drop impl must
+    /// reclaim the pending_replies entry. Without the guard, that entry
+    /// would leak forever.
+    ///
+    /// **F15 fix:** uses bounded polls instead of fixed sleeps so the
+    /// test is robust under loaded CI without giving up correctness.
+    #[tokio::test]
+    async fn test_pending_guard_reclaims_on_abort() {
+        let (tx, _rx) = mpsc::channel::<WsOutboundFrame>(8);
+        let interceptor = Arc::new(
+            WsRemoteInterceptor::new("test.abort".to_string(), tx)
+                .with_timeout(Duration::from_secs(60)), // long timeout
+        );
+        let pending_handle = interceptor.pending_replies();
+
+        // Spawn the interceptor call and abort it after the entry is
+        // registered.
+        let interceptor_clone = Arc::clone(&interceptor);
+        let task = tokio::spawn(async move {
+            let mut p = b"x".to_vec();
+            interceptor_clone.intercept("test.abort", &mut p).await
+        });
+
+        // Bounded poll for the pending entry to appear (instead of a
+        // fixed sleep that may be too short under CI load).
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(2);
+        loop {
+            if pending_handle.lock().await.len() == 1 {
+                break;
+            }
+            if tokio::time::Instant::now() >= deadline {
+                panic!("pending entry never registered before deadline");
+            }
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+
+        // Abort mid-await — this is what the engine timeout does.
+        task.abort();
+        let _ = task.await;
+
+        // Bounded poll for the entry to be reclaimed by the Drop guard.
+        // The guard may use try_lock or fall back to a spawned removal
+        // task, so we can't assume single-step completion.
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(2);
+        loop {
+            if pending_handle.lock().await.is_empty() {
+                break;
+            }
+            if tokio::time::Instant::now() >= deadline {
+                panic!("PendingGuard Drop impl did not reclaim the pending entry within 2s");
+            }
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+    }
+}

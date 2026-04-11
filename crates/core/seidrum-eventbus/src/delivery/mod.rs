@@ -19,7 +19,10 @@ pub mod in_process;
 pub mod registry;
 pub mod retry;
 pub mod webhook;
+pub mod webhook_interceptor;
 pub mod websocket;
+pub mod ws_remote;
+pub mod ws_remote_interceptor;
 
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
@@ -29,8 +32,14 @@ use thiserror::Error;
 pub use in_process::InProcessChannel;
 pub use registry::ChannelRegistry;
 pub use retry::{calculate_backoff, next_retry_after, RetryConfig, RetryTask};
-pub use webhook::WebhookChannel;
+pub use webhook::{
+    validate_webhook_url, validate_webhook_url_resolved, validate_webhook_url_with_policy,
+    ValidatedWebhookUrl, WebhookChannel, WebhookUrlError, WebhookUrlPolicy,
+};
+pub use webhook_interceptor::WebhookInterceptor;
 pub use websocket::{WebSocketChannel, WebSocketMessage};
+pub use ws_remote::{WsDeliveryReply, WsOutboundFrame, WsRemoteChannel};
+pub use ws_remote_interceptor::{WsInterceptAction, WsInterceptReply, WsRemoteInterceptor};
 
 #[derive(Debug, Error)]
 pub enum DeliveryError {

@@ -1,5 +1,7 @@
 use crate::bus::{EventBus, EventBusImpl, SubscribeOpts, Subscription};
-use crate::delivery::{ChannelRegistry, DeliveryChannel, RetryConfig, RetryTask, WebhookChannel};
+use crate::delivery::{
+    ChannelRegistry, DeliveryChannel, RetryConfig, RetryTask, WebhookChannel, WebhookUrlPolicy,
+};
 use crate::dispatch::{EventFilter, Interceptor, SubscriptionInfo};
 use crate::request_reply::RequestSubscription;
 use crate::storage::compaction::CompactionTask;
@@ -68,6 +70,18 @@ impl EventBus for OwnedBus {
     async fn metrics(&self) -> crate::Result<crate::bus::BusMetrics> {
         self.inner.metrics().await
     }
+    async fn get_event(&self, seq: u64) -> crate::Result<Option<crate::storage::StoredEvent>> {
+        self.inner.get_event(seq).await
+    }
+    async fn register_channel_type(
+        &self,
+        channel_type: &str,
+        provider: Arc<dyn DeliveryChannel>,
+    ) -> crate::Result<()> {
+        self.inner
+            .register_channel_type(channel_type, provider)
+            .await
+    }
 }
 
 /// Builder for constructing an EventBus with configurable options.
@@ -87,6 +101,18 @@ pub struct EventBusBuilder {
     /// Pending channel registrations queued via `register_channel`. Drained
     /// during `build_with_handles` against the resolved registry.
     pending_channels: Vec<(String, Arc<dyn DeliveryChannel>)>,
+    /// SSRF policy for webhook URLs registered through the HTTP transport.
+    /// Defaults to `Strict`. Tests use `Permissive` to allow loopback URLs.
+    webhook_url_policy: WebhookUrlPolicy,
+    /// Mirrors `HttpServer::unsafe_allow_http_dev_mode`. Default `false`.
+    /// When true, sensitive HTTP endpoints stay accessible with an open
+    /// authenticator.
+    http_dev_mode: bool,
+    /// Mirrors `WebSocketServer::unsafe_allow_ws_dev_mode`. Default `false`.
+    /// When true, sensitive WS client operations
+    /// (`register_interceptor`, `register_channel_type`) remain
+    /// accessible with an open authenticator (`NoAuth`).
+    ws_dev_mode: bool,
 }
 
 /// Default compaction interval: 1 hour.
@@ -166,7 +192,38 @@ impl EventBusBuilder {
             retry_query_limit: None,
             registry: None,
             pending_channels: Vec::new(),
+            webhook_url_policy: WebhookUrlPolicy::Strict,
+            http_dev_mode: false,
+            ws_dev_mode: false,
         }
+    }
+
+    /// Override the SSRF validation policy for webhook URLs registered
+    /// via the HTTP transport. Default `Strict` (https-only, no private
+    /// hosts). Use `Permissive` only for tests or trusted networks.
+    pub fn with_webhook_url_policy(mut self, policy: WebhookUrlPolicy) -> Self {
+        self.webhook_url_policy = policy;
+        self
+    }
+
+    /// **Dangerous.** Allow access to sensitive HTTP endpoints
+    /// (`GET /events/:seq`, `POST /subscribe`, `POST /interceptors`)
+    /// when no real authenticator is configured. Mirrors
+    /// [`crate::transport::HttpServer::unsafe_allow_http_dev_mode`].
+    /// Default `false`.
+    pub fn unsafe_allow_http_dev_mode(mut self) -> Self {
+        self.http_dev_mode = true;
+        self
+    }
+
+    /// **Dangerous.** Allow access to sensitive WS client operations
+    /// (`register_interceptor`, `register_channel_type`) when no real
+    /// authenticator is configured. Mirrors
+    /// [`crate::transport::WebSocketServer::unsafe_allow_ws_dev_mode`].
+    /// Default `false`.
+    pub fn unsafe_allow_ws_dev_mode(mut self) -> Self {
+        self.ws_dev_mode = true;
+        self
     }
 
     /// Set the event store backend.
@@ -296,8 +353,10 @@ impl EventBusBuilder {
 
         // Single shared WebhookChannel — used by both the dispatch engine
         // (for retry-time delivery) and the HTTP transport (for live
-        // delivery from webhook subscriptions).
-        let webhook_channel = WebhookChannel::new();
+        // delivery from webhook subscriptions). Threaded with the
+        // configured SSRF policy so per-delivery DNS rebinding checks
+        // (N1) use the same policy as registration-time validation.
+        let webhook_channel = WebhookChannel::with_policy(self.webhook_url_policy);
 
         // Resolve retry config: defaults applied if `with_retry` was not
         // called. Always Some so the engine can use it for first-failure
@@ -358,9 +417,13 @@ impl EventBusBuilder {
         // Start WebSocket server if configured
         let ws_handle = if let Some(addr) = self.ws_addr {
             let bus_clone = Arc::clone(&bus);
+            let ws_dev_mode = self.ws_dev_mode;
             let rx = shutdown_rx.clone();
             Some(tokio::spawn(async move {
-                let ws_server = WebSocketServer::new(bus_clone, rx);
+                let mut ws_server = WebSocketServer::new(bus_clone, rx);
+                if ws_dev_mode {
+                    ws_server = ws_server.unsafe_allow_ws_dev_mode();
+                }
                 if let Err(e) = ws_server.start(addr).await {
                     tracing::error!("WebSocket server error: {}", e);
                 }
@@ -374,10 +437,18 @@ impl EventBusBuilder {
             let bus_clone = Arc::clone(&bus);
             let registry_clone = Arc::clone(&registry);
             let webhook_clone = Arc::clone(&webhook_channel);
+            let store_clone = Arc::clone(&store);
+            let webhook_policy = self.webhook_url_policy;
+            let http_dev_mode = self.http_dev_mode;
             let rx = shutdown_rx.clone();
             Some(tokio::spawn(async move {
-                let http_server =
-                    HttpServer::with_webhook_channel(bus_clone, registry_clone, webhook_clone, rx);
+                let mut http_server =
+                    HttpServer::with_webhook_channel(bus_clone, registry_clone, webhook_clone, rx)
+                        .with_store(store_clone)
+                        .with_webhook_url_policy(webhook_policy);
+                if http_dev_mode {
+                    http_server = http_server.unsafe_allow_http_dev_mode();
+                }
                 if let Err(e) = http_server.start(addr).await {
                     tracing::error!("HTTP server error: {}", e);
                 }

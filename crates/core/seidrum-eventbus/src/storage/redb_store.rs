@@ -1,6 +1,6 @@
 use super::{
-    DeliveryRecord, DeliveryStatus, EventStatus, EventStore, RetryableDelivery, StorageError,
-    StorageResult, StoredEvent,
+    DeliveryRecord, DeliveryStatus, EventStatus, EventStore, PersistedSubscription,
+    RetryableDelivery, StorageError, StorageResult, StoredEvent,
 };
 use async_trait::async_trait;
 use redb::{Database, ReadableTable};
@@ -19,6 +19,10 @@ const STATUS_IDX_TABLE: redb::TableDefinition<(u8, u64), ()> =
 /// deliveries instead of full-scanning the events table.
 const FAILED_DELIVERIES_IDX_TABLE: redb::TableDefinition<u64, ()> =
     redb::TableDefinition::new("failed_deliveries_idx");
+/// Persisted webhook subscriptions, keyed by persisted_id (a ULID string).
+/// Used by the HTTP transport so subscriptions survive process restarts.
+const SUBSCRIPTIONS_TABLE: redb::TableDefinition<&str, &[u8]> =
+    redb::TableDefinition::new("subscriptions");
 
 /// A durable event store using redb as the backing storage engine.
 pub struct RedbEventStore {
@@ -27,9 +31,32 @@ pub struct RedbEventStore {
 
 impl RedbEventStore {
     /// Open or create a redb-backed event store at the given path.
+    ///
+    /// **File permissions (H4):** on Unix, the resulting file is chmod
+    /// `0600` so only the process owner can read it. This matters
+    /// because persisted webhook subscriptions store HTTP headers
+    /// (which routinely contain `Authorization: Bearer …` tokens) in
+    /// plaintext. The chmod is best-effort: failure is logged at warn
+    /// but does not block the open.
     pub fn open<P: AsRef<Path>>(path: P) -> StorageResult<Self> {
-        let db = Database::create(path)
+        let path_ref = path.as_ref();
+        let db = Database::create(path_ref)
             .map_err(|e| StorageError::DatabaseError(format!("failed to open redb: {}", e)))?;
+
+        // Tighten file mode on Unix. No-op on other platforms.
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            if let Err(e) =
+                std::fs::set_permissions(path_ref, std::fs::Permissions::from_mode(0o600))
+            {
+                tracing::warn!(
+                    path = %path_ref.display(),
+                    error = %e,
+                    "failed to chmod redb file to 0600"
+                );
+            }
+        }
 
         // Ensure tables exist
         {
@@ -54,6 +81,12 @@ impl RedbEventStore {
                             e
                         ))
                     })?;
+                let _t5 = write_txn.open_table(SUBSCRIPTIONS_TABLE).map_err(|e| {
+                    StorageError::DatabaseError(format!(
+                        "failed to open subscriptions table: {}",
+                        e
+                    ))
+                })?;
             }
             write_txn.commit().map_err(|e| {
                 StorageError::DatabaseError(format!("failed to commit transaction: {}", e))
@@ -729,11 +762,88 @@ impl EventStore for RedbEventStore {
         .await
         .map_err(|e| StorageError::OperationFailed(format!("spawn_blocking error: {}", e)))?
     }
+
+    async fn save_subscription(&self, sub: &PersistedSubscription) -> StorageResult<()> {
+        let db = Arc::clone(&self.db);
+        let sub = sub.clone();
+        tokio::task::spawn_blocking(move || {
+            let serialized = serde_json::to_vec(&sub).map_err(|e| {
+                StorageError::OperationFailed(format!("serialize subscription: {}", e))
+            })?;
+            let write_txn = db
+                .begin_write()
+                .map_err(|e| StorageError::DatabaseError(format!("begin write: {}", e)))?;
+            {
+                let mut t = write_txn.open_table(SUBSCRIPTIONS_TABLE).map_err(|e| {
+                    StorageError::DatabaseError(format!("open subscriptions table: {}", e))
+                })?;
+                t.insert(sub.persisted_id.as_str(), serialized.as_slice())
+                    .map_err(|e| {
+                        StorageError::DatabaseError(format!("insert subscription: {}", e))
+                    })?;
+            }
+            write_txn
+                .commit()
+                .map_err(|e| StorageError::DatabaseError(format!("commit: {}", e)))
+        })
+        .await
+        .map_err(|e| StorageError::OperationFailed(format!("spawn_blocking: {}", e)))?
+    }
+
+    async fn list_subscriptions(&self) -> StorageResult<Vec<PersistedSubscription>> {
+        let db = Arc::clone(&self.db);
+        tokio::task::spawn_blocking(move || {
+            let read_txn = db
+                .begin_read()
+                .map_err(|e| StorageError::DatabaseError(format!("begin read: {}", e)))?;
+            let table = read_txn
+                .open_table(SUBSCRIPTIONS_TABLE)
+                .map_err(|e| StorageError::DatabaseError(format!("open subscriptions: {}", e)))?;
+            let mut results = Vec::new();
+            let iter = table
+                .iter()
+                .map_err(|e| StorageError::DatabaseError(format!("iterate: {}", e)))?;
+            for item in iter {
+                let (_, value) =
+                    item.map_err(|e| StorageError::DatabaseError(format!("iterate row: {}", e)))?;
+                let bytes = value.value().to_vec();
+                let sub: PersistedSubscription = serde_json::from_slice(&bytes).map_err(|e| {
+                    StorageError::OperationFailed(format!("deserialize subscription: {}", e))
+                })?;
+                results.push(sub);
+            }
+            Ok(results)
+        })
+        .await
+        .map_err(|e| StorageError::OperationFailed(format!("spawn_blocking: {}", e)))?
+    }
+
+    async fn delete_subscription(&self, persisted_id: &str) -> StorageResult<()> {
+        let db = Arc::clone(&self.db);
+        let persisted_id = persisted_id.to_string();
+        tokio::task::spawn_blocking(move || {
+            let write_txn = db
+                .begin_write()
+                .map_err(|e| StorageError::DatabaseError(format!("begin write: {}", e)))?;
+            {
+                let mut t = write_txn.open_table(SUBSCRIPTIONS_TABLE).map_err(|e| {
+                    StorageError::DatabaseError(format!("open subscriptions table: {}", e))
+                })?;
+                let _ = t.remove(persisted_id.as_str());
+            }
+            write_txn
+                .commit()
+                .map_err(|e| StorageError::DatabaseError(format!("commit: {}", e)))
+        })
+        .await
+        .map_err(|e| StorageError::OperationFailed(format!("spawn_blocking: {}", e)))?
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::storage::PersistedSubscriptionKind;
     use tempfile::TempDir;
 
     #[tokio::test]
@@ -870,6 +980,55 @@ mod tests {
         assert_eq!(results[0].deliveries[0].subscriber_id, "sub1");
     }
 
+    /// Required by QUALITY.md L73: concurrent appends do not corrupt data.
+    /// 50 concurrent appends from 10 tasks must produce 50 distinct
+    /// monotonic sequence numbers and 50 readable events.
+    #[tokio::test]
+    async fn test_redb_concurrent_appends() {
+        let temp = TempDir::new().unwrap();
+        let store = Arc::new(RedbEventStore::open(temp.path().join("events.db")).unwrap());
+
+        let mut handles = vec![];
+        for task_id in 0..10 {
+            let store = Arc::clone(&store);
+            handles.push(tokio::spawn(async move {
+                let mut seqs = vec![];
+                for i in 0..5 {
+                    let event = StoredEvent {
+                        seq: 0,
+                        subject: format!("test.task.{}", task_id),
+                        payload: format!("event-{}-{}", task_id, i).into_bytes(),
+                        stored_at: 0,
+                        status: EventStatus::Pending,
+                        deliveries: vec![],
+                        reply_subject: None,
+                    };
+                    seqs.push(store.append(&event).await.unwrap());
+                }
+                seqs
+            }));
+        }
+
+        let mut all_seqs: Vec<u64> = Vec::new();
+        for handle in handles {
+            let seqs = handle.await.unwrap();
+            all_seqs.extend(seqs);
+        }
+
+        // 50 distinct, monotonic sequence numbers.
+        assert_eq!(all_seqs.len(), 50);
+        let mut sorted = all_seqs.clone();
+        sorted.sort();
+        sorted.dedup();
+        assert_eq!(sorted.len(), 50, "all sequence numbers must be unique");
+
+        // Every event is readable via get(seq).
+        for seq in &all_seqs {
+            let event = store.get(*seq).await.unwrap();
+            assert!(event.is_some(), "event seq={} should be readable", seq);
+        }
+    }
+
     /// Regression test: a Failed delivery must remain queryable via
     /// `query_retryable` even if the parent event's status was bumped to
     /// `Delivered` by an unrelated path (e.g., the dispatch engine's
@@ -923,5 +1082,155 @@ mod tests {
             "Failed delivery should survive update_status -> Delivered"
         );
         assert_eq!(still_pending[0].subscriber_id, "sub1");
+    }
+
+    /// M8: round-trip a persisted webhook subscription through redb,
+    /// closing and reopening the database between save and list to
+    /// prove the on-disk encoding is correct (not just an in-memory
+    /// pass-through).
+    #[tokio::test]
+    async fn test_redb_subscription_persistence_roundtrip() {
+        let temp = TempDir::new().unwrap();
+        let path = temp.path().join("events.db");
+
+        let mut headers = std::collections::HashMap::new();
+        headers.insert("Authorization".to_string(), "Bearer secret".to_string());
+        headers.insert("X-Custom".to_string(), "value".to_string());
+        let entry = PersistedSubscription {
+            persisted_id: "ws-test-1".to_string(),
+            pattern: "events.>".to_string(),
+            url: "https://hook.example.com/path".to_string(),
+            headers: headers.clone(),
+            priority: 7,
+            created_at: 12_345_678,
+            kind: PersistedSubscriptionKind::AsyncWebhook,
+            timeout_ms: None,
+        };
+
+        // === Phase 1: open, save, drop ===
+        {
+            let store = RedbEventStore::open(&path).unwrap();
+            store.save_subscription(&entry).await.unwrap();
+            let listed = store.list_subscriptions().await.unwrap();
+            assert_eq!(listed.len(), 1, "save should be visible immediately");
+        }
+
+        // === Phase 2: reopen, list, verify on-disk encoding ===
+        {
+            let store = RedbEventStore::open(&path).unwrap();
+            let listed = store.list_subscriptions().await.unwrap();
+            assert_eq!(listed.len(), 1, "subscription should survive reopen");
+            assert_eq!(listed[0].persisted_id, "ws-test-1");
+            assert_eq!(listed[0].pattern, "events.>");
+            assert_eq!(listed[0].url, "https://hook.example.com/path");
+            assert_eq!(listed[0].priority, 7);
+            assert_eq!(listed[0].created_at, 12_345_678);
+            assert_eq!(
+                listed[0].headers.get("Authorization").map(|s| s.as_str()),
+                Some("Bearer secret")
+            );
+            assert_eq!(
+                listed[0].headers.get("X-Custom").map(|s| s.as_str()),
+                Some("value")
+            );
+        }
+
+        // === Phase 3: reopen, delete, verify ===
+        {
+            let store = RedbEventStore::open(&path).unwrap();
+            store.delete_subscription("ws-test-1").await.unwrap();
+            let listed = store.list_subscriptions().await.unwrap();
+            assert_eq!(listed.len(), 0, "delete should remove the entry");
+        }
+
+        // === Phase 4: reopen one more time, confirm delete persisted ===
+        {
+            let store = RedbEventStore::open(&path).unwrap();
+            let listed = store.list_subscriptions().await.unwrap();
+            assert_eq!(listed.len(), 0, "delete should survive reopen");
+        }
+    }
+
+    /// M8: save_subscription replaces existing entries with the same
+    /// persisted_id. Required by the trait contract.
+    #[tokio::test]
+    async fn test_redb_subscription_save_replaces_existing() {
+        let temp = TempDir::new().unwrap();
+        let store = RedbEventStore::open(temp.path().join("events.db")).unwrap();
+
+        let entry1 = PersistedSubscription {
+            persisted_id: "id1".to_string(),
+            pattern: "a".to_string(),
+            url: "https://a.example.com".to_string(),
+            headers: std::collections::HashMap::new(),
+            priority: 1,
+            created_at: 1000,
+            kind: PersistedSubscriptionKind::AsyncWebhook,
+            timeout_ms: None,
+        };
+        let entry2 = PersistedSubscription {
+            persisted_id: "id1".to_string(), // same id
+            pattern: "b".to_string(),
+            url: "https://b.example.com".to_string(),
+            headers: std::collections::HashMap::new(),
+            priority: 2,
+            created_at: 2000,
+            kind: PersistedSubscriptionKind::AsyncWebhook,
+            timeout_ms: None,
+        };
+
+        store.save_subscription(&entry1).await.unwrap();
+        store.save_subscription(&entry2).await.unwrap();
+
+        let listed = store.list_subscriptions().await.unwrap();
+        assert_eq!(listed.len(), 1);
+        assert_eq!(listed[0].pattern, "b");
+        assert_eq!(listed[0].priority, 2);
+    }
+
+    /// M8: delete_subscription on an unknown id is a no-op (idempotent).
+    #[tokio::test]
+    async fn test_redb_subscription_delete_unknown_is_noop() {
+        let temp = TempDir::new().unwrap();
+        let store = RedbEventStore::open(temp.path().join("events.db")).unwrap();
+
+        // Should not error.
+        store.delete_subscription("does-not-exist").await.unwrap();
+    }
+
+    /// M8: list_subscriptions returns multiple entries in some order.
+    #[tokio::test]
+    async fn test_redb_subscription_list_multiple() {
+        let temp = TempDir::new().unwrap();
+        let store = RedbEventStore::open(temp.path().join("events.db")).unwrap();
+
+        for i in 0..5 {
+            store
+                .save_subscription(&PersistedSubscription {
+                    persisted_id: format!("id-{}", i),
+                    pattern: format!("subject.{}", i),
+                    url: format!("https://hook{}.example.com", i),
+                    headers: std::collections::HashMap::new(),
+                    priority: i as u32,
+                    created_at: 1000 + i as u64,
+                    kind: PersistedSubscriptionKind::AsyncWebhook,
+                    timeout_ms: None,
+                })
+                .await
+                .unwrap();
+        }
+
+        let listed = store.list_subscriptions().await.unwrap();
+        assert_eq!(listed.len(), 5);
+        // Verify all ids round-trip
+        let mut ids: Vec<String> = listed.iter().map(|e| e.persisted_id.clone()).collect();
+        ids.sort();
+        assert_eq!(
+            ids,
+            vec!["id-0", "id-1", "id-2", "id-3", "id-4"]
+                .into_iter()
+                .map(String::from)
+                .collect::<Vec<_>>()
+        );
     }
 }
