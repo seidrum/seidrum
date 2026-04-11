@@ -131,28 +131,40 @@ pub trait EventStore: Send + Sync + 'static {
     //
     // Webhook subscriptions registered via the HTTP transport are persisted
     // here so they survive restarts. In-process subscriptions are not
-    // persisted — only durable transports (webhook) need this. The default
-    // implementations panic with `unimplemented!` so existing custom store
-    // backends without persistence support fail loudly rather than silently
-    // discarding subscriptions.
+    // persisted — only durable transports (webhook) need this.
+    //
+    // The default implementations return `StorageError::OperationFailed`
+    // (NOT `unimplemented!`) so a downstream `EventStore` that predates
+    // these methods compiles unchanged AND keeps running cleanly: writes
+    // surface as 5xx responses from the HTTP transport, and `start()`
+    // tolerates a missing `list_subscriptions` by treating it as "no
+    // persisted subs" rather than panicking the server task.
 
     /// Save a persisted subscription. Replaces any existing entry with the
     /// same `persisted_id`.
     async fn save_subscription(&self, sub: &PersistedSubscription) -> StorageResult<()> {
         let _ = sub;
-        unimplemented!("save_subscription not implemented for this store")
+        Err(StorageError::OperationFailed(
+            "subscription persistence not supported by this store".to_string(),
+        ))
     }
 
     /// List all persisted subscriptions. Used on HTTP server startup to
     /// recreate webhook subscriptions after a restart.
+    ///
+    /// Default returns an empty list so a store without persistence
+    /// support starts cleanly with zero recreated subscriptions, rather
+    /// than panicking the HTTP server task.
     async fn list_subscriptions(&self) -> StorageResult<Vec<PersistedSubscription>> {
-        unimplemented!("list_subscriptions not implemented for this store")
+        Ok(Vec::new())
     }
 
     /// Delete a persisted subscription by its `persisted_id`.
     async fn delete_subscription(&self, persisted_id: &str) -> StorageResult<()> {
         let _ = persisted_id;
-        unimplemented!("delete_subscription not implemented for this store")
+        Err(StorageError::OperationFailed(
+            "subscription persistence not supported by this store".to_string(),
+        ))
     }
 }
 

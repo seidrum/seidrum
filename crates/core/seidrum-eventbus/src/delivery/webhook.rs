@@ -8,15 +8,150 @@ use super::{DeliveryChannel, DeliveryError, DeliveryReceipt, DeliveryResult};
 use crate::delivery::ChannelConfig;
 use async_trait::async_trait;
 use base64::Engine;
+use reqwest::redirect::Policy;
 use reqwest::Client;
 use serde_json::json;
 use std::collections::HashMap;
+use std::net::IpAddr;
 use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use thiserror::Error;
 use tracing::{debug, warn};
 
 /// Timeout for webhook health check requests.
 const HEALTH_CHECK_TIMEOUT: Duration = Duration::from_secs(5);
+
+/// Errors returned by [`validate_webhook_url`].
+#[derive(Debug, Error)]
+pub enum WebhookUrlError {
+    #[error("invalid URL: {0}")]
+    Parse(String),
+    #[error("URL scheme must be https (got {0})")]
+    InsecureScheme(String),
+    #[error("URL must have a host")]
+    NoHost,
+    #[error("URL host {0} resolves to a private/loopback/link-local address ({1})")]
+    PrivateAddress(String, IpAddr),
+    #[error("URL host {0} could not be resolved: {1}")]
+    DnsError(String, String),
+}
+
+/// Policy controlling how strictly webhook URLs are validated.
+///
+/// `Strict` (default) enforces the production C2 SSRF mitigation:
+/// `https://`-only and non-private hosts. `Permissive` allows `http://`
+/// and any host — intended for tests and trusted-network deployments
+/// (e.g. an in-cluster bus where every webhook target is a sibling pod).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum WebhookUrlPolicy {
+    /// Production default: https-only, no private/loopback/link-local hosts.
+    #[default]
+    Strict,
+    /// Allow http:// and private/loopback/link-local hosts. **Use only
+    /// in tests or trusted networks.** Still rejects malformed URLs and
+    /// unspecified addresses (0.0.0.0).
+    Permissive,
+}
+
+/// Validate that a webhook URL is safe to dial from the server using the
+/// strict (production) policy. Equivalent to
+/// `validate_webhook_url_with_policy(url, WebhookUrlPolicy::Strict)`.
+pub fn validate_webhook_url(url: &str) -> Result<(), WebhookUrlError> {
+    validate_webhook_url_with_policy(url, WebhookUrlPolicy::Strict)
+}
+
+/// Validate a webhook URL against the given policy.
+///
+/// **Strict policy enforces (C2 — SSRF mitigation):**
+/// - URL parses cleanly
+/// - Scheme is `https://` (no `http://`, no `file://`, no `gopher://`)
+/// - Host is set
+/// - Resolved IP(s) are not loopback, private (RFC 1918 / RFC 4193),
+///   link-local (169.254.0.0/16, fe80::/10), or unspecified (0.0.0.0, ::)
+///
+/// **What strict policy does NOT enforce:**
+/// - DNS rebinding (the resolved IP at validation time may differ from
+///   the one used at delivery time). The webhook channel itself disables
+///   redirects via `Policy::none()`, which closes one rebinding vector.
+/// - TLS certificate pinning
+/// - Allowlisting specific domains
+///
+/// **Permissive policy** still parses the URL and rejects unspecified
+/// addresses (0.0.0.0, ::), but allows http://, loopback, and private
+/// ranges. Use this in tests or in deployments where the bus only
+/// dials sibling services on a trusted network.
+pub fn validate_webhook_url_with_policy(
+    url: &str,
+    policy: WebhookUrlPolicy,
+) -> Result<(), WebhookUrlError> {
+    let parsed = url::Url::parse(url).map_err(|e| WebhookUrlError::Parse(e.to_string()))?;
+
+    if matches!(policy, WebhookUrlPolicy::Strict) && parsed.scheme() != "https" {
+        return Err(WebhookUrlError::InsecureScheme(parsed.scheme().to_string()));
+    }
+    if !matches!(parsed.scheme(), "http" | "https") {
+        return Err(WebhookUrlError::InsecureScheme(parsed.scheme().to_string()));
+    }
+
+    let host = parsed.host_str().ok_or(WebhookUrlError::NoHost)?.to_string();
+
+    // Resolve the host to one or more IPs and check each one. Using
+    // `to_socket_addrs` triggers a synchronous DNS lookup but also handles
+    // literal IPv4/IPv6 strings correctly.
+    use std::net::ToSocketAddrs;
+    let port = parsed.port_or_known_default().unwrap_or(443);
+    let addrs = (host.as_str(), port)
+        .to_socket_addrs()
+        .map_err(|e| WebhookUrlError::DnsError(host.clone(), e.to_string()))?;
+
+    for sa in addrs {
+        let ip = sa.ip();
+        match policy {
+            WebhookUrlPolicy::Strict => {
+                if is_private_ip(&ip) {
+                    return Err(WebhookUrlError::PrivateAddress(host, ip));
+                }
+            }
+            WebhookUrlPolicy::Permissive => {
+                // Even Permissive rejects 0.0.0.0 / :: — those are never
+                // a meaningful destination address.
+                if ip.is_unspecified() {
+                    return Err(WebhookUrlError::PrivateAddress(host, ip));
+                }
+            }
+        }
+    }
+
+    Ok(())
+}
+
+/// Returns `true` if the given IP is unsafe for webhook delivery
+/// (loopback, private, link-local, multicast, or unspecified).
+fn is_private_ip(ip: &IpAddr) -> bool {
+    match ip {
+        IpAddr::V4(v4) => {
+            v4.is_loopback()
+                || v4.is_private()
+                || v4.is_link_local()
+                || v4.is_unspecified()
+                || v4.is_multicast()
+                || v4.is_broadcast()
+                // RFC 6598 / shared address space
+                || (v4.octets()[0] == 100 && (v4.octets()[1] & 0xc0) == 64)
+        }
+        IpAddr::V6(v6) => {
+            v6.is_loopback()
+                || v6.is_unspecified()
+                || v6.is_multicast()
+                // unique-local fc00::/7
+                || (v6.segments()[0] & 0xfe00) == 0xfc00
+                // link-local fe80::/10
+                || (v6.segments()[0] & 0xffc0) == 0xfe80
+                // IPv4-mapped → check the embedded v4 address
+                || v6.to_ipv4_mapped().is_some_and(|v4| is_private_ip(&IpAddr::V4(v4)))
+        }
+    }
+}
 
 /// Webhook delivery channel.
 /// Sends events as HTTP POST requests to a configured URL.
@@ -24,6 +159,12 @@ const HEALTH_CHECK_TIMEOUT: Duration = Duration::from_secs(5);
 /// Individual delivery attempts are single-shot. Retry logic is handled
 /// externally by [`super::RetryTask`] which polls the event store for
 /// failed deliveries and re-invokes the channel.
+///
+/// **SSRF mitigations:**
+/// - The reqwest client is configured with `redirect(Policy::none())` so
+///   a server can't 302 the delivery to a private address after the
+///   initial URL passed validation.
+/// - URL validation happens at subscription time via [`validate_webhook_url`].
 pub struct WebhookChannel {
     client: Client,
 }
@@ -31,9 +172,12 @@ pub struct WebhookChannel {
 impl WebhookChannel {
     /// Create a new webhook delivery channel.
     pub fn new() -> Arc<Self> {
-        Arc::new(Self {
-            client: Client::new(),
-        })
+        let client = Client::builder()
+            .redirect(Policy::none())
+            .timeout(Duration::from_secs(30))
+            .build()
+            .expect("reqwest client builder should succeed with default settings");
+        Arc::new(Self { client })
     }
 
     /// Extract URL and headers from ChannelConfig.

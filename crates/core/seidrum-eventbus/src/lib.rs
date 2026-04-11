@@ -140,10 +140,18 @@ pub type Result<T> = std::result::Result<T, EventBusError>;
 ///
 /// Reusable helpers for integration tests and downstream crates that need
 /// to spin up a bus, capture interceptor calls, or mock a webhook receiver.
-/// These are exposed publicly so tests in `tests/` (which link the crate as
-/// an external dep) can use them. Any production binary that pulls these
-/// in will simply have a small amount of dead code — they are pure helpers
-/// with no global state.
+///
+/// **Feature-gated:** enable the `test-utils` feature to use this module.
+/// The crate's own integration tests in `tests/` enable it automatically
+/// via `required-features` in `Cargo.toml`. Downstream crates that want
+/// the helpers must opt in:
+/// ```toml
+/// [dev-dependencies]
+/// seidrum-eventbus = { version = "*", features = ["test-utils"] }
+/// ```
+/// Production binaries do not pay the cost of axum/reqwest pulled in by
+/// the mock webhook server.
+#[cfg(any(test, feature = "test-utils"))]
 pub mod test_utils {
     use crate::dispatch::{InterceptResult, Interceptor};
     use crate::request_reply::DispatchedEvent;
@@ -183,6 +191,9 @@ pub mod test_utils {
     /// Create a bus with both HTTP and WebSocket transports listening on
     /// ephemeral ports. Uses an in-memory store. Returns a [`BusWithTransports`]
     /// containing the handles and the resolved addresses.
+    ///
+    /// Tests run with [`crate::delivery::WebhookUrlPolicy::Permissive`] so
+    /// loopback URLs (used by [`MockWebhookServer`]) are accepted.
     pub async fn test_bus_with_transports() -> BusWithTransports {
         let http_addr = pick_ephemeral_addr();
         let ws_addr = pick_ephemeral_addr();
@@ -191,6 +202,8 @@ pub mod test_utils {
             .storage(store)
             .with_http(http_addr)
             .with_websocket(ws_addr)
+            .with_webhook_url_policy(crate::delivery::WebhookUrlPolicy::Permissive)
+            .unsafe_allow_http_dev_mode()
             .build_with_handles()
             .await
             .unwrap();
@@ -233,6 +246,35 @@ pub mod test_utils {
                 }
             }
             tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    }
+
+    /// Poll a WebSocket server until a connection succeeds, with a
+    /// 2-second budget. Panics on timeout. The WS protocol has no
+    /// equivalent of `/health`, so this opens and immediately drops a
+    /// throwaway connection — the only signal that the listener is up.
+    /// Use after starting a bus configured with `with_websocket(...)`.
+    pub async fn wait_for_ws_ready(addr: SocketAddr) {
+        let url = format!("ws://{}", addr);
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(2);
+        loop {
+            if tokio::time::Instant::now() >= deadline {
+                panic!("WebSocket server at {} did not become ready in time", addr);
+            }
+            match tokio::time::timeout(
+                Duration::from_millis(200),
+                tokio_tungstenite::connect_async(&url),
+            )
+            .await
+            {
+                Ok(Ok((stream, _))) => {
+                    drop(stream);
+                    return;
+                }
+                _ => {
+                    tokio::time::sleep(Duration::from_millis(20)).await;
+                }
+            }
         }
     }
 

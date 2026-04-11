@@ -199,6 +199,7 @@ mod tests {
         let handles_a = EventBusBuilder::new()
             .storage(store_clone)
             .with_http(addr)
+            .with_webhook_url_policy(seidrum_eventbus::delivery::WebhookUrlPolicy::Permissive)
             .build_with_handles()
             .await
             .unwrap();
@@ -244,6 +245,7 @@ mod tests {
         let handles_b = EventBusBuilder::new()
             .storage(store_clone2)
             .with_http(addr)
+            .with_webhook_url_policy(seidrum_eventbus::delivery::WebhookUrlPolicy::Permissive)
             .build_with_handles()
             .await
             .unwrap();
@@ -282,6 +284,7 @@ mod tests {
         let handles = EventBusBuilder::new()
             .storage(Arc::clone(&store))
             .with_http(addr)
+            .with_webhook_url_policy(seidrum_eventbus::delivery::WebhookUrlPolicy::Permissive)
             .build_with_handles()
             .await
             .unwrap();
@@ -535,13 +538,12 @@ mod tests {
     #[tokio::test]
     async fn test_ws_remote_interceptor_pass_e2e() {
         use futures_util::{SinkExt, StreamExt};
-        use seidrum_eventbus::test_utils::test_bus_with_transports;
+        use seidrum_eventbus::test_utils::{test_bus_with_transports, wait_for_ws_ready};
         use std::time::Duration;
         use tokio_tungstenite::tungstenite::Message;
 
         let env = test_bus_with_transports().await;
-        // Give the WS server a beat to bind.
-        tokio::time::sleep(Duration::from_millis(50)).await;
+        wait_for_ws_ready(env.ws_addr).await;
 
         // Connect a WS client.
         let url = format!("ws://{}", env.ws_addr);
@@ -651,12 +653,12 @@ mod tests {
     async fn test_ws_remote_interceptor_modify_e2e() {
         use base64::Engine;
         use futures_util::{SinkExt, StreamExt};
-        use seidrum_eventbus::test_utils::test_bus_with_transports;
+        use seidrum_eventbus::test_utils::{test_bus_with_transports, wait_for_ws_ready};
         use std::time::Duration;
         use tokio_tungstenite::tungstenite::Message;
 
         let env = test_bus_with_transports().await;
-        tokio::time::sleep(Duration::from_millis(50)).await;
+        wait_for_ws_ready(env.ws_addr).await;
 
         let url = format!("ws://{}", env.ws_addr);
         let (ws_stream, _) = tokio_tungstenite::connect_async(&url).await.unwrap();
@@ -749,6 +751,280 @@ mod tests {
         publisher_done.notify_one();
         let _ = ws_task.await;
         env.handles.shutdown_and_join().await;
+    }
+
+    /// End-to-end: a WS-registered remote interceptor returns `drop`,
+    /// and the async subscriber receives nothing.
+    #[tokio::test]
+    async fn test_ws_remote_interceptor_drop_e2e() {
+        use futures_util::{SinkExt, StreamExt};
+        use seidrum_eventbus::test_utils::{test_bus_with_transports, wait_for_ws_ready};
+        use std::time::Duration;
+        use tokio_tungstenite::tungstenite::Message;
+
+        let env = test_bus_with_transports().await;
+        wait_for_ws_ready(env.ws_addr).await;
+
+        let url = format!("ws://{}", env.ws_addr);
+        let (ws_stream, _) = tokio_tungstenite::connect_async(&url).await.unwrap();
+        let (mut write, mut read) = ws_stream.split();
+
+        // Register a remote interceptor on `e2e.drop.test`. Use the
+        // minimum allowed remote priority (100) so it runs before the
+        // async subscriber but is permitted by the C1 floor.
+        write
+            .send(Message::text(
+                serde_json::json!({
+                    "op": "register_interceptor",
+                    "pattern": "e2e.drop.test",
+                    "priority": 100,
+                })
+                .to_string(),
+            ))
+            .await
+            .unwrap();
+
+        // Drain the registration ack.
+        let _ = tokio::time::timeout(Duration::from_secs(2), read.next())
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+
+        let opts = SubscribeOpts {
+            priority: 200,
+            mode: SubscriptionMode::Async,
+            channel: ChannelConfig::InProcess,
+            timeout: Duration::from_secs(5),
+            filter: None,
+        };
+        let mut sub = env
+            .handles
+            .bus
+            .subscribe("e2e.drop.test", opts)
+            .await
+            .unwrap();
+
+        // Drive the client to reply with `drop`.
+        let publisher_done = Arc::new(tokio::sync::Notify::new());
+        let publisher_done_clone = Arc::clone(&publisher_done);
+        let ws_task = tokio::spawn(async move {
+            loop {
+                tokio::select! {
+                    msg = read.next() => {
+                        let msg = match msg {
+                            Some(Ok(m)) => m,
+                            _ => break,
+                        };
+                        if !msg.is_text() { continue; }
+                        let parsed: serde_json::Value =
+                            match serde_json::from_str(msg.to_text().unwrap()) {
+                                Ok(v) => v,
+                                Err(_) => continue,
+                            };
+                        if parsed["op"] == "intercept" {
+                            let request_id = parsed["request_id"].as_str().unwrap().to_string();
+                            let reply = serde_json::json!({
+                                "op": "intercept_result",
+                                "request_id": request_id,
+                                "action": "drop",
+                            });
+                            write.send(Message::text(reply.to_string())).await.unwrap();
+                        }
+                    }
+                    _ = publisher_done_clone.notified() => break,
+                }
+            }
+        });
+
+        env.handles
+            .bus
+            .publish("e2e.drop.test", b"toxic")
+            .await
+            .unwrap();
+
+        // The async subscriber should NOT receive the event because the
+        // remote interceptor dropped it. Wait briefly to confirm nothing
+        // arrives, then assert.
+        let result = tokio::time::timeout(Duration::from_millis(500), sub.rx.recv()).await;
+        assert!(
+            result.is_err(),
+            "subscriber should not receive a dropped event, got {:?}",
+            result.ok().flatten().map(|e| e.payload)
+        );
+
+        publisher_done.notify_one();
+        let _ = ws_task.await;
+        env.handles.shutdown_and_join().await;
+    }
+
+    /// End-to-end (C3): register a webhook sync interceptor via
+    /// `POST /interceptors`, publish an event, and verify the in-process
+    /// subscriber receives the modified payload that the mock webhook
+    /// returned in its response body.
+    #[tokio::test]
+    async fn test_webhook_sync_interceptor_modify_e2e() {
+        use seidrum_eventbus::test_utils::{test_bus_with_transports, wait_for_http_ready};
+        use std::time::Duration;
+
+        // Boot a mock webhook server that ALSO supports the
+        // intercept-result wire format on a specific path. The base
+        // MockWebhookServer always returns 200 with no body — that's not
+        // enough for sync interceptors, which need a JSON action body.
+        // Spin up a tiny ad-hoc server here instead.
+        use axum::{routing::post, Json as AJson, Router as ARouter};
+        let interceptor_addr: std::net::SocketAddr = "127.0.0.1:0".parse().unwrap();
+        let listener = tokio::net::TcpListener::bind(interceptor_addr).await.unwrap();
+        let interceptor_addr = listener.local_addr().unwrap();
+        async fn modify_handler(
+            AJson(_body): AJson<serde_json::Value>,
+        ) -> AJson<serde_json::Value> {
+            use base64::Engine;
+            let new_payload =
+                base64::engine::general_purpose::STANDARD.encode(b"REWRITTEN BY WEBHOOK");
+            AJson(serde_json::json!({
+                "action": "modify",
+                "payload": new_payload,
+            }))
+        }
+        let app = ARouter::new().route("/intercept", post(modify_handler));
+        let server_task = tokio::spawn(async move {
+            let _ = axum::serve(listener, app).await;
+        });
+
+        let env = test_bus_with_transports().await;
+        wait_for_http_ready(env.http_addr).await;
+
+        // Register the webhook sync interceptor via the new endpoint.
+        let webhook_url = format!("http://{}/intercept", interceptor_addr);
+        let resp = reqwest::Client::new()
+            .post(format!("http://{}/interceptors", env.http_addr))
+            .json(&serde_json::json!({
+                "pattern": "e2e.webhook_intercept",
+                "url": webhook_url,
+                "priority": 100,
+            }))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), 200, "register interceptor should succeed");
+        let body: serde_json::Value = resp.json().await.unwrap();
+        let interceptor_id = body["id"].as_str().unwrap().to_string();
+        assert!(!interceptor_id.is_empty());
+
+        // Subscribe in-process to observe the post-interceptor payload.
+        let opts = SubscribeOpts {
+            priority: 200,
+            mode: SubscriptionMode::Async,
+            channel: ChannelConfig::InProcess,
+            timeout: Duration::from_secs(5),
+            filter: None,
+        };
+        let mut sub = env
+            .handles
+            .bus
+            .subscribe("e2e.webhook_intercept", opts)
+            .await
+            .unwrap();
+
+        // Publish — the webhook interceptor should fire and rewrite the payload.
+        env.handles
+            .bus
+            .publish("e2e.webhook_intercept", b"original")
+            .await
+            .unwrap();
+
+        let received = tokio::time::timeout(Duration::from_secs(3), sub.rx.recv())
+            .await
+            .expect("subscriber should receive event")
+            .expect("rx should not be closed");
+        assert_eq!(received.subject, "e2e.webhook_intercept");
+        assert_eq!(
+            received.payload, b"REWRITTEN BY WEBHOOK",
+            "interceptor should have rewritten the payload"
+        );
+
+        // Cleanup: DELETE the interceptor and verify the bus no longer
+        // routes events through it.
+        let resp = reqwest::Client::new()
+            .delete(format!(
+                "http://{}/interceptors/{}",
+                env.http_addr, interceptor_id
+            ))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), 204);
+
+        env.handles.shutdown_and_join().await;
+        server_task.abort();
+    }
+
+    /// End-to-end (C3): a webhook sync interceptor that returns
+    /// `{"action": "drop"}` aborts the dispatch chain.
+    #[tokio::test]
+    async fn test_webhook_sync_interceptor_drop_e2e() {
+        use seidrum_eventbus::test_utils::{test_bus_with_transports, wait_for_http_ready};
+        use std::time::Duration;
+
+        use axum::{routing::post, Json as AJson, Router as ARouter};
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let interceptor_addr = listener.local_addr().unwrap();
+        async fn drop_handler(
+            AJson(_body): AJson<serde_json::Value>,
+        ) -> AJson<serde_json::Value> {
+            AJson(serde_json::json!({"action": "drop"}))
+        }
+        let app = ARouter::new().route("/intercept", post(drop_handler));
+        let server_task = tokio::spawn(async move {
+            let _ = axum::serve(listener, app).await;
+        });
+
+        let env = test_bus_with_transports().await;
+        wait_for_http_ready(env.http_addr).await;
+
+        let webhook_url = format!("http://{}/intercept", interceptor_addr);
+        let resp = reqwest::Client::new()
+            .post(format!("http://{}/interceptors", env.http_addr))
+            .json(&serde_json::json!({
+                "pattern": "e2e.webhook_drop",
+                "url": webhook_url,
+                "priority": 100,
+            }))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), 200);
+
+        let opts = SubscribeOpts {
+            priority: 200,
+            mode: SubscriptionMode::Async,
+            channel: ChannelConfig::InProcess,
+            timeout: Duration::from_secs(5),
+            filter: None,
+        };
+        let mut sub = env
+            .handles
+            .bus
+            .subscribe("e2e.webhook_drop", opts)
+            .await
+            .unwrap();
+
+        env.handles
+            .bus
+            .publish("e2e.webhook_drop", b"toxic")
+            .await
+            .unwrap();
+
+        let result = tokio::time::timeout(Duration::from_millis(500), sub.rx.recv()).await;
+        assert!(
+            result.is_err(),
+            "subscriber should not receive a dropped event, got {:?}",
+            result.ok().flatten().map(|e| e.payload)
+        );
+
+        env.handles.shutdown_and_join().await;
+        server_task.abort();
     }
 
     /// Test RetryConfig implements Serialize/Deserialize.

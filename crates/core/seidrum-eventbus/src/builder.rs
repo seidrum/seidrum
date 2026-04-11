@@ -1,5 +1,7 @@
 use crate::bus::{EventBus, EventBusImpl, SubscribeOpts, Subscription};
-use crate::delivery::{ChannelRegistry, DeliveryChannel, RetryConfig, RetryTask, WebhookChannel};
+use crate::delivery::{
+    ChannelRegistry, DeliveryChannel, RetryConfig, RetryTask, WebhookChannel, WebhookUrlPolicy,
+};
 use crate::dispatch::{EventFilter, Interceptor, SubscriptionInfo};
 use crate::request_reply::RequestSubscription;
 use crate::storage::compaction::CompactionTask;
@@ -99,6 +101,13 @@ pub struct EventBusBuilder {
     /// Pending channel registrations queued via `register_channel`. Drained
     /// during `build_with_handles` against the resolved registry.
     pending_channels: Vec<(String, Arc<dyn DeliveryChannel>)>,
+    /// SSRF policy for webhook URLs registered through the HTTP transport.
+    /// Defaults to `Strict`. Tests use `Permissive` to allow loopback URLs.
+    webhook_url_policy: WebhookUrlPolicy,
+    /// Mirrors `HttpServer::unsafe_allow_dev_mode`. Default `false`.
+    /// When true, sensitive HTTP endpoints stay accessible with an open
+    /// authenticator.
+    http_dev_mode: bool,
 }
 
 /// Default compaction interval: 1 hour.
@@ -178,7 +187,25 @@ impl EventBusBuilder {
             retry_query_limit: None,
             registry: None,
             pending_channels: Vec::new(),
+            webhook_url_policy: WebhookUrlPolicy::Strict,
+            http_dev_mode: false,
         }
+    }
+
+    /// Override the SSRF validation policy for webhook URLs registered
+    /// via the HTTP transport. Default `Strict` (https-only, no private
+    /// hosts). Use `Permissive` only for tests or trusted networks.
+    pub fn with_webhook_url_policy(mut self, policy: WebhookUrlPolicy) -> Self {
+        self.webhook_url_policy = policy;
+        self
+    }
+
+    /// **Dangerous.** Allow access to sensitive HTTP endpoints (currently
+    /// `GET /events/:seq`) when no real authenticator is configured.
+    /// Mirrors [`HttpServer::unsafe_allow_dev_mode`]. Default `false`.
+    pub fn unsafe_allow_http_dev_mode(mut self) -> Self {
+        self.http_dev_mode = true;
+        self
     }
 
     /// Set the event store backend.
@@ -387,11 +414,17 @@ impl EventBusBuilder {
             let registry_clone = Arc::clone(&registry);
             let webhook_clone = Arc::clone(&webhook_channel);
             let store_clone = Arc::clone(&store);
+            let webhook_policy = self.webhook_url_policy;
+            let http_dev_mode = self.http_dev_mode;
             let rx = shutdown_rx.clone();
             Some(tokio::spawn(async move {
-                let http_server =
+                let mut http_server =
                     HttpServer::with_webhook_channel(bus_clone, registry_clone, webhook_clone, rx)
-                        .with_store(store_clone);
+                        .with_store(store_clone)
+                        .with_webhook_url_policy(webhook_policy);
+                if http_dev_mode {
+                    http_server = http_server.unsafe_allow_dev_mode();
+                }
                 if let Err(e) = http_server.start(addr).await {
                     tracing::error!("HTTP server error: {}", e);
                 }

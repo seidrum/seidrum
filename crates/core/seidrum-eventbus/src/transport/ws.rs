@@ -32,8 +32,39 @@ use tracing::{debug, info, warn};
 /// Maximum number of subscriptions a single WebSocket connection may hold.
 const MAX_SUBSCRIPTIONS_PER_CONNECTION: usize = 64;
 
+/// Maximum number of remote interceptors a single WS connection may register.
+/// Stricter than the subscription cap because every event flowing through the
+/// bus pays for each registered interceptor.
+const MAX_INTERCEPTORS_PER_CONNECTION: usize = 16;
+
+/// Minimum priority value a remote-registered interceptor may use. Lower
+/// priorities run first; reserving values below this for in-process,
+/// trusted interceptors prevents a remote client from inserting itself
+/// ahead of e.g. an audit-log or rate-limit interceptor.
+const MIN_REMOTE_INTERCEPTOR_PRIORITY: u32 = 100;
+
 /// Maximum size of a single incoming WebSocket text frame (2 MiB).
 const MAX_FRAME_SIZE: usize = 2_097_152;
+
+/// Reject patterns that a remote (untrusted) caller must not be allowed to
+/// intercept. Specifically:
+/// - `_reply.*` and `_reply.>` are reserved for internal request/reply
+///   correlation. A remote interceptor on these subjects could rewrite
+///   every reply on the bus.
+/// - `>` (catch-all) gives a remote caller a hook on every event,
+///   including reply subjects via wildcard matching.
+fn validate_remote_interceptor_pattern(pattern: &str) -> Result<(), String> {
+    if pattern == ">" {
+        return Err("remote interceptors cannot register on the catch-all '>' pattern".to_string());
+    }
+    if pattern.starts_with("_reply.") || pattern == "_reply" {
+        return Err(
+            "remote interceptors cannot register on '_reply.*' (reserved for internal request/reply)"
+                .to_string(),
+        );
+    }
+    Ok(())
+}
 
 /// Authentication request context provided to the [`Authenticator`].
 ///
@@ -159,18 +190,34 @@ pub enum ClientOperation {
         #[serde(default)]
         correlation_id: Option<String>,
     },
-    /// Acknowledgment of an [`ServerMessage::Intercept`] frame.
-    ///
-    /// `action` is one of `"pass"`, `"modify"`, `"drop"`. When `action` is
-    /// `"modify"`, `payload` must be set to the new base64-encoded payload.
+    /// Acknowledgment of an [`ServerMessage::Intercept`] frame. The
+    /// `action` field is a tagged enum so the `payload` is required iff
+    /// `action == "modify"` — malformed frames are caught at parse time
+    /// rather than producing a 5s dispatch stall.
     #[serde(rename = "intercept_result")]
     InterceptResult {
         request_id: String,
-        action: String,
-        /// Required when `action == "modify"`; ignored otherwise.
-        #[serde(default)]
-        payload: Option<String>,
+        #[serde(flatten)]
+        action: WireInterceptAction,
     },
+}
+
+/// Wire-level intercept action returned by a remote sync interceptor.
+///
+/// Tagged on the `action` field so serde enforces "payload must be present
+/// when modify" at deserialise time. Intentionally distinct from the
+/// in-process [`crate::dispatch::InterceptResult`] (which carries no
+/// payload — the payload is mutated through `&mut Vec<u8>`).
+#[derive(Debug, Serialize, Deserialize, Clone, PartialEq, Eq)]
+#[serde(tag = "action", rename_all = "lowercase")]
+pub enum WireInterceptAction {
+    /// Continue dispatch unchanged.
+    Pass,
+    /// Drop the event — async subscribers do not see it.
+    Drop,
+    /// Replace the payload with `payload` (base64-encoded) and continue
+    /// dispatch with the new bytes.
+    Modify { payload: String },
 }
 
 fn default_timeout_ms() -> u64 {
@@ -327,7 +374,16 @@ impl WebSocketServer {
                             Arc::new(std::sync::Mutex::new(HashMap::new()));
                         let captured_clone = Arc::clone(&captured_headers);
 
-                        let upgrade = tokio_tungstenite::accept_hdr_async(
+                        // H3 fix: cap message and frame sizes at the wire
+                        // layer so tungstenite rejects oversized payloads
+                        // before allocating its 64 MiB default buffer.
+                        // The app-level MAX_FRAME_SIZE check at the read
+                        // loop is a defence-in-depth backup.
+                        let ws_config =
+                            tokio_tungstenite::tungstenite::protocol::WebSocketConfig::default()
+                                .max_message_size(Some(MAX_FRAME_SIZE))
+                                .max_frame_size(Some(MAX_FRAME_SIZE));
+                        let upgrade = tokio_tungstenite::accept_hdr_async_with_config(
                             socket,
                             #[allow(clippy::result_large_err)]
                             move |req: &tokio_tungstenite::tungstenite::handshake::server::Request,
@@ -340,6 +396,7 @@ impl WebSocketServer {
                                 }
                                 Ok(resp)
                             },
+                            Some(ws_config),
                         )
                         .await;
 
@@ -410,7 +467,7 @@ struct RegisteredRemoteInterceptor {
     bus_id: String,
     /// Shared pending-replies map. The read loop pushes `intercept_result`
     /// messages here; `intercept()` awaits them via oneshot.
-    proxy: Arc<crate::dispatch::WsRemoteInterceptor>,
+    proxy: Arc<crate::delivery::WsRemoteInterceptor>,
 }
 
 async fn serve_connection(
@@ -566,18 +623,13 @@ async fn serve_connection(
         );
     }
 
-    // Cancel any in-flight remote interceptor calls and unregister the
-    // proxies from the bus's interceptor chain. Pending intercept calls
-    // are signaled with `Pass` so the dispatch loop continues immediately.
+    // Cancel and unregister remote interceptor proxies. **Order matters
+    // (M3 fix):** unsubscribe from the bus FIRST so the dispatch engine
+    // can no longer find the proxy in the trie, THEN cancel pending
+    // intercept calls. The reverse order admits new intercept calls
+    // that race in between cancel_all and bus.unsubscribe — those new
+    // calls would never see the cancellation.
     if !remote_interceptors.is_empty() {
-        for entry in remote_interceptors.values() {
-            entry
-                .proxy
-                .cancel_all("WebSocket connection closed")
-                .await;
-        }
-        // Unsubscribe each one from the bus. Failures are logged but not
-        // propagated — the connection is dropping anyway.
         let interceptor_ids: Vec<String> = remote_interceptors.keys().cloned().collect();
         for id in &interceptor_ids {
             if let Err(e) = bus.unsubscribe(id).await {
@@ -586,6 +638,12 @@ async fn serve_connection(
                     id, peer_addr, e
                 );
             }
+        }
+        for entry in remote_interceptors.values() {
+            entry
+                .proxy
+                .cancel_all("WebSocket connection closed")
+                .await;
         }
         debug!(
             "Cleaned up {} remote interceptor proxies for disconnected client {}",
@@ -852,22 +910,50 @@ async fn handle_operation(
             timeout_ms,
             correlation_id,
         } => {
+            // === C1 hardening ===
+            // Reject patterns that target reserved internal subjects or
+            // the catch-all wildcard. These checks apply only to remote
+            // (untrusted) callers — in-process code can still call
+            // bus.intercept(...) on any pattern.
+            if let Err(reason) = validate_remote_interceptor_pattern(&pattern) {
+                return Err(crate::EventBusError::InvalidSubject(reason));
+            }
+            // Reserve low priorities for trusted in-process interceptors.
+            // A remote caller must accept being run after them.
+            let effective_priority = priority.max(MIN_REMOTE_INTERCEPTOR_PRIORITY);
+            // Per-connection cap so a single client can't fill the
+            // interceptor table for the whole bus.
+            if remote_interceptors.len() >= MAX_INTERCEPTORS_PER_CONNECTION {
+                return Err(crate::EventBusError::Internal(format!(
+                    "interceptor limit reached ({} max per WS connection)",
+                    MAX_INTERCEPTORS_PER_CONNECTION
+                )));
+            }
+
             // Build the proxy interceptor and register it with the bus.
-            let mut proxy = crate::dispatch::WsRemoteInterceptor::new(
+            // Use a proxy timeout slightly shorter than the engine
+            // timeout (H1 fix) so the proxy's PendingGuard reclaims the
+            // pending entry before the engine's abort_handle fires.
+            let engine_timeout =
+                timeout_ms.map(Duration::from_millis);
+            let proxy_timeout = engine_timeout
+                .map(|d| d.saturating_sub(Duration::from_millis(250)))
+                .map(|d| d.max(Duration::from_millis(100)));
+            let mut proxy = crate::delivery::WsRemoteInterceptor::new(
                 pattern.clone(),
                 forward_tx.clone(),
             );
-            if let Some(ms) = timeout_ms {
-                proxy = proxy.with_timeout(Duration::from_millis(ms));
+            if let Some(t) = proxy_timeout {
+                proxy = proxy.with_timeout(t);
             }
             let proxy = Arc::new(proxy);
 
             let bus_id = bus
                 .intercept(
                     &pattern,
-                    priority,
+                    effective_priority,
                     Arc::clone(&proxy) as Arc<dyn crate::dispatch::Interceptor>,
-                    timeout_ms.map(Duration::from_millis),
+                    engine_timeout,
                 )
                 .await?;
 
@@ -894,56 +980,32 @@ async fn handle_operation(
             }
         }
 
-        ClientOperation::InterceptResult {
-            request_id,
-            action,
-            payload,
-        } => {
+        ClientOperation::InterceptResult { request_id, action } => {
             // Translate the wire-level action into the internal struct.
-            let parsed_action = match action.as_str() {
-                "pass" => Some(crate::dispatch::WsInterceptAction::Pass),
-                "drop" => Some(crate::dispatch::WsInterceptAction::Drop),
-                "modify" => match payload {
-                    Some(p) => {
-                        match base64::engine::general_purpose::STANDARD.decode(&p) {
-                            Ok(bytes) => Some(crate::dispatch::WsInterceptAction::Modify(bytes)),
-                            Err(e) => {
-                                warn!(
-                                    request_id = %request_id,
-                                    error = %e,
-                                    "intercept_result modify payload not valid base64; ignoring"
-                                );
-                                None
-                            }
+            // Serde already enforced "modify implies payload"; we only
+            // need to validate the base64 here.
+            let parsed_action = match action {
+                WireInterceptAction::Pass => crate::delivery::WsInterceptAction::Pass,
+                WireInterceptAction::Drop => crate::delivery::WsInterceptAction::Drop,
+                WireInterceptAction::Modify { payload } => {
+                    match base64::engine::general_purpose::STANDARD.decode(&payload) {
+                        Ok(bytes) => crate::delivery::WsInterceptAction::Modify(bytes),
+                        Err(e) => {
+                            warn!(
+                                request_id = %request_id,
+                                error = %e,
+                                "intercept_result modify payload not valid base64; ignoring"
+                            );
+                            return Ok(());
                         }
                     }
-                    None => {
-                        warn!(
-                            request_id = %request_id,
-                            "intercept_result modify missing payload; ignoring"
-                        );
-                        None
-                    }
-                },
-                other => {
-                    warn!(
-                        request_id = %request_id,
-                        action = other,
-                        "intercept_result with unknown action; ignoring"
-                    );
-                    None
                 }
-            };
-
-            let parsed_action = match parsed_action {
-                Some(a) => a,
-                None => return Ok(()),
             };
 
             // Route the reply to whichever interceptor proxy is awaiting
             // it. Only one proxy will own the request_id, so we move the
             // action into the first match.
-            let mut reply_slot = Some(crate::dispatch::WsInterceptReply {
+            let mut reply_slot = Some(crate::delivery::WsInterceptReply {
                 action: parsed_action,
                 error: None,
             });

@@ -29,6 +29,7 @@
 //! `intercept()` calls with a `Pass` result so they don't hang the
 //! dispatch loop.
 
+use crate::delivery::WsOutboundFrame;
 use crate::dispatch::{InterceptResult, Interceptor};
 use async_trait::async_trait;
 use std::collections::HashMap;
@@ -37,10 +38,11 @@ use std::time::Duration;
 use tokio::sync::{mpsc, oneshot, Mutex};
 use tracing::{debug, warn};
 
-/// A serialized outbound frame to be sent to the WebSocket client.
-/// Reuses the same `String` type that [`crate::delivery::WsRemoteChannel`]
-/// pushes onto the connection's outbound queue.
-pub type WsOutboundFrame = String;
+/// Maximum concurrent in-flight intercept calls per remote interceptor.
+/// Caps memory growth when a remote client is slow or malicious — once
+/// this many calls are awaiting a reply, new intercept calls return
+/// `Pass` immediately so dispatch keeps flowing.
+pub const MAX_PENDING_INTERCEPTS: usize = 1024;
 
 /// Action returned by the remote client in response to an `intercept`
 /// frame. Mirrors [`InterceptResult`] over the wire.
@@ -127,17 +129,85 @@ impl WsRemoteInterceptor {
     }
 }
 
+/// RAII guard that removes the request_id from `pending_replies` on drop.
+///
+/// **Why this exists (H1 fix):** the dispatch engine wraps each sync
+/// interceptor call in `tokio::spawn` and applies its own timeout via
+/// `abort_handle.abort()`. When the engine's timer fires, it cancels the
+/// `intercept()` future *mid-await* — none of the manual cleanup branches
+/// in `intercept()` will run, so a `pending_replies.remove(...)` call
+/// guarded by an `if`/`match` arm is unreachable.
+///
+/// The `Drop` guard runs even on cancellation, so the entry is always
+/// reclaimed regardless of whether the engine, the proxy timeout, or a
+/// successful reply ended the call.
+struct PendingGuard {
+    pending: Arc<Mutex<HashMap<String, oneshot::Sender<WsInterceptReply>>>>,
+    request_id: String,
+    armed: bool,
+}
+
+impl PendingGuard {
+    /// Disarm the guard once the entry has already been removed by another
+    /// path (e.g. cancel_all, intercept_result handler).
+    fn disarm(mut self) {
+        self.armed = false;
+    }
+}
+
+impl Drop for PendingGuard {
+    fn drop(&mut self) {
+        if !self.armed {
+            return;
+        }
+        // Best-effort: try to remove without blocking. If we can't acquire
+        // the lock immediately, spawn a task to do it. This avoids blocking
+        // the caller's drop path even under contention.
+        let pending = Arc::clone(&self.pending);
+        let request_id = std::mem::take(&mut self.request_id);
+        let removed = if let Ok(mut guard) = pending.try_lock() {
+            guard.remove(&request_id);
+            true
+        } else {
+            false
+        };
+        if !removed {
+            tokio::spawn(async move {
+                pending.lock().await.remove(&request_id);
+            });
+        }
+    }
+}
+
 #[async_trait]
 impl Interceptor for WsRemoteInterceptor {
     async fn intercept(&self, subject: &str, payload: &mut Vec<u8>) -> InterceptResult {
         let request_id = ulid::Ulid::new().to_string();
 
-        // Register a oneshot to receive the client's reply.
+        // Register a oneshot to receive the client's reply, with a cap so a
+        // misbehaving client can't OOM the server (M2). The cap is checked
+        // while we hold the lock so the count is consistent under load.
         let (tx, rx) = oneshot::channel::<WsInterceptReply>();
         {
             let mut pending = self.pending_replies.lock().await;
+            if pending.len() >= MAX_PENDING_INTERCEPTS {
+                warn!(
+                    pattern = %self.pattern,
+                    cap = MAX_PENDING_INTERCEPTS,
+                    "WsRemoteInterceptor pending cap reached; passing event through"
+                );
+                return InterceptResult::Pass;
+            }
             pending.insert(request_id.clone(), tx);
         }
+
+        // Arm the Drop guard immediately so cancellation/panic always
+        // reclaims the pending entry.
+        let guard = PendingGuard {
+            pending: Arc::clone(&self.pending_replies),
+            request_id: request_id.clone(),
+            armed: true,
+        };
 
         // Build the intercept frame and push it to the outbound queue.
         use base64::Engine;
@@ -151,7 +221,7 @@ impl Interceptor for WsRemoteInterceptor {
         let frame_str = match serde_json::to_string(&frame) {
             Ok(s) => s,
             Err(e) => {
-                self.pending_replies.lock().await.remove(&request_id);
+                drop(guard);
                 warn!(
                     pattern = %self.pattern,
                     error = %e,
@@ -163,7 +233,7 @@ impl Interceptor for WsRemoteInterceptor {
 
         if self.outbound.send(frame_str).await.is_err() {
             // Outbound queue closed — connection is gone.
-            self.pending_replies.lock().await.remove(&request_id);
+            drop(guard);
             warn!(
                 pattern = %self.pattern,
                 "WsRemoteInterceptor outbound closed; passing event through"
@@ -173,10 +243,17 @@ impl Interceptor for WsRemoteInterceptor {
 
         // Wait for the client's reply with a timeout.
         let reply = match tokio::time::timeout(self.intercept_timeout, rx).await {
-            Ok(Ok(reply)) => reply,
+            Ok(Ok(reply)) => {
+                // The intercept_result handler removed the entry already;
+                // disarm the guard so we don't double-remove it.
+                guard.disarm();
+                reply
+            }
             Ok(Err(_)) => {
                 // oneshot sender dropped without a value — typically
-                // because the connection dropped concurrently.
+                // because cancel_all drained the map. Drop guard reclaims
+                // the entry if it's still there.
+                drop(guard);
                 warn!(
                     pattern = %self.pattern,
                     "WsRemoteInterceptor reply channel closed; passing event through"
@@ -184,9 +261,7 @@ impl Interceptor for WsRemoteInterceptor {
                 return InterceptResult::Pass;
             }
             Err(_) => {
-                // Timed out. Clean up the pending entry so a late reply
-                // doesn't leak the slot.
-                self.pending_replies.lock().await.remove(&request_id);
+                drop(guard);
                 warn!(
                     pattern = %self.pattern,
                     request_id = request_id,

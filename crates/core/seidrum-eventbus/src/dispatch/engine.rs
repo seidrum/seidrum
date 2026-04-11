@@ -79,6 +79,25 @@ tokio::task_local! {
     /// returns `EventBusError::Internal` so the interceptor's recursive
     /// `bus.publish()` call gets a clean error rather than deadlocking or
     /// recursing forever.
+    ///
+    /// **Limitation (M4):** task-locals do NOT inherit across `tokio::spawn`.
+    /// An interceptor that does:
+    /// ```ignore
+    /// async fn intercept(&self, ...) -> InterceptResult {
+    ///     let bus = self.bus.clone();
+    ///     tokio::spawn(async move {
+    ///         bus.publish("same.subject", payload).await; // NOT detected
+    ///     });
+    ///     InterceptResult::Pass
+    /// }
+    /// ```
+    /// will produce unbounded recursion because the spawned task starts
+    /// with no `INTERCEPTING_SUBJECT` set. The same applies to any
+    /// publish reached via a fresh task. The detection only catches
+    /// **direct** re-entry from within the same interceptor future.
+    /// Document this in interceptor implementations and consider an
+    /// async-aware backstop (e.g. depth counter) if you need stronger
+    /// guarantees.
     static INTERCEPTING_SUBJECT: String;
 }
 

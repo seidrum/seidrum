@@ -122,6 +122,37 @@ pub struct RetryableDelivery {
 ///
 /// In-process subscriptions are not persisted — only durable transports
 /// (webhooks) where the bus knows how to deliver after restart use this.
+///
+/// **⚠ Plaintext storage (H4):** the `headers` map is stored in clear text
+/// on disk. Operators routinely set `Authorization: Bearer …` tokens
+/// here. The redb backend enforces file mode `0600` on Unix to limit
+/// exposure to the process owner, but anyone who can read the redb file
+/// (process under the same UID, backup tarballs, container snapshots)
+/// can recover the tokens. Encrypt header values at the application
+/// layer before passing them to `POST /subscribe` if this matters for
+/// your threat model.
+/// What kind of bus binding a [`PersistedSubscription`] represents.
+///
+/// `AsyncWebhook` (default for compatibility) is the original subscription
+/// type — the bus delivers each matching event to the URL via HTTP POST
+/// and ignores the response body.
+///
+/// `SyncInterceptor` (C3 — Phase 4 D6 webhook half) is a sync interceptor:
+/// the bus POSTs the event to the URL and parses the response body as a
+/// `{"action": "pass" | "modify" | "drop", "payload": "<b64>?"}` JSON
+/// document. The action drives the in-process interceptor chain just
+/// like a `WsRemoteInterceptor`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum PersistedSubscriptionKind {
+    /// Original async webhook (fire-and-forget). Default so existing
+    /// persisted entries from before the C3 PR continue to deserialize.
+    #[default]
+    AsyncWebhook,
+    /// Sync interceptor delivered via webhook POST.
+    SyncInterceptor,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PersistedSubscription {
     /// Stable identifier for the persisted entry. Different from the
@@ -137,4 +168,9 @@ pub struct PersistedSubscription {
     pub priority: u32,
     /// Unix-millis timestamp of when this entry was first persisted.
     pub created_at: u64,
+    /// Whether this entry is an async webhook or a sync interceptor.
+    /// Defaults to `AsyncWebhook` for backwards compatibility with
+    /// entries persisted before the C3 PR landed.
+    #[serde(default)]
+    pub kind: PersistedSubscriptionKind,
 }

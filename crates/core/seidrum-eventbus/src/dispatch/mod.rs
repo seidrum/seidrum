@@ -12,12 +12,8 @@ pub mod engine;
 pub mod filter;
 pub mod interceptor;
 pub mod subject_index;
-pub mod ws_remote_interceptor;
 
 pub use engine::{DispatchEngine, SubscriptionInfo};
 pub use filter::EventFilter;
 pub use interceptor::{InterceptResult, Interceptor};
 pub use subject_index::{SubscriptionEntry, SubscriptionMode};
-pub use ws_remote_interceptor::{
-    WsInterceptAction, WsInterceptReply, WsRemoteInterceptor,
-};
