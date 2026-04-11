@@ -32,31 +32,48 @@ pub const MIN_REMOTE_INTERCEPTOR_PRIORITY: u32 = 100;
 /// dispatch chain for more than `MAX_REMOTE_INTERCEPTOR_TIMEOUT_MS`.
 pub const MAX_REMOTE_INTERCEPTOR_TIMEOUT_MS: u64 = 2000;
 
-/// Errors returned by [`validate_remote_interceptor_pattern`].
+/// Maximum length of a remote-supplied subject pattern. Prevents
+/// pathological 2-MiB pattern strings from triggering O(N) work in
+/// the validator and the trie. 256 chars is more than enough for any
+/// realistic subject hierarchy.
+pub const MAX_REMOTE_PATTERN_LENGTH: usize = 256;
+
+/// Errors returned by [`validate_remote_pattern`].
 #[derive(Debug, thiserror::Error)]
-pub enum InterceptorPatternError {
-    #[error("interceptor pattern is empty")]
+pub enum RemotePatternError {
+    #[error("pattern is empty")]
     Empty,
-    #[error("interceptor pattern '{0}' may not match the catch-all '>' / '*' wildcard at the first token (would intercept all events including reserved '_reply.*' subjects)")]
+    #[error("pattern length {0} exceeds maximum {1}")]
+    TooLong(usize, usize),
+    #[error("pattern '{0}' may not match the catch-all '>' / '*' wildcard at the first token (would match reserved '_reply.*' subjects)")]
     UnboundedPrefix(String),
-    #[error("interceptor pattern '{0}' targets a reserved internal subject ('_reply' / '_reply.*')")]
+    #[error("pattern '{0}' targets a reserved internal subject ('_reply' / '_reply.*')")]
     Reserved(String),
-    #[error("interceptor pattern '{0}' contains leading/trailing whitespace")]
+    #[error("pattern '{0}' contains leading/trailing whitespace")]
     Whitespace(String),
-    #[error("interceptor pattern '{0}' contains an invalid token: {1}")]
+    #[error("pattern '{0}' contains a NUL byte")]
+    NulByte(String),
+    #[error("pattern '{0}' contains an invalid token: {1}")]
     InvalidToken(String, String),
 }
 
+/// Backwards-compat alias for [`RemotePatternError`]. The previous
+/// "interceptor-only" name is preserved so external code that imported
+/// the error type continues to compile.
+pub type InterceptorPatternError = RemotePatternError;
+
 /// Validate that a subject pattern is safe for a **remote** caller to
-/// register an interceptor on.
+/// register against — applies equally to interceptors and subscriptions.
 ///
-/// **Why this exists (B1):** the prior validator only blocked the
-/// literal `>` and any pattern with prefix `_reply.`. It missed
-/// `*.>`, `*.*`, and similar wildcards in the first token, which
-/// the trie happily matches against `_reply.{ulid}` (the internal
-/// request/reply correlation subjects). A remote interceptor
-/// registered on `*.>` could observe, modify, or drop every reply on
-/// the bus.
+/// **Why this exists (B1 + F1):** the prior validator only blocked
+/// the literal `>` and any pattern with prefix `_reply.`. It missed
+/// `*.>`, `*.*`, and similar wildcards in the first token, which the
+/// trie happily matches against `_reply.{ulid}` (the internal
+/// request/reply correlation subjects). A remote subscriber or
+/// interceptor registered on `*.>` could observe, modify, or drop
+/// every reply on the bus. The fix originally landed for the
+/// interceptor path (B1); F1 extends it to subscribe paths since
+/// `POST /subscribe` and the WS `subscribe` op were equally affected.
 ///
 /// The fix is token-aware: the pattern is split on `.` and the
 /// **first token must be a concrete literal** (no `*`, no `>`, and
@@ -64,14 +81,29 @@ pub enum InterceptorPatternError {
 /// caller can still subscribe to `events.*` or `events.>`, just not
 /// to anything that could match `_reply.X`.
 ///
-/// In-process callers that go through `EventBus::intercept` directly
-/// are NOT subject to this check — they're trusted.
-pub fn validate_remote_interceptor_pattern(pattern: &str) -> Result<(), InterceptorPatternError> {
+/// **Hardening (F8):** also rejects patterns longer than
+/// [`MAX_REMOTE_PATTERN_LENGTH`] and any pattern containing a NUL
+/// byte (which the engine would reject anyway, but layering checks
+/// keeps the failure mode predictable for the caller).
+///
+/// In-process callers that go through `EventBus::intercept` /
+/// `EventBus::subscribe` directly are NOT subject to this check —
+/// they're trusted.
+pub fn validate_remote_pattern(pattern: &str) -> Result<(), RemotePatternError> {
     if pattern.is_empty() {
-        return Err(InterceptorPatternError::Empty);
+        return Err(RemotePatternError::Empty);
+    }
+    if pattern.len() > MAX_REMOTE_PATTERN_LENGTH {
+        return Err(RemotePatternError::TooLong(
+            pattern.len(),
+            MAX_REMOTE_PATTERN_LENGTH,
+        ));
+    }
+    if pattern.contains('\0') {
+        return Err(RemotePatternError::NulByte(pattern.to_string()));
     }
     if pattern != pattern.trim() {
-        return Err(InterceptorPatternError::Whitespace(pattern.to_string()));
+        return Err(RemotePatternError::Whitespace(pattern.to_string()));
     }
 
     // Token-aware analysis.
@@ -82,7 +114,7 @@ pub fn validate_remote_interceptor_pattern(pattern: &str) -> Result<(), Intercep
     // accept these but a remote caller has no business sending them.
     for tok in &tokens {
         if tok.is_empty() {
-            return Err(InterceptorPatternError::InvalidToken(
+            return Err(RemotePatternError::InvalidToken(
                 pattern.to_string(),
                 "empty token (consecutive or leading dots)".to_string(),
             ));
@@ -94,19 +126,28 @@ pub fn validate_remote_interceptor_pattern(pattern: &str) -> Result<(), Intercep
     // `>` in the first position would otherwise let the pattern
     // match every subject including `_reply.{ulid}`.
     if first == "*" || first == ">" {
-        return Err(InterceptorPatternError::UnboundedPrefix(pattern.to_string()));
+        return Err(RemotePatternError::UnboundedPrefix(pattern.to_string()));
     }
     if first == "_reply" {
-        return Err(InterceptorPatternError::Reserved(pattern.to_string()));
+        return Err(RemotePatternError::Reserved(pattern.to_string()));
     }
     // Reject anything that starts with `_reply.` even though the
     // first-token check above already covers exactly `_reply` —
     // belt-and-suspenders against future tokenizer changes.
     if pattern.starts_with("_reply.") {
-        return Err(InterceptorPatternError::Reserved(pattern.to_string()));
+        return Err(RemotePatternError::Reserved(pattern.to_string()));
     }
 
     Ok(())
+}
+
+/// Backwards-compat alias for [`validate_remote_pattern`].
+#[deprecated(
+    since = "0.2.0",
+    note = "use validate_remote_pattern — the pattern validator now applies to subscriptions as well as interceptors"
+)]
+pub fn validate_remote_interceptor_pattern(pattern: &str) -> Result<(), RemotePatternError> {
+    validate_remote_pattern(pattern)
 }
 
 /// Clamp a remote-registered interceptor priority to the safe floor.
@@ -166,55 +207,85 @@ mod tests {
     #[test]
     fn test_pattern_concrete_first_token_accepted() {
         // Concrete first-token, anything else after — accepted.
-        assert!(validate_remote_interceptor_pattern("events.audit").is_ok());
-        assert!(validate_remote_interceptor_pattern("events.>").is_ok());
-        assert!(validate_remote_interceptor_pattern("events.*").is_ok());
-        assert!(validate_remote_interceptor_pattern("events.user.*").is_ok());
-        assert!(validate_remote_interceptor_pattern("a").is_ok());
+        assert!(validate_remote_pattern("events.audit").is_ok());
+        assert!(validate_remote_pattern("events.>").is_ok());
+        assert!(validate_remote_pattern("events.*").is_ok());
+        assert!(validate_remote_pattern("events.user.*").is_ok());
+        assert!(validate_remote_pattern("a").is_ok());
     }
 
     #[test]
     fn test_pattern_wildcard_first_token_rejected() {
         // *. anything → blocked
-        assert!(validate_remote_interceptor_pattern("*").is_err());
-        assert!(validate_remote_interceptor_pattern("*.>").is_err());
-        assert!(validate_remote_interceptor_pattern("*.*").is_err());
-        assert!(validate_remote_interceptor_pattern("*.foo.bar").is_err());
+        assert!(validate_remote_pattern("*").is_err());
+        assert!(validate_remote_pattern("*.>").is_err());
+        assert!(validate_remote_pattern("*.*").is_err());
+        assert!(validate_remote_pattern("*.foo.bar").is_err());
         // > on its own → blocked
-        assert!(validate_remote_interceptor_pattern(">").is_err());
+        assert!(validate_remote_pattern(">").is_err());
     }
 
     #[test]
     fn test_pattern_reply_subjects_rejected() {
-        assert!(validate_remote_interceptor_pattern("_reply").is_err());
-        assert!(validate_remote_interceptor_pattern("_reply.foo").is_err());
-        assert!(validate_remote_interceptor_pattern("_reply.*").is_err());
-        assert!(validate_remote_interceptor_pattern("_reply.>").is_err());
+        assert!(validate_remote_pattern("_reply").is_err());
+        assert!(validate_remote_pattern("_reply.foo").is_err());
+        assert!(validate_remote_pattern("_reply.*").is_err());
+        assert!(validate_remote_pattern("_reply.>").is_err());
     }
 
     #[test]
     fn test_pattern_whitespace_rejected() {
-        assert!(validate_remote_interceptor_pattern(" events.foo").is_err());
-        assert!(validate_remote_interceptor_pattern("events.foo ").is_err());
-        assert!(validate_remote_interceptor_pattern("events.foo\n").is_err());
+        assert!(validate_remote_pattern(" events.foo").is_err());
+        assert!(validate_remote_pattern("events.foo ").is_err());
+        assert!(validate_remote_pattern("events.foo\n").is_err());
     }
 
     #[test]
     fn test_pattern_empty_rejected() {
-        assert!(validate_remote_interceptor_pattern("").is_err());
+        assert!(validate_remote_pattern("").is_err());
     }
 
     #[test]
     fn test_pattern_empty_token_rejected() {
-        assert!(validate_remote_interceptor_pattern(".foo").is_err());
-        assert!(validate_remote_interceptor_pattern("foo..bar").is_err());
+        assert!(validate_remote_pattern(".foo").is_err());
+        assert!(validate_remote_pattern("foo..bar").is_err());
     }
 
     #[test]
     fn test_pattern_underscored_non_reply_accepted() {
         // `_reply` is the only reserved literal — other underscore-prefixed
         // tokens (e.g. `_internal.foo`) are fine for remote callers.
-        assert!(validate_remote_interceptor_pattern("_internal.foo").is_ok());
+        assert!(validate_remote_pattern("_internal.foo").is_ok());
+    }
+
+    #[test]
+    fn test_pattern_length_capped() {
+        // F8: reject pathological pattern lengths to prevent O(N) work
+        // at parse time on huge inputs.
+        let too_long = format!("a.{}", "x".repeat(MAX_REMOTE_PATTERN_LENGTH));
+        assert!(matches!(
+            validate_remote_pattern(&too_long),
+            Err(RemotePatternError::TooLong(_, _))
+        ));
+        // Just under the cap is fine.
+        let ok = "a".repeat(MAX_REMOTE_PATTERN_LENGTH);
+        assert!(validate_remote_pattern(&ok).is_ok());
+    }
+
+    #[test]
+    fn test_pattern_nul_byte_rejected() {
+        // F8: NUL bytes are not whitespace, so a `_reply\0.foo` could
+        // sneak past the trim check. Engine validate_subject would
+        // reject it later, but layering checks keeps the failure mode
+        // predictable.
+        assert!(matches!(
+            validate_remote_pattern("_reply\0.foo"),
+            Err(RemotePatternError::NulByte(_))
+        ));
+        assert!(matches!(
+            validate_remote_pattern("events.\0foo"),
+            Err(RemotePatternError::NulByte(_))
+        ));
     }
 
     #[test]

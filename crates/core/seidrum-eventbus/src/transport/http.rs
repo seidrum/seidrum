@@ -83,7 +83,7 @@ pub trait HttpAuthenticator: Send + Sync + 'static {
     /// Returns `true` if this authenticator does NOT actually verify
     /// requests (e.g. [`NoHttpAuth`]). The HTTP server uses this to
     /// refuse "sensitive" endpoints — `GET /events/:seq` (data
-    /// exfiltration vector) — unless [`HttpServer::unsafe_allow_dev_mode`]
+    /// exfiltration vector) — unless [`HttpServer::unsafe_allow_http_dev_mode`]
     /// has been called explicitly.
     ///
     /// Default `false`. Real authenticator implementations should leave
@@ -97,7 +97,7 @@ pub trait HttpAuthenticator: Send + Sync + 'static {
 ///
 /// Returns `is_open() == true`, so by default a server using `NoHttpAuth`
 /// will refuse `GET /events/:seq` with 401. Tests and dev environments
-/// can opt back in via `HttpServer::unsafe_allow_dev_mode()`.
+/// can opt back in via `HttpServer::unsafe_allow_http_dev_mode()`.
 pub struct NoHttpAuth;
 
 #[async_trait::async_trait]
@@ -131,6 +131,22 @@ pub struct AppState {
     /// table or unbounded-grow the redb subscriptions table via
     /// `POST /interceptors` (B3).
     pub interceptor_count: Arc<AtomicUsize>,
+    /// Set of bus subscription ids that were registered through
+    /// `POST /interceptors` (i.e. SyncInterceptor kind). Used by
+    /// `DELETE /interceptors/:id` to refuse cross-type deletion of an
+    /// async webhook subscription via the wrong endpoint, and to
+    /// keep `interceptor_count` consistent. Mirrors a similar set
+    /// for subscriptions tracked separately. (F4 fix.)
+    pub interceptor_ids:
+        Arc<tokio::sync::RwLock<std::collections::HashSet<String>>>,
+    /// Set of bus subscription ids that were registered through
+    /// `POST /subscribe` (AsyncWebhook kind). Used by
+    /// `DELETE /subscribe/:id` for symmetric cross-type protection.
+    pub subscription_ids:
+        Arc<tokio::sync::RwLock<std::collections::HashSet<String>>>,
+    /// **F13** Rate limiter for state-changing registration ops.
+    /// Tuple is (window_start_unix_secs, request_count_in_window).
+    pub registration_rate: Arc<std::sync::Mutex<(u64, u64)>>,
     /// SSRF validation policy applied to webhook URLs in `/subscribe`
     /// and during persisted-subscription recreation on startup.
     pub webhook_url_policy: crate::delivery::WebhookUrlPolicy,
@@ -290,7 +306,7 @@ pub struct HttpServer {
     /// When `true`, "sensitive" endpoints (currently `GET /events/:seq`)
     /// are reachable even when the configured authenticator is open
     /// (e.g. `NoHttpAuth`). Default `false`. Tests opt in via
-    /// `unsafe_allow_dev_mode`. Production deployments leave this off.
+    /// `unsafe_allow_http_dev_mode`. Production deployments leave this off.
     dev_mode: bool,
 }
 
@@ -413,6 +429,23 @@ impl HttpServer {
         let bus_to_persisted: Arc<
             tokio::sync::RwLock<std::collections::HashMap<String, String>>,
         > = Arc::new(tokio::sync::RwLock::new(std::collections::HashMap::new()));
+        let interceptor_ids: Arc<
+            tokio::sync::RwLock<std::collections::HashSet<String>>,
+        > = Arc::new(tokio::sync::RwLock::new(std::collections::HashSet::new()));
+        let subscription_ids: Arc<
+            tokio::sync::RwLock<std::collections::HashSet<String>>,
+        > = Arc::new(tokio::sync::RwLock::new(std::collections::HashSet::new()));
+
+        // F12: warn at startup if dev mode was opted into. Operators
+        // who left this on accidentally see it on every boot.
+        if self.dev_mode {
+            warn!(
+                "HTTP server starting with unsafe_allow_http_dev_mode=TRUE — \
+                 sensitive endpoints (POST /subscribe, POST /interceptors, \
+                 GET /events/:seq) are accessible without a real authenticator. \
+                 Disable in production."
+            );
+        }
 
         // Recreate persisted subscriptions from the store. Each persisted
         // entry becomes a fresh bus subscription with a new bus id; the
@@ -451,6 +484,8 @@ impl HttpServer {
                     &subscription_count,
                     &interceptor_count,
                     &bus_to_persisted,
+                    &subscription_ids,
+                    &interceptor_ids,
                     &entry,
                     self.webhook_url_policy,
                 )
@@ -495,6 +530,9 @@ impl HttpServer {
             interceptor_count,
             store: self.store.clone(),
             bus_to_persisted,
+            interceptor_ids,
+            subscription_ids,
+            registration_rate: Arc::new(std::sync::Mutex::new((0, 0))),
             webhook_url_policy: self.webhook_url_policy,
             dev_mode: self.dev_mode,
         };
@@ -662,12 +700,15 @@ enum RecreateOutcome {
 /// is classified as a permanent failure and `start()` will delete it from
 /// the store. Subscription-cap exhaustion is transient and preserves the
 /// entry for the next restart.
+#[allow(clippy::too_many_arguments)]
 async fn recreate_persisted_subscription(
     bus: &Arc<dyn EventBus>,
     webhook_channel: &Arc<WebhookChannel>,
     subscription_count: &Arc<AtomicUsize>,
     interceptor_count: &Arc<AtomicUsize>,
     bus_to_persisted: &Arc<tokio::sync::RwLock<HashMap<String, String>>>,
+    subscription_ids: &Arc<tokio::sync::RwLock<std::collections::HashSet<String>>>,
+    interceptor_ids: &Arc<tokio::sync::RwLock<std::collections::HashSet<String>>>,
     entry: &crate::storage::PersistedSubscription,
     policy: crate::delivery::WebhookUrlPolicy,
 ) -> RecreateOutcome {
@@ -687,6 +728,7 @@ async fn recreate_persisted_subscription(
                 webhook_channel,
                 subscription_count,
                 bus_to_persisted,
+                subscription_ids,
                 entry,
             )
             .await
@@ -696,6 +738,7 @@ async fn recreate_persisted_subscription(
                 bus,
                 interceptor_count,
                 bus_to_persisted,
+                interceptor_ids,
                 entry,
                 policy,
             )
@@ -709,6 +752,7 @@ async fn recreate_persisted_async_webhook(
     webhook_channel: &Arc<WebhookChannel>,
     subscription_count: &Arc<AtomicUsize>,
     bus_to_persisted: &Arc<tokio::sync::RwLock<HashMap<String, String>>>,
+    subscription_ids: &Arc<tokio::sync::RwLock<std::collections::HashSet<String>>>,
     entry: &crate::storage::PersistedSubscription,
 ) -> RecreateOutcome {
     // Reserve a slot up front. If we exceed the limit, roll back and bail.
@@ -750,6 +794,7 @@ async fn recreate_persisted_async_webhook(
         .write()
         .await
         .insert(bus_id.clone(), entry.persisted_id.clone());
+    subscription_ids.write().await.insert(bus_id.clone());
 
     spawn_webhook_delivery_task(
         Arc::clone(webhook_channel),
@@ -766,6 +811,7 @@ async fn recreate_persisted_sync_interceptor(
     bus: &Arc<dyn EventBus>,
     interceptor_count: &Arc<AtomicUsize>,
     bus_to_persisted: &Arc<tokio::sync::RwLock<HashMap<String, String>>>,
+    interceptor_ids: &Arc<tokio::sync::RwLock<std::collections::HashSet<String>>>,
     entry: &crate::storage::PersistedSubscription,
     policy: crate::delivery::WebhookUrlPolicy,
 ) -> RecreateOutcome {
@@ -774,7 +820,7 @@ async fn recreate_persisted_sync_interceptor(
     // policy that was tightened across releases can't be bypassed by
     // entries persisted under the older policy.
 
-    if let Err(e) = crate::transport::validate_remote_interceptor_pattern(&entry.pattern) {
+    if let Err(e) = crate::transport::validate_remote_pattern(&entry.pattern) {
         return RecreateOutcome::PermanentFailure(format!(
             "pattern no longer permitted: {}",
             e
@@ -832,7 +878,8 @@ async fn recreate_persisted_sync_interceptor(
     bus_to_persisted
         .write()
         .await
-        .insert(bus_id, entry.persisted_id.clone());
+        .insert(bus_id.clone(), entry.persisted_id.clone());
+    interceptor_ids.write().await.insert(bus_id);
 
     RecreateOutcome::Recreated
 }
@@ -851,6 +898,21 @@ async fn create_subscription(
 ) -> Result<Json<SubscribeResponse>, HttpError> {
     // B4: refuse state-changing webhook registration under open auth.
     refuse_if_unauth_state_changing(&state, "POST /subscribe")?;
+    // F13: rate limit before any work.
+    check_registration_rate_limit(&state)?;
+
+    // F1: token-aware pattern validation. Prior to F1 only the
+    // interceptor path was hardened — POST /subscribe accepted
+    // `_reply.>` / `*.>` patterns and let an attacker hijack every
+    // reply on the bus by registering a webhook subscription on the
+    // matching wildcard. The same shared validator now applies here.
+    if let Err(e) = crate::transport::validate_remote_pattern(&req.pattern) {
+        return Err(http_error_with_code(
+            StatusCode::BAD_REQUEST,
+            e.to_string(),
+            "INVALID_SUBSCRIBE_PATTERN",
+        ));
+    }
 
     // Validate the webhook URL up front so a failed validation doesn't
     // touch the bus or counter at all. SSRF mitigation (C2).
@@ -933,10 +995,18 @@ async fn create_subscription(
             .write()
             .await
             .insert(sub_id.clone(), persisted_id.clone());
+        // F4: track this id as an AsyncWebhook subscription so DELETE
+        // can refuse cross-type deletion.
+        state
+            .subscription_ids
+            .write()
+            .await
+            .insert(sub_id.clone());
 
         if let Err(e) = store.save_subscription(&entry).await {
-            // Roll back the mapping AND the bus subscription.
+            // Roll back the mapping, the type set, and the bus subscription.
             state.bus_to_persisted.write().await.remove(&sub_id);
+            state.subscription_ids.write().await.remove(&sub_id);
             if let Err(unsub_err) = state.bus.unsubscribe(&sub_id).await {
                 warn!(
                     sub_id = %sub_id,
@@ -954,6 +1024,14 @@ async fn create_subscription(
                 format!("failed to persist subscription: {}", e),
             ));
         }
+    } else {
+        // No store configured — still track the bus id so DELETE can
+        // refuse cross-type deletion even without persistence.
+        state
+            .subscription_ids
+            .write()
+            .await
+            .insert(sub_id.clone());
     }
 
     spawn_webhook_delivery_task(
@@ -976,10 +1054,27 @@ async fn create_subscription(
 ///
 /// Unsubscribes from the bus and, if a store is configured, also deletes
 /// the persisted entry so it does not get recreated on next restart.
+///
+/// **F4 fix:** refuses to delete an id that wasn't registered as an
+/// AsyncWebhook subscription via this endpoint. Cross-type deletion
+/// (e.g. trying to delete a SyncInterceptor via DELETE /subscribe/:id)
+/// returns 404 instead of corrupting counters.
 async fn remove_subscription(
     State(state): State<AppState>,
     Path(id): Path<String>,
 ) -> Result<StatusCode, HttpError> {
+    // F4: refuse cross-type deletion. The set is checked-and-removed
+    // atomically so a concurrent DELETE on the same id only succeeds
+    // for one caller.
+    let was_present = state.subscription_ids.write().await.remove(&id);
+    if !was_present {
+        return Err(http_error_with_code(
+            StatusCode::NOT_FOUND,
+            format!("subscription {} not found", id),
+            "SUBSCRIPTION_NOT_FOUND",
+        ));
+    }
+
     state.bus.unsubscribe(&id).await.map_err(|e| {
         warn!("Unsubscribe failed for id {}: {}", id, e);
         http_error(StatusCode::INTERNAL_SERVER_ERROR, format!("{}", e))
@@ -1011,6 +1106,15 @@ async fn remove_subscription(
 /// Independent of subscription count because interceptors run on every
 /// matching publish whereas subscriptions just receive events.
 const MAX_HTTP_INTERCEPTORS: usize = 64;
+
+/// **F13 rate limit**: maximum number of state-changing webhook
+/// registration requests (`POST /subscribe` + `POST /interceptors` +
+/// the matching DELETEs) allowed per
+/// `WEBHOOK_REGISTRATION_RATE_WINDOW_SECS` window. Combined with
+/// the per-server caps (B3 / MAX_HTTP_SUBSCRIPTIONS) this prevents
+/// the persistence layer from being hammered by a POST/DELETE loop.
+const WEBHOOK_REGISTRATION_RATE_LIMIT: u64 = 100;
+const WEBHOOK_REGISTRATION_RATE_WINDOW_SECS: u64 = 60;
 
 /// Refuse a state-changing webhook-registration request when the
 /// configured authenticator is open (e.g. [`NoHttpAuth`]) and dev mode
@@ -1050,6 +1154,39 @@ fn http_error_invalid_webhook_url() -> HttpError {
     )
 }
 
+/// **F13 rate limiter**: enforce a sliding-ish-window cap on
+/// state-changing registration ops. The window resets when the
+/// current time crosses a `WEBHOOK_REGISTRATION_RATE_WINDOW_SECS`
+/// boundary; counts within a window are summed. Crude but effective
+/// against the POST/DELETE write-amplification loop.
+fn check_registration_rate_limit(state: &AppState) -> Result<(), HttpError> {
+    let now_secs = std::time::SystemTime::now()
+        .duration_since(std::time::SystemTime::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    let window_idx = now_secs / WEBHOOK_REGISTRATION_RATE_WINDOW_SECS;
+
+    let mut guard = state.registration_rate.lock().unwrap();
+    let (current_window, count) = *guard;
+    if current_window != window_idx {
+        // New window — reset.
+        *guard = (window_idx, 1);
+        return Ok(());
+    }
+    if count >= WEBHOOK_REGISTRATION_RATE_LIMIT {
+        return Err(http_error_with_code(
+            StatusCode::TOO_MANY_REQUESTS,
+            format!(
+                "registration rate limit reached ({} req/{}s)",
+                WEBHOOK_REGISTRATION_RATE_LIMIT, WEBHOOK_REGISTRATION_RATE_WINDOW_SECS
+            ),
+            "REGISTRATION_RATE_LIMIT",
+        ));
+    }
+    *guard = (window_idx, count + 1);
+    Ok(())
+}
+
 /// Register a webhook-backed sync interceptor (C3 — Phase 4 D6 webhook half).
 ///
 /// Hardening (post-re-review):
@@ -1066,9 +1203,11 @@ async fn create_interceptor(
 ) -> Result<Json<RegisterInterceptorResponse>, HttpError> {
     // B4: refuse state-changing webhook registration under open auth.
     refuse_if_unauth_state_changing(&state, "POST /interceptors")?;
+    // F13: rate limit before any work.
+    check_registration_rate_limit(&state)?;
 
     // B1: shared token-aware pattern validator.
-    if let Err(e) = crate::transport::validate_remote_interceptor_pattern(&req.pattern) {
+    if let Err(e) = crate::transport::validate_remote_pattern(&req.pattern) {
         return Err(http_error_with_code(
             StatusCode::BAD_REQUEST,
             e.to_string(),
@@ -1166,10 +1305,18 @@ async fn create_interceptor(
             .write()
             .await
             .insert(bus_id.clone(), persisted_id.clone());
+        // F4: track this id as a SyncInterceptor so DELETE can refuse
+        // cross-type deletion.
+        state
+            .interceptor_ids
+            .write()
+            .await
+            .insert(bus_id.clone());
 
         if let Err(e) = store.save_subscription(&entry).await {
-            // Roll back mapping, bus registration, and cap counter.
+            // Roll back mapping, type set, bus registration, cap counter.
             state.bus_to_persisted.write().await.remove(&bus_id);
+            state.interceptor_ids.write().await.remove(&bus_id);
             if let Err(unsub_err) = state.bus.unsubscribe(&bus_id).await {
                 warn!(
                     bus_id = %bus_id,
@@ -1187,6 +1334,13 @@ async fn create_interceptor(
                 format!("failed to persist interceptor: {}", e),
             ));
         }
+    } else {
+        // No store configured — still track the bus id.
+        state
+            .interceptor_ids
+            .write()
+            .await
+            .insert(bus_id.clone());
     }
 
     debug!(
@@ -1198,35 +1352,44 @@ async fn create_interceptor(
 }
 
 /// Remove a webhook-backed sync interceptor previously registered via
-/// `POST /interceptors`. Idempotent — returns 204 even if the id is
-/// unknown to the bus.
+/// `POST /interceptors`. Returns 404 if the id is not a known
+/// SyncInterceptor (cross-type deletion of an async webhook
+/// subscription is refused — the prior implementation walked the bus
+/// trie and accidentally destroyed the wrong kind, corrupting the
+/// counter).
 async fn remove_interceptor(
     State(state): State<AppState>,
     Path(id): Path<String>,
 ) -> Result<StatusCode, HttpError> {
-    // Track whether the bus actually had the entry (to decide whether
-    // to decrement the cap counter — DELETE is idempotent so unknown
-    // ids must not double-decrement).
-    let was_present = state
-        .bus
-        .list_subscriptions(None)
-        .await
-        .map(|subs| subs.iter().any(|s| s.id == id))
-        .unwrap_or(false);
+    // F4: atomic check-and-remove on the type-segregated set. Prevents
+    // (a) double-decrement on idempotent DELETEs, (b) cross-type
+    // deletion via the wrong endpoint.
+    let was_present = state.interceptor_ids.write().await.remove(&id);
+    if !was_present {
+        return Err(http_error_with_code(
+            StatusCode::NOT_FOUND,
+            format!("interceptor {} not found", id),
+            "INTERCEPTOR_NOT_FOUND",
+        ));
+    }
 
-    state.bus.unsubscribe(&id).await.map_err(|e| {
+    if let Err(e) = state.bus.unsubscribe(&id).await {
+        // Bus said no — put the id back into the set so a retry can
+        // succeed. Don't decrement the counter.
+        state.interceptor_ids.write().await.insert(id.clone());
         warn!("Interceptor unsubscribe failed for id {}: {}", id, e);
-        http_error(StatusCode::INTERNAL_SERVER_ERROR, format!("{}", e))
-    })?;
+        return Err(http_error(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("{}", e),
+        ));
+    }
 
-    if was_present {
-        // Decrement the cap counter so a subsequent register can use
-        // the slot. Saturating sub guards against any edge case where
-        // the counter is already 0.
-        let prev = state.interceptor_count.load(Ordering::Relaxed);
-        if prev > 0 {
-            state.interceptor_count.fetch_sub(1, Ordering::Relaxed);
-        }
+    // Decrement the cap counter. Saturating sub guards against any edge
+    // case where the counter is already 0 (e.g. recreate failed but
+    // somehow left an entry in the set).
+    let prev = state.interceptor_count.load(Ordering::Relaxed);
+    if prev > 0 {
+        state.interceptor_count.fetch_sub(1, Ordering::Relaxed);
     }
 
     if let Some(store) = &state.store {

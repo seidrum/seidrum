@@ -453,6 +453,9 @@ mod tests {
     /// interceptor task mid-await, the PendingGuard's Drop impl must
     /// reclaim the pending_replies entry. Without the guard, that entry
     /// would leak forever.
+    ///
+    /// **F15 fix:** uses bounded polls instead of fixed sleeps so the
+    /// test is robust under loaded CI without giving up correctness.
     #[tokio::test]
     async fn test_pending_guard_reclaims_on_abort() {
         let (tx, _rx) = mpsc::channel::<WsOutboundFrame>(8);
@@ -462,36 +465,45 @@ mod tests {
         );
         let pending_handle = interceptor.pending_replies();
 
-        // Spawn the interceptor call and abort it after a moment.
+        // Spawn the interceptor call and abort it after the entry is
+        // registered.
         let interceptor_clone = Arc::clone(&interceptor);
         let task = tokio::spawn(async move {
             let mut p = b"x".to_vec();
             interceptor_clone.intercept("test.abort", &mut p).await
         });
 
-        // Let the call register its pending entry.
-        tokio::time::sleep(Duration::from_millis(20)).await;
-
-        // Sanity: the entry is in the map.
-        assert_eq!(
-            pending_handle.lock().await.len(),
-            1,
-            "pending entry should be present before abort"
-        );
+        // Bounded poll for the pending entry to appear (instead of a
+        // fixed sleep that may be too short under CI load).
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(2);
+        loop {
+            if pending_handle.lock().await.len() == 1 {
+                break;
+            }
+            if tokio::time::Instant::now() >= deadline {
+                panic!("pending entry never registered before deadline");
+            }
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
 
         // Abort mid-await — this is what the engine timeout does.
         task.abort();
         let _ = task.await;
 
-        // Give the Drop guard's spawn-task a beat to run if it had to
-        // fall back from try_lock.
-        tokio::time::sleep(Duration::from_millis(20)).await;
-
-        // The entry must be gone.
-        assert_eq!(
-            pending_handle.lock().await.len(),
-            0,
-            "PendingGuard Drop impl must reclaim the pending entry on abort"
-        );
+        // Bounded poll for the entry to be reclaimed by the Drop guard.
+        // The guard may use try_lock or fall back to a spawned removal
+        // task, so we can't assume single-step completion.
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(2);
+        loop {
+            if pending_handle.lock().await.is_empty() {
+                break;
+            }
+            if tokio::time::Instant::now() >= deadline {
+                panic!(
+                    "PendingGuard Drop impl did not reclaim the pending entry within 2s"
+                );
+            }
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
     }
 }

@@ -1551,6 +1551,588 @@ mod tests {
         server_task.abort();
     }
 
+    /// **F1 / B1 subscribe-side regression**: `POST /subscribe`
+    /// rejects `_reply.>`, `*.>`, `*.*` patterns at the API layer.
+    /// Without this, an attacker could subscribe to every reply on
+    /// the bus via webhook delivery.
+    #[tokio::test]
+    async fn test_http_subscribe_rejects_bypass_patterns() {
+        use seidrum_eventbus::test_utils::{test_bus_with_transports, wait_for_http_ready};
+
+        let env = test_bus_with_transports().await;
+        wait_for_http_ready(env.http_addr).await;
+
+        let bypass_patterns = [">", "*.>", "*.*", "_reply", "_reply.>", "_reply.foo"];
+        for pattern in bypass_patterns {
+            let resp = reqwest::Client::new()
+                .post(format!("http://{}/subscribe", env.http_addr))
+                .json(&serde_json::json!({
+                    "pattern": pattern,
+                    "url": "http://127.0.0.1:1/never-called",
+                    "priority": 0,
+                }))
+                .send()
+                .await
+                .unwrap();
+            assert_eq!(
+                resp.status(),
+                400,
+                "subscribe pattern {:?} must be rejected",
+                pattern
+            );
+            let body: serde_json::Value = resp.json().await.unwrap();
+            assert_eq!(body["code"], "INVALID_SUBSCRIBE_PATTERN");
+        }
+
+        env.handles.shutdown_and_join().await;
+    }
+
+    /// **F1 / B1 WS subscribe-side regression**: WS `subscribe` op
+    /// rejects bypass patterns and never registers the subscription.
+    #[tokio::test]
+    async fn test_ws_subscribe_rejects_bypass_patterns() {
+        use futures_util::{SinkExt, StreamExt};
+        use seidrum_eventbus::test_utils::{test_bus_with_transports, wait_for_ws_ready};
+        use std::time::Duration;
+        use tokio_tungstenite::tungstenite::Message;
+
+        let env = test_bus_with_transports().await;
+        wait_for_ws_ready(env.ws_addr).await;
+
+        let url = format!("ws://{}", env.ws_addr);
+        let (ws_stream, _) = tokio_tungstenite::connect_async(&url).await.unwrap();
+        let (mut write, mut read) = ws_stream.split();
+
+        for pattern in [">", "*.>", "_reply.>"] {
+            write
+                .send(Message::text(
+                    serde_json::json!({
+                        "op": "subscribe",
+                        "pattern": pattern,
+                    })
+                    .to_string(),
+                ))
+                .await
+                .unwrap();
+
+            let msg = tokio::time::timeout(Duration::from_secs(2), read.next())
+                .await
+                .unwrap()
+                .unwrap()
+                .unwrap();
+            let parsed: serde_json::Value =
+                serde_json::from_str(msg.to_text().unwrap()).unwrap();
+            assert_eq!(
+                parsed["op"], "error",
+                "WS subscribe with pattern {:?} must error",
+                pattern
+            );
+        }
+
+        env.handles.shutdown_and_join().await;
+    }
+
+    /// **F2 / WS B4 regression**: under default `NoAuth` (without
+    /// dev mode), `register_interceptor` and `register_channel_type`
+    /// are refused with an error.
+    #[tokio::test]
+    async fn test_ws_register_blocked_under_open_auth() {
+        use futures_util::{SinkExt, StreamExt};
+        use seidrum_eventbus::storage::memory_store::InMemoryEventStore;
+        use seidrum_eventbus::test_utils::{pick_ephemeral_addr, wait_for_ws_ready};
+        use std::sync::Arc as SArc;
+        use std::time::Duration;
+        use tokio_tungstenite::tungstenite::Message;
+
+        let store = SArc::new(InMemoryEventStore::new());
+        let ws_addr = pick_ephemeral_addr();
+        // No `unsafe_allow_ws_dev_mode()`.
+        let handles = EventBusBuilder::new()
+            .storage(store)
+            .with_websocket(ws_addr)
+            .build_with_handles()
+            .await
+            .unwrap();
+        wait_for_ws_ready(ws_addr).await;
+
+        let url = format!("ws://{}", ws_addr);
+        let (ws_stream, _) = tokio_tungstenite::connect_async(&url).await.unwrap();
+        let (mut write, mut read) = ws_stream.split();
+
+        // register_interceptor should be refused.
+        write
+            .send(Message::text(
+                serde_json::json!({
+                    "op": "register_interceptor",
+                    "pattern": "events.foo",
+                })
+                .to_string(),
+            ))
+            .await
+            .unwrap();
+        let msg = tokio::time::timeout(Duration::from_secs(2), read.next())
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+        let parsed: serde_json::Value = serde_json::from_str(msg.to_text().unwrap()).unwrap();
+        assert_eq!(parsed["op"], "error");
+        assert!(
+            parsed["message"]
+                .as_str()
+                .unwrap_or("")
+                .contains("AUTH_REQUIRED"),
+            "expected AUTH_REQUIRED, got {:?}",
+            parsed
+        );
+
+        // register_channel_type should also be refused.
+        write
+            .send(Message::text(
+                serde_json::json!({
+                    "op": "register_channel_type",
+                    "channel_type": "mqtt",
+                })
+                .to_string(),
+            ))
+            .await
+            .unwrap();
+        let msg = tokio::time::timeout(Duration::from_secs(2), read.next())
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+        let parsed: serde_json::Value = serde_json::from_str(msg.to_text().unwrap()).unwrap();
+        assert_eq!(parsed["op"], "error");
+        assert!(parsed["message"]
+            .as_str()
+            .unwrap_or("")
+            .contains("AUTH_REQUIRED"));
+
+        handles.shutdown_and_join().await;
+    }
+
+    /// **F3 / register_channel_type validation regression**: reserved
+    /// names and empty/control-character names are rejected.
+    #[tokio::test]
+    async fn test_ws_register_channel_type_validation() {
+        use futures_util::{SinkExt, StreamExt};
+        use seidrum_eventbus::test_utils::{test_bus_with_transports, wait_for_ws_ready};
+        use std::time::Duration;
+        use tokio_tungstenite::tungstenite::Message;
+
+        let env = test_bus_with_transports().await;
+        wait_for_ws_ready(env.ws_addr).await;
+
+        let url = format!("ws://{}", env.ws_addr);
+        let (ws_stream, _) = tokio_tungstenite::connect_async(&url).await.unwrap();
+        let (mut write, mut read) = ws_stream.split();
+
+        // Reserved names and invalid forms must error.
+        for name in ["webhook", "websocket", "in_process", ""] {
+            write
+                .send(Message::text(
+                    serde_json::json!({
+                        "op": "register_channel_type",
+                        "channel_type": name,
+                    })
+                    .to_string(),
+                ))
+                .await
+                .unwrap();
+            let msg = tokio::time::timeout(Duration::from_secs(2), read.next())
+                .await
+                .unwrap()
+                .unwrap()
+                .unwrap();
+            let parsed: serde_json::Value =
+                serde_json::from_str(msg.to_text().unwrap()).unwrap();
+            assert_eq!(
+                parsed["op"], "error",
+                "channel name {:?} must be rejected",
+                name
+            );
+        }
+
+        env.handles.shutdown_and_join().await;
+    }
+
+    /// **F4 / cross-type DELETE regression**: DELETE /interceptors/:id
+    /// with a subscription id returns 404 instead of corrupting state.
+    #[tokio::test]
+    async fn test_http_delete_cross_type_returns_404() {
+        use seidrum_eventbus::test_utils::{test_bus_with_transports, wait_for_http_ready};
+
+        let env = test_bus_with_transports().await;
+        wait_for_http_ready(env.http_addr).await;
+
+        // Register a subscription.
+        let resp = reqwest::Client::new()
+            .post(format!("http://{}/subscribe", env.http_addr))
+            .json(&serde_json::json!({
+                "pattern": "cross.test",
+                "url": "http://127.0.0.1:1/never-called",
+                "priority": 0,
+            }))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), 200);
+        let body: serde_json::Value = resp.json().await.unwrap();
+        let sub_id = body["id"].as_str().unwrap().to_string();
+
+        // DELETE via /interceptors/:id should 404 — wrong type.
+        let resp = reqwest::Client::new()
+            .delete(format!("http://{}/interceptors/{}", env.http_addr, sub_id))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), 404);
+        let body: serde_json::Value = resp.json().await.unwrap();
+        assert_eq!(body["code"], "INTERCEPTOR_NOT_FOUND");
+
+        // The original subscription must STILL be alive (not destroyed
+        // by the cross-type DELETE).
+        let subs = env.handles.bus.list_subscriptions(None).await.unwrap();
+        assert!(
+            subs.iter().any(|s| s.id == sub_id),
+            "subscription must survive cross-type DELETE attempt"
+        );
+
+        // Symmetric: register an interceptor, try DELETE via /subscribe/:id.
+        let resp = reqwest::Client::new()
+            .post(format!("http://{}/interceptors", env.http_addr))
+            .json(&serde_json::json!({
+                "pattern": "cross.intercept",
+                "url": "http://127.0.0.1:1/never-called",
+                "priority": 100,
+            }))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), 200);
+        let body: serde_json::Value = resp.json().await.unwrap();
+        let int_id = body["id"].as_str().unwrap().to_string();
+
+        let resp = reqwest::Client::new()
+            .delete(format!("http://{}/subscribe/{}", env.http_addr, int_id))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), 404);
+        let body: serde_json::Value = resp.json().await.unwrap();
+        assert_eq!(body["code"], "SUBSCRIPTION_NOT_FOUND");
+
+        env.handles.shutdown_and_join().await;
+    }
+
+    /// **F5 + N1 regression**: a `WebhookChannel` configured with
+    /// `Strict` policy refuses to deliver to an `http://127.0.0.1`
+    /// URL — the per-call validate-and-pin path returns Permanent.
+    #[tokio::test]
+    async fn test_webhook_channel_strict_rejects_loopback_at_deliver_time() {
+        use seidrum_eventbus::delivery::{
+            ChannelConfig, DeliveryChannel, DeliveryError, WebhookChannel, WebhookUrlPolicy,
+        };
+        use std::collections::HashMap as StdHashMap;
+
+        let channel = WebhookChannel::with_policy(WebhookUrlPolicy::Strict);
+        let config = ChannelConfig::Webhook {
+            url: "http://127.0.0.1:1/hook".to_string(),
+            headers: StdHashMap::new(),
+        };
+        let result = channel
+            .deliver(b"event", "test.subject", &config)
+            .await;
+        // Must be Permanent so the retry task doesn't keep trying.
+        assert!(
+            matches!(result, Err(DeliveryError::Permanent(_))),
+            "expected Permanent, got {:?}",
+            result
+        );
+    }
+
+    /// **F5 + N1 regression**: a `WebhookInterceptor` configured with
+    /// `Strict` policy returns `Pass` for an `http://127.0.0.1` URL —
+    /// the per-call validate-and-pin path keeps dispatch flowing.
+    #[tokio::test]
+    async fn test_webhook_interceptor_strict_rejects_loopback_at_intercept_time() {
+        use seidrum_eventbus::delivery::{WebhookInterceptor, WebhookUrlPolicy};
+        use seidrum_eventbus::dispatch::{InterceptResult, Interceptor};
+        use std::collections::HashMap as StdHashMap;
+
+        let interceptor = WebhookInterceptor::with_policy(
+            "test.subject".to_string(),
+            "http://127.0.0.1:1/hook".to_string(),
+            StdHashMap::new(),
+            WebhookUrlPolicy::Strict,
+        );
+        let mut payload = b"x".to_vec();
+        let result = interceptor.intercept("test.subject", &mut payload).await;
+        assert_eq!(result, InterceptResult::Pass);
+        // Payload preserved (not Modify).
+        assert_eq!(payload, b"x");
+    }
+
+    /// **N5 regression**: a custom `EventStore` that returns `Err` on
+    /// `list_subscriptions` causes the HTTP server to warn-and-continue
+    /// rather than panic. The bus still serves traffic; subscribe/
+    /// /interceptors POSTs return 500 because save_subscription is also
+    /// not supported.
+    #[tokio::test]
+    async fn test_list_subscriptions_err_warn_and_continue() {
+        use async_trait::async_trait;
+        use seidrum_eventbus::storage::{
+            memory_store::InMemoryEventStore, DeliveryStatus, EventStatus, EventStore,
+            RetryableDelivery, StorageResult, StoredEvent,
+        };
+        use seidrum_eventbus::test_utils::{pick_ephemeral_addr, wait_for_http_ready};
+        use std::sync::Arc as SArc;
+        use std::time::Duration;
+
+        // Wrapper that delegates to InMemoryEventStore for everything
+        // except subscription-persistence methods, which return Err.
+        struct NoSubsStore(InMemoryEventStore);
+
+        #[async_trait]
+        impl EventStore for NoSubsStore {
+            async fn append(&self, event: &StoredEvent) -> StorageResult<u64> {
+                self.0.append(event).await
+            }
+            async fn get(&self, seq: u64) -> StorageResult<Option<StoredEvent>> {
+                self.0.get(seq).await
+            }
+            async fn update_status(
+                &self,
+                seq: u64,
+                status: EventStatus,
+            ) -> StorageResult<()> {
+                self.0.update_status(seq, status).await
+            }
+            async fn record_delivery(
+                &self,
+                seq: u64,
+                subscriber_id: &str,
+                status: DeliveryStatus,
+                error: Option<String>,
+                next_retry: Option<u64>,
+            ) -> StorageResult<()> {
+                self.0
+                    .record_delivery(seq, subscriber_id, status, error, next_retry)
+                    .await
+            }
+            async fn query_by_status(
+                &self,
+                status: EventStatus,
+                limit: usize,
+            ) -> StorageResult<Vec<StoredEvent>> {
+                self.0.query_by_status(status, limit).await
+            }
+            async fn query_by_subject(
+                &self,
+                subject: &str,
+                since: Option<u64>,
+                limit: usize,
+            ) -> StorageResult<Vec<StoredEvent>> {
+                self.0.query_by_subject(subject, since, limit).await
+            }
+            async fn query_retryable(
+                &self,
+                max_attempts: u32,
+                limit: usize,
+            ) -> StorageResult<Vec<RetryableDelivery>> {
+                self.0.query_retryable(max_attempts, limit).await
+            }
+            async fn compact(&self, older_than: Duration) -> StorageResult<u64> {
+                self.0.compact(older_than).await
+            }
+            // Default impls return Err for the subscription methods
+            // — exactly the regression we want to test.
+        }
+
+        let store: SArc<dyn EventStore> = SArc::new(NoSubsStore(InMemoryEventStore::new()));
+        let addr = pick_ephemeral_addr();
+        let handles = EventBusBuilder::new()
+            .storage(store)
+            .with_http(addr)
+            .with_webhook_url_policy(seidrum_eventbus::delivery::WebhookUrlPolicy::Permissive)
+            .unsafe_allow_http_dev_mode()
+            .build_with_handles()
+            .await
+            .unwrap();
+        wait_for_http_ready(addr).await;
+
+        // The bus is operational despite the missing list_subscriptions
+        // support. Publish + GET /events/:seq still works.
+        let seq = handles.bus.publish("warn.continue", b"hi").await.unwrap();
+        assert!(seq > 0);
+
+        // POST /subscribe returns 500 because save_subscription errors.
+        let resp = reqwest::Client::new()
+            .post(format!("http://{}/subscribe", addr))
+            .json(&serde_json::json!({
+                "pattern": "any.subject",
+                "url": "http://127.0.0.1:1/hook",
+                "priority": 0,
+            }))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), 500);
+
+        // The PersistedSubscription mapping for that bus subscription
+        // was rolled back, so the bus has no leaked subscription.
+        let subs = handles.bus.list_subscriptions(None).await.unwrap();
+        assert_eq!(
+            subs.iter().filter(|s| s.pattern == "any.subject").count(),
+            0,
+            "rollback should have removed the bus subscription"
+        );
+        // Suppress unused: just confirm the handles are alive.
+        let _ = seq;
+
+        handles.shutdown_and_join().await;
+    }
+
+    /// **N4 regression**: a persisted entry whose pattern is no
+    /// longer accepted by the validator (e.g. an old `>` pattern that
+    /// the F1/B1 fix now rejects) is garbage-collected on restart
+    /// instead of repeatedly retrying.
+    #[tokio::test]
+    async fn test_recreate_gcs_invalid_pattern() {
+        use seidrum_eventbus::storage::{
+            memory_store::InMemoryEventStore, EventStore, PersistedSubscription,
+        };
+        use seidrum_eventbus::test_utils::{pick_ephemeral_addr, wait_for_http_ready};
+        use std::sync::Arc as SArc;
+        use std::time::Duration;
+
+        let store: SArc<dyn EventStore> = SArc::new(InMemoryEventStore::new());
+
+        // Plant an entry that the new validator will reject.
+        let bad_entry = PersistedSubscription::new_sync_interceptor(
+            "bad-1",
+            ">", // catch-all — now blocked
+            "https://hook.example.com/intercept",
+            std::collections::HashMap::new(),
+            100,
+            1000,
+            None,
+        );
+        store.save_subscription(&bad_entry).await.unwrap();
+        assert_eq!(store.list_subscriptions().await.unwrap().len(), 1);
+
+        let addr = pick_ephemeral_addr();
+        let handles = EventBusBuilder::new()
+            .storage(SArc::clone(&store))
+            .with_http(addr)
+            .with_webhook_url_policy(seidrum_eventbus::delivery::WebhookUrlPolicy::Permissive)
+            .unsafe_allow_http_dev_mode()
+            .build_with_handles()
+            .await
+            .unwrap();
+        wait_for_http_ready(addr).await;
+
+        // The bad entry should have been deleted as PermanentFailure.
+        // Give startup a beat to complete recreate.
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        assert_eq!(
+            store.list_subscriptions().await.unwrap().len(),
+            0,
+            "permanently-failed entry must be GC'd"
+        );
+
+        handles.shutdown_and_join().await;
+    }
+
+    /// **F9 regression**: webhook sync interceptor envelope carries
+    /// `seq` and `stored_at` so operators can correlate the POST to a
+    /// stored event.
+    #[tokio::test]
+    async fn test_webhook_interceptor_envelope_carries_seq_and_stored_at() {
+        use axum::{
+            extract::State as ASt, routing::post, Json as AJson, Router as ARouter,
+        };
+        use seidrum_eventbus::test_utils::{test_bus_with_transports, wait_for_http_ready};
+        use std::sync::{Arc as SArc, Mutex};
+        use std::time::Duration;
+
+        // Mock that records the parsed body and returns Pass.
+        type Captured = SArc<Mutex<Option<serde_json::Value>>>;
+        let captured: Captured = SArc::new(Mutex::new(None));
+        let captured_clone = SArc::clone(&captured);
+
+        async fn handler(
+            ASt(captured): ASt<Captured>,
+            AJson(body): AJson<serde_json::Value>,
+        ) -> AJson<serde_json::Value> {
+            *captured.lock().unwrap() = Some(body);
+            AJson(serde_json::json!({"action": "pass"}))
+        }
+        let app = ARouter::new()
+            .route("/intercept", post(handler))
+            .with_state(captured_clone);
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let interceptor_addr = listener.local_addr().unwrap();
+        let server_task = tokio::spawn(async move {
+            let _ = axum::serve(listener, app).await;
+        });
+        seidrum_eventbus::test_utils::wait_for_tcp_ready(interceptor_addr).await;
+
+        let env = test_bus_with_transports().await;
+        wait_for_http_ready(env.http_addr).await;
+
+        // Register the webhook interceptor.
+        let resp = reqwest::Client::new()
+            .post(format!("http://{}/interceptors", env.http_addr))
+            .json(&serde_json::json!({
+                "pattern": "envelope.test",
+                "url": format!("http://{}/intercept", interceptor_addr),
+                "priority": 100,
+            }))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), 200);
+
+        // Publish — the engine assigns a non-zero seq, the interceptor
+        // task scopes the seq + stored_at task-locals, and the
+        // WebhookInterceptor reads them into the body.
+        let seq = env
+            .handles
+            .bus
+            .publish("envelope.test", b"hello")
+            .await
+            .unwrap();
+        assert!(seq > 0);
+
+        // Bounded poll for the captured body.
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(2);
+        loop {
+            if captured.lock().unwrap().is_some() {
+                break;
+            }
+            if tokio::time::Instant::now() >= deadline {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+
+        let snapshot: Option<serde_json::Value> = captured.lock().unwrap().clone();
+        let body = snapshot.expect("interceptor should have been called");
+        assert_eq!(body["subject"].as_str().unwrap(), "envelope.test");
+        assert_eq!(body["seq"].as_u64().unwrap(), seq);
+        assert!(
+            body["stored_at"].as_u64().is_some_and(|v| v > 0),
+            "envelope must contain a non-zero stored_at, got {:?}",
+            body["stored_at"]
+        );
+
+        env.handles.shutdown_and_join().await;
+        server_task.abort();
+    }
+
     /// Test RetryConfig implements Serialize/Deserialize.
     #[test]
     fn test_retry_config_serde() {

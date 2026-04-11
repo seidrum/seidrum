@@ -33,8 +33,8 @@ pub use in_process::InProcessChannel;
 pub use registry::ChannelRegistry;
 pub use retry::{calculate_backoff, next_retry_after, RetryConfig, RetryTask};
 pub use webhook::{
-    validate_webhook_url, validate_webhook_url_with_policy, WebhookChannel, WebhookUrlError,
-    WebhookUrlPolicy,
+    validate_webhook_url, validate_webhook_url_resolved, validate_webhook_url_with_policy,
+    ValidatedWebhookUrl, WebhookChannel, WebhookUrlError, WebhookUrlPolicy,
 };
 pub use webhook_interceptor::WebhookInterceptor;
 pub use websocket::{WebSocketChannel, WebSocketMessage};

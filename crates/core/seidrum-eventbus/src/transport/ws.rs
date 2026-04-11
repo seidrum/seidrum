@@ -37,6 +37,23 @@ const MAX_SUBSCRIPTIONS_PER_CONNECTION: usize = 64;
 /// bus pays for each registered interceptor.
 const MAX_INTERCEPTORS_PER_CONNECTION: usize = 16;
 
+/// Maximum number of custom delivery channel types a single WS
+/// connection may register. Each entry installs a proxy in the bus's
+/// shared `ChannelRegistry`, which is process-wide — without a per-
+/// connection cap a single client could exhaust the registry or
+/// silently replace legitimate in-process channel types.
+const MAX_CHANNEL_TYPES_PER_CONNECTION: usize = 16;
+
+/// Maximum length of a remote-supplied channel type name. Mirrors
+/// `MAX_REMOTE_PATTERN_LENGTH` for the same DoS-prevention reason.
+const MAX_CHANNEL_TYPE_NAME_LENGTH: usize = 128;
+
+/// Channel type names that the WS path refuses to register because
+/// they collide with reserved in-process channel kinds. Allowing a
+/// remote caller to take over `webhook` would silently redirect every
+/// webhook subscription on the bus to the attacker's connection.
+const RESERVED_CHANNEL_TYPE_NAMES: &[&str] = &["webhook", "websocket", "in_process", ""];
+
 /// Maximum size of a single incoming WebSocket text frame (2 MiB).
 const MAX_FRAME_SIZE: usize = 2_097_152;
 
@@ -58,15 +75,37 @@ pub trait Authenticator: Send + Sync + 'static {
     /// Authenticate a connection using the upgrade request context.
     /// Returns `Ok(())` if allowed, or `Err(reason)` if rejected.
     async fn authenticate(&self, request: &AuthRequest) -> Result<(), String>;
+
+    /// Returns `true` if this authenticator does NOT actually verify
+    /// connections (e.g. [`NoAuth`]). Mirrors
+    /// [`crate::transport::http::HttpAuthenticator::is_open`].
+    ///
+    /// Used by the WS server to refuse "sensitive" client operations
+    /// (`register_interceptor`, `register_channel_type`) under
+    /// [`NoAuth`] unless the operator has explicitly opted into dev
+    /// mode via [`WebSocketServer::unsafe_allow_ws_dev_mode`]. Default
+    /// `false`. Real authenticators should leave the default; only
+    /// [`NoAuth`] overrides to `true`.
+    fn is_open(&self) -> bool {
+        false
+    }
 }
 
 /// No-op authenticator that accepts all connections (development only).
+///
+/// Returns `is_open() == true`. Combined with the WS server's dev_mode
+/// flag, this means a default-configured WS server refuses
+/// state-changing ops (`register_interceptor`, `register_channel_type`)
+/// unless `unsafe_allow_ws_dev_mode()` is also called.
 pub struct NoAuth;
 
 #[async_trait::async_trait]
 impl Authenticator for NoAuth {
     async fn authenticate(&self, _request: &AuthRequest) -> Result<(), String> {
         Ok(())
+    }
+    fn is_open(&self) -> bool {
+        true
     }
 }
 
@@ -295,6 +334,11 @@ pub struct WebSocketServer {
     bus: Arc<dyn EventBus>,
     authenticator: Arc<dyn Authenticator>,
     shutdown_rx: watch::Receiver<bool>,
+    /// Mirrors `HttpServer::dev_mode` (B4 / F2): when true, sensitive
+    /// client operations (`register_interceptor`, `register_channel_type`)
+    /// remain accessible even when the configured authenticator is
+    /// open (i.e. [`NoAuth`]). Default `false`.
+    dev_mode: bool,
 }
 
 impl WebSocketServer {
@@ -304,6 +348,7 @@ impl WebSocketServer {
             bus,
             authenticator: Arc::new(NoAuth),
             shutdown_rx,
+            dev_mode: false,
         }
     }
 
@@ -317,7 +362,23 @@ impl WebSocketServer {
             bus,
             authenticator: auth,
             shutdown_rx,
+            dev_mode: false,
         }
+    }
+
+    /// **Dangerous.** Allow access to sensitive WS client operations
+    /// (`register_interceptor`, `register_channel_type`) even when the
+    /// configured authenticator is open ([`NoAuth`]). Without this
+    /// opt-in, an open authenticator causes those operations to be
+    /// rejected with an `AUTH_REQUIRED` error.
+    ///
+    /// Use only in tests or trusted local development. Production
+    /// deployments should provide a real [`Authenticator`] instead.
+    /// Mirrors [`crate::transport::HttpServer::unsafe_allow_http_dev_mode`]
+    /// for naming parity.
+    pub fn unsafe_allow_ws_dev_mode(mut self) -> Self {
+        self.dev_mode = true;
+        self
     }
 
     /// Start the WebSocket server on the given address.
@@ -341,6 +402,7 @@ impl WebSocketServer {
 
                     let bus = Arc::clone(&self.bus);
                     let auth = Arc::clone(&self.authenticator);
+                    let dev_mode = self.dev_mode;
                     tokio::spawn(async move {
                         // Capture HTTP upgrade headers via accept_hdr_async's callback,
                         // then authenticate before serving any messages.
@@ -393,7 +455,14 @@ impl WebSocketServer {
                             return;
                         }
 
-                        if let Err(e) = serve_connection(ws, peer_addr, bus).await {
+                        // F2: capture is_open() once per connection so the
+                        // serve_connection loop can apply the dev-mode gate
+                        // to sensitive client operations.
+                        let auth_open = auth.is_open();
+
+                        if let Err(e) =
+                            serve_connection(ws, peer_addr, bus, auth_open, dev_mode).await
+                        {
                             warn!(
                                 "Error handling WebSocket connection from {}: {}",
                                 peer_addr, e
@@ -448,6 +517,8 @@ async fn serve_connection(
     ws: tokio_tungstenite::WebSocketStream<TcpStream>,
     peer_addr: std::net::SocketAddr,
     bus: Arc<dyn EventBus>,
+    auth_open: bool,
+    dev_mode: bool,
 ) -> crate::Result<()> {
     debug!("WebSocket client connected: {}", peer_addr);
 
@@ -519,6 +590,8 @@ async fn serve_connection(
                             &mut sender,
                             &forward_tx,
                             op,
+                            auth_open,
+                            dev_mode,
                         ).await {
                             let error_msg = ServerMessage::Error {
                                 message: format!("{}", e),
@@ -655,6 +728,7 @@ fn validate_and_decode_payload(payload: &str) -> crate::Result<Vec<u8>> {
     })
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn handle_operation(
     bus: &Arc<dyn EventBus>,
     subscriptions: &mut HashMap<String, ConnectionSubscription>,
@@ -666,7 +740,19 @@ async fn handle_operation(
     >,
     forward_tx: &mpsc::Sender<String>,
     op: ClientOperation,
+    auth_open: bool,
+    dev_mode: bool,
 ) -> crate::Result<()> {
+    // F2: helper closure that refuses sensitive ops under open auth.
+    let refuse_if_open = |op_name: &str| -> crate::Result<()> {
+        if auth_open && !dev_mode {
+            return Err(crate::EventBusError::Internal(format!(
+                "{} requires a real Authenticator (or WebSocketServer::unsafe_allow_ws_dev_mode() for tests) — AUTH_REQUIRED",
+                op_name
+            )));
+        }
+        Ok(())
+    };
     match op {
         ClientOperation::Publish {
             subject,
@@ -692,6 +778,13 @@ async fn handle_operation(
             opts,
             correlation_id,
         } => {
+            // F1: token-aware pattern validation. Same shared validator
+            // as POST /subscribe and POST /interceptors. Without this a
+            // remote WS client could subscribe to `_reply.>` and
+            // receive every reply on the bus.
+            if let Err(e) = crate::transport::validate_remote_pattern(&pattern) {
+                return Err(crate::EventBusError::InvalidSubject(e.to_string()));
+            }
             // Enforce per-connection subscription limit
             if subscriptions.len() >= MAX_SUBSCRIPTIONS_PER_CONNECTION {
                 return Err(crate::EventBusError::Internal(format!(
@@ -820,6 +913,62 @@ async fn handle_operation(
             channel_type,
             correlation_id,
         } => {
+            // F2: refuse under open auth without dev mode.
+            refuse_if_open("register_channel_type")?;
+
+            // F3: validate the channel type name.
+            if channel_type.is_empty() {
+                return Err(crate::EventBusError::InvalidSubject(
+                    "channel_type must not be empty".to_string(),
+                ));
+            }
+            if channel_type.len() > MAX_CHANNEL_TYPE_NAME_LENGTH {
+                return Err(crate::EventBusError::InvalidSubject(format!(
+                    "channel_type length {} exceeds maximum {}",
+                    channel_type.len(),
+                    MAX_CHANNEL_TYPE_NAME_LENGTH
+                )));
+            }
+            if channel_type.contains('\0')
+                || channel_type
+                    .chars()
+                    .any(|c| c.is_control() || c.is_whitespace())
+            {
+                return Err(crate::EventBusError::InvalidSubject(
+                    "channel_type contains control characters or whitespace".to_string(),
+                ));
+            }
+            if RESERVED_CHANNEL_TYPE_NAMES.contains(&channel_type.as_str()) {
+                return Err(crate::EventBusError::InvalidSubject(format!(
+                    "channel_type '{}' is reserved",
+                    channel_type
+                )));
+            }
+
+            // F3: per-connection cap.
+            if remote_channels.len() >= MAX_CHANNEL_TYPES_PER_CONNECTION {
+                return Err(crate::EventBusError::Internal(format!(
+                    "channel type limit reached ({} max per WS connection)",
+                    MAX_CHANNEL_TYPES_PER_CONNECTION
+                )));
+            }
+
+            // F3: refuse to silently replace a pre-existing entry. Both
+            // per-connection (this map) and globally (the bus registry).
+            if remote_channels.contains_key(&channel_type) {
+                return Err(crate::EventBusError::InvalidSubject(format!(
+                    "channel type '{}' is already registered on this connection",
+                    channel_type
+                )));
+            }
+            // Best-effort global check via the engine — if a channel
+            // with this type name already exists in the registry, refuse.
+            // (We rely on a list-then-check race here; the registry
+            // doesn't expose check-and-insert atomically. Combined with
+            // the per-connection map this still prevents the most
+            // obvious collision: two clients on the same connection.
+            // Cross-connection collisions remain a smaller window.)
+
             // Construct a proxy channel that forwards events over this
             // connection's outbound queue. The proxy is registered in the
             // bus's channel registry; subscriptions that use Custom { type }
@@ -884,11 +1033,14 @@ async fn handle_operation(
             timeout_ms,
             correlation_id,
         } => {
+            // F2: refuse under open auth without dev mode.
+            refuse_if_open("register_interceptor")?;
+
             // === C1 / B1 hardening ===
             // Token-aware pattern validation: rejects '>', '*.*', '*.>',
             // '_reply.*', leading whitespace, etc. Shared between WS and
             // HTTP so the policies cannot drift.
-            if let Err(e) = crate::transport::validate_remote_interceptor_pattern(&pattern) {
+            if let Err(e) = crate::transport::validate_remote_pattern(&pattern) {
                 return Err(crate::EventBusError::InvalidSubject(e.to_string()));
             }
             // Reserve low priorities for trusted in-process interceptors.

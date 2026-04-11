@@ -89,16 +89,20 @@ pub mod transport;
 pub use builder::{BusHandles, EventBusBuilder};
 pub use bus::{BusMetrics, EventBus, EventBusImpl, SubscribeOpts, Subscription};
 pub use delivery::{
-    validate_webhook_url, validate_webhook_url_with_policy, ChannelConfig, ChannelRegistry,
-    DeliveryChannel, DeliveryError, DeliveryReceipt, DeliveryResult, WebSocketChannel,
-    WebhookChannel, WebhookInterceptor, WebhookUrlError, WebhookUrlPolicy, WsInterceptAction,
-    WsInterceptReply, WsRemoteInterceptor,
+    validate_webhook_url, validate_webhook_url_resolved, validate_webhook_url_with_policy,
+    ChannelConfig, ChannelRegistry, DeliveryChannel, DeliveryError, DeliveryReceipt,
+    DeliveryResult, ValidatedWebhookUrl, WebSocketChannel, WebhookChannel, WebhookInterceptor,
+    WebhookUrlError, WebhookUrlPolicy, WsInterceptAction, WsInterceptReply, WsRemoteInterceptor,
 };
 pub use dispatch::{EventFilter, InterceptResult, Interceptor, SubscriptionInfo, SubscriptionMode};
 pub use request_reply::{DispatchedEvent, Replier, RequestMessage, RequestSubscription};
-pub use storage::{EventStatus, EventStore, PersistedSubscription, PersistedSubscriptionKind, StoredEvent};
+pub use storage::{
+    EventStatus, EventStore, PersistedSubscription, PersistedSubscriptionKind, StoredEvent,
+};
 pub use transport::{
-    HttpAuthenticator, HttpServer, NoHttpAuth, WebSocketServer, MAX_REMOTE_INTERCEPTOR_TIMEOUT_MS,
+    clamp_remote_interceptor_priority, clamp_remote_interceptor_timeout,
+    validate_remote_pattern, HttpAuthenticator, HttpServer, NoHttpAuth, RemotePatternError,
+    WebSocketServer, MAX_REMOTE_INTERCEPTOR_TIMEOUT_MS, MAX_REMOTE_PATTERN_LENGTH,
     MIN_REMOTE_INTERCEPTOR_PRIORITY,
 };
 
@@ -209,6 +213,7 @@ pub mod test_utils {
             .with_websocket(ws_addr)
             .with_webhook_url_policy(crate::delivery::WebhookUrlPolicy::Permissive)
             .unsafe_allow_http_dev_mode()
+            .unsafe_allow_ws_dev_mode()
             .build_with_handles()
             .await
             .unwrap();

@@ -47,7 +47,7 @@
 //! `reqwest::Client` configured with `redirect(Policy::none())` so a
 //! server can't 302 the request to a private address.
 
-use crate::delivery::{validate_webhook_url_with_policy, WebhookUrlPolicy};
+use crate::delivery::{validate_webhook_url_resolved, WebhookUrlPolicy};
 use crate::dispatch::{InterceptResult, Interceptor};
 use async_trait::async_trait;
 use base64::Engine;
@@ -143,28 +143,80 @@ impl WebhookInterceptor {
 #[async_trait]
 impl Interceptor for WebhookInterceptor {
     async fn intercept(&self, subject: &str, payload: &mut Vec<u8>) -> InterceptResult {
-        // N1: re-validate the URL against the policy on every call so a
-        // DNS rebinding attack (host that resolved to a public IP at
-        // registration now resolves to 127.0.0.1) returns Pass instead
-        // of forwarding the (potentially-secret) payload to an internal
-        // address. Returning Pass keeps dispatch flowing.
-        if let Err(e) = validate_webhook_url_with_policy(&self.url, self.policy) {
-            warn!(
-                pattern = %self.pattern,
-                url = %self.url,
-                error = %e,
-                "WebhookInterceptor URL no longer passes policy (DNS rebinding?); passing through"
-            );
-            return InterceptResult::Pass;
-        }
+        // N1 + F5 + F6: validate-and-pin the URL on every call. The
+        // validator runs synchronous DNS via to_socket_addrs, so we
+        // wrap it in spawn_blocking (F6). The returned IP is then
+        // pinned via reqwest::Client::resolve (F5) so the dial uses
+        // the validated address — the prior implementation re-resolved
+        // at dial time, leaving a TOCTOU window. Returning Pass on
+        // any failure keeps dispatch flowing.
+        let policy = self.policy;
+        let url_for_blocking = self.url.clone();
+        let validated = match tokio::task::spawn_blocking(move || {
+            validate_webhook_url_resolved(&url_for_blocking, policy)
+        })
+        .await
+        {
+            Ok(Ok(v)) => v,
+            Ok(Err(e)) => {
+                warn!(
+                    pattern = %self.pattern,
+                    url = %self.url,
+                    error = %e,
+                    "WebhookInterceptor URL no longer passes policy (DNS rebinding?); passing through"
+                );
+                return InterceptResult::Pass;
+            }
+            Err(join_err) => {
+                warn!(
+                    pattern = %self.pattern,
+                    error = %join_err,
+                    "WebhookInterceptor validation task panicked; passing through"
+                );
+                return InterceptResult::Pass;
+            }
+        };
+
+        let pinned_addr = std::net::SocketAddr::new(validated.resolved_ip, validated.port);
+        let pinned_client = match Client::builder()
+            .redirect(Policy::none())
+            .timeout(self.intercept_timeout)
+            .resolve(&validated.host, pinned_addr)
+            .build()
+        {
+            Ok(c) => c,
+            Err(e) => {
+                warn!(
+                    pattern = %self.pattern,
+                    error = %e,
+                    "WebhookInterceptor failed to build pinned client; passing through"
+                );
+                return InterceptResult::Pass;
+            }
+        };
 
         let payload_b64 = base64::engine::general_purpose::STANDARD.encode(payload.as_slice());
-        let body = serde_json::json!({
+        // F9: enrich the envelope with seq + stored_at if the engine
+        // set them via task-locals (it always does for in-process
+        // dispatch). Falls through to a minimal envelope if the
+        // interceptor is being driven from a context that didn't
+        // scope the locals (e.g. unit tests).
+        let mut body = serde_json::json!({
             "subject": subject,
             "payload": payload_b64,
         });
+        if let Ok(seq) = crate::dispatch::engine::INTERCEPTING_SEQ.try_with(|s| *s) {
+            if seq != 0 {
+                body["seq"] = serde_json::Value::from(seq);
+            }
+        }
+        if let Ok(at) = crate::dispatch::engine::INTERCEPTING_STORED_AT.try_with(|s| *s) {
+            if at != 0 {
+                body["stored_at"] = serde_json::Value::from(at);
+            }
+        }
 
-        let mut req = self.client.post(&self.url);
+        let mut req = pinned_client.post(&self.url);
         for (k, v) in &self.headers {
             req = req.header(k, v);
         }

@@ -279,22 +279,60 @@ impl DeliveryChannel for WebhookChannel {
         let start = SystemTime::now();
         let (url, headers) = Self::extract_config(config)?;
 
-        // N1: re-validate the URL on every delivery so DNS rebinding
-        // (host that resolved to a public IP at registration now
-        // resolves to 127.0.0.1) fails the delivery instead of
-        // exfiltrating the payload to an internal target. Per-call
-        // DNS lookup is negligible vs the TLS handshake that follows.
-        if let Err(e) = validate_webhook_url_with_policy(&url, self.policy) {
-            warn!(
-                url = %url,
-                error = %e,
-                "WebhookChannel rejecting delivery — URL no longer passes policy (DNS rebinding?)"
-            );
-            return Err(DeliveryError::Permanent(format!(
-                "URL no longer passes SSRF policy: {}",
-                e
-            )));
-        }
+        // N1 + F5 + F6: validate-and-pin the URL on every delivery.
+        // The validator runs synchronous DNS via to_socket_addrs, so we
+        // wrap it in spawn_blocking to keep the tokio worker free
+        // (F6). The returned ValidatedWebhookUrl carries the resolved
+        // IP, which we then pass to reqwest::Client::resolve so the
+        // dial uses the validated address rather than re-resolving
+        // (closing the prior validator-vs-reqwest TOCTOU — F5).
+        let policy = self.policy;
+        let url_for_blocking = url.clone();
+        let validated = match tokio::task::spawn_blocking(move || {
+            validate_webhook_url_resolved(&url_for_blocking, policy)
+        })
+        .await
+        {
+            Ok(Ok(v)) => v,
+            Ok(Err(e)) => {
+                warn!(
+                    url = %url,
+                    error = %e,
+                    "WebhookChannel rejecting delivery — URL no longer passes policy (DNS rebinding?)"
+                );
+                return Err(DeliveryError::Permanent(format!(
+                    "URL no longer passes SSRF policy: {}",
+                    e
+                )));
+            }
+            Err(join_err) => {
+                return Err(DeliveryError::Failed(format!(
+                    "validation task panicked: {}",
+                    join_err
+                )));
+            }
+        };
+
+        // Build a per-call client pinned to the validated IP. This is
+        // wasteful for a hot path (each delivery allocates a new
+        // connection pool) but it is the simplest way to close the
+        // dual-DNS-lookup window. A future optimisation can cache
+        // pinned clients keyed by (host, ip).
+        let pinned_addr = std::net::SocketAddr::new(validated.resolved_ip, validated.port);
+        let pinned_client = match Client::builder()
+            .redirect(Policy::none())
+            .timeout(Duration::from_secs(30))
+            .resolve(&validated.host, pinned_addr)
+            .build()
+        {
+            Ok(c) => c,
+            Err(e) => {
+                return Err(DeliveryError::Failed(format!(
+                    "failed to build pinned client: {}",
+                    e
+                )));
+            }
+        };
 
         // Build the event payload
         let payload_b64 = base64::engine::general_purpose::STANDARD.encode(event);
@@ -303,8 +341,8 @@ impl DeliveryChannel for WebhookChannel {
             "payload": payload_b64,
         });
 
-        // Build the request
-        let mut req = self.client.post(&url);
+        // Build the request via the pinned client.
+        let mut req = pinned_client.post(&url);
 
         // Add custom headers
         for (key, value) in headers.iter() {

@@ -153,7 +153,16 @@ pub enum PersistedSubscriptionKind {
     SyncInterceptor,
 }
 
+/// Persistent record of a webhook subscription or sync-interceptor
+/// registered through the HTTP transport.
+///
+/// **`#[non_exhaustive]` (F7):** new fields can be added in future
+/// minor releases without breaking downstream literal construction.
+/// Use [`PersistedSubscription::new_async_webhook`] /
+/// [`PersistedSubscription::new_sync_interceptor`] constructors
+/// instead of struct-literal syntax.
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[non_exhaustive]
 pub struct PersistedSubscription {
     /// Stable identifier for the persisted entry. Different from the
     /// runtime bus subscription ID (which changes across restarts).
@@ -180,4 +189,51 @@ pub struct PersistedSubscription {
     /// Persisted so an operator's chosen timeout survives restart.
     #[serde(default)]
     pub timeout_ms: Option<u64>,
+}
+
+impl PersistedSubscription {
+    /// Construct a new `AsyncWebhook` persisted entry.
+    pub fn new_async_webhook(
+        persisted_id: impl Into<String>,
+        pattern: impl Into<String>,
+        url: impl Into<String>,
+        headers: std::collections::HashMap<String, String>,
+        priority: u32,
+        created_at: u64,
+    ) -> Self {
+        Self {
+            persisted_id: persisted_id.into(),
+            pattern: pattern.into(),
+            url: url.into(),
+            headers,
+            priority,
+            created_at,
+            kind: PersistedSubscriptionKind::AsyncWebhook,
+            timeout_ms: None,
+        }
+    }
+
+    /// Construct a new `SyncInterceptor` persisted entry. `timeout_ms`
+    /// is the per-call timeout configured at registration time
+    /// (already clamped by the caller).
+    pub fn new_sync_interceptor(
+        persisted_id: impl Into<String>,
+        pattern: impl Into<String>,
+        url: impl Into<String>,
+        headers: std::collections::HashMap<String, String>,
+        priority: u32,
+        created_at: u64,
+        timeout_ms: Option<u64>,
+    ) -> Self {
+        Self {
+            persisted_id: persisted_id.into(),
+            pattern: pattern.into(),
+            url: url.into(),
+            headers,
+            priority,
+            created_at,
+            kind: PersistedSubscriptionKind::SyncInterceptor,
+            timeout_ms,
+        }
+    }
 }

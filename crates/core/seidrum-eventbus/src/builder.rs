@@ -104,10 +104,15 @@ pub struct EventBusBuilder {
     /// SSRF policy for webhook URLs registered through the HTTP transport.
     /// Defaults to `Strict`. Tests use `Permissive` to allow loopback URLs.
     webhook_url_policy: WebhookUrlPolicy,
-    /// Mirrors `HttpServer::unsafe_allow_dev_mode`. Default `false`.
+    /// Mirrors `HttpServer::unsafe_allow_http_dev_mode`. Default `false`.
     /// When true, sensitive HTTP endpoints stay accessible with an open
     /// authenticator.
     http_dev_mode: bool,
+    /// Mirrors `WebSocketServer::unsafe_allow_ws_dev_mode`. Default `false`.
+    /// When true, sensitive WS client operations
+    /// (`register_interceptor`, `register_channel_type`) remain
+    /// accessible with an open authenticator (`NoAuth`).
+    ws_dev_mode: bool,
 }
 
 /// Default compaction interval: 1 hour.
@@ -189,6 +194,7 @@ impl EventBusBuilder {
             pending_channels: Vec::new(),
             webhook_url_policy: WebhookUrlPolicy::Strict,
             http_dev_mode: false,
+            ws_dev_mode: false,
         }
     }
 
@@ -200,11 +206,23 @@ impl EventBusBuilder {
         self
     }
 
-    /// **Dangerous.** Allow access to sensitive HTTP endpoints (currently
-    /// `GET /events/:seq`) when no real authenticator is configured.
-    /// Mirrors [`HttpServer::unsafe_allow_dev_mode`]. Default `false`.
+    /// **Dangerous.** Allow access to sensitive HTTP endpoints
+    /// (`GET /events/:seq`, `POST /subscribe`, `POST /interceptors`)
+    /// when no real authenticator is configured. Mirrors
+    /// [`crate::transport::HttpServer::unsafe_allow_http_dev_mode`].
+    /// Default `false`.
     pub fn unsafe_allow_http_dev_mode(mut self) -> Self {
         self.http_dev_mode = true;
+        self
+    }
+
+    /// **Dangerous.** Allow access to sensitive WS client operations
+    /// (`register_interceptor`, `register_channel_type`) when no real
+    /// authenticator is configured. Mirrors
+    /// [`crate::transport::WebSocketServer::unsafe_allow_ws_dev_mode`].
+    /// Default `false`.
+    pub fn unsafe_allow_ws_dev_mode(mut self) -> Self {
+        self.ws_dev_mode = true;
         self
     }
 
@@ -399,9 +417,13 @@ impl EventBusBuilder {
         // Start WebSocket server if configured
         let ws_handle = if let Some(addr) = self.ws_addr {
             let bus_clone = Arc::clone(&bus);
+            let ws_dev_mode = self.ws_dev_mode;
             let rx = shutdown_rx.clone();
             Some(tokio::spawn(async move {
-                let ws_server = WebSocketServer::new(bus_clone, rx);
+                let mut ws_server = WebSocketServer::new(bus_clone, rx);
+                if ws_dev_mode {
+                    ws_server = ws_server.unsafe_allow_ws_dev_mode();
+                }
                 if let Err(e) = ws_server.start(addr).await {
                     tracing::error!("WebSocket server error: {}", e);
                 }

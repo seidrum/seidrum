@@ -98,7 +98,19 @@ tokio::task_local! {
     /// Document this in interceptor implementations and consider an
     /// async-aware backstop (e.g. depth counter) if you need stronger
     /// guarantees.
-    static INTERCEPTING_SUBJECT: String;
+    pub static INTERCEPTING_SUBJECT: String;
+
+    /// Sequence number of the event currently flowing through the sync
+    /// interceptor chain. Set by the engine in the same scope as
+    /// `INTERCEPTING_SUBJECT`. Read by remote interceptor proxies
+    /// (e.g. `WebhookInterceptor`) so the outbound envelope can carry
+    /// `seq` for correlation with persisted events.
+    pub static INTERCEPTING_SEQ: u64;
+
+    /// `stored_at` (unix-millis) of the event currently flowing through
+    /// the sync interceptor chain. Same purpose as
+    /// [`INTERCEPTING_SEQ`].
+    pub static INTERCEPTING_STORED_AT: u64;
 }
 
 /// The dispatch engine routes published events to matching subscribers.
@@ -444,14 +456,35 @@ impl DispatchEngine {
                     // future so any recursive bus.publish() call from
                     // within can detect that it's running inside a sync
                     // interceptor for this subject and refuse.
+                    //
+                    // **F9:** also scope INTERCEPTING_SEQ and
+                    // INTERCEPTING_STORED_AT so remote interceptor proxies
+                    // (e.g. WebhookInterceptor) can read them and include
+                    // the values in their outbound envelopes for
+                    // correlation with persisted events.
                     let payload_clone = current_payload.clone();
                     let subject_owned = subject.to_string();
                     let subject_for_scope = subject_owned.clone();
+                    let scoped_seq = seq;
+                    let scoped_stored_at = std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .map(|d| d.as_millis() as u64)
+                        .unwrap_or(0);
                     let handle =
                         tokio::spawn(INTERCEPTING_SUBJECT.scope(subject_for_scope, async move {
-                            let mut payload = payload_clone;
-                            let result = interceptor.intercept(&subject_owned, &mut payload).await;
-                            (result, payload)
+                            INTERCEPTING_SEQ
+                                .scope(scoped_seq, async move {
+                                    INTERCEPTING_STORED_AT
+                                        .scope(scoped_stored_at, async move {
+                                            let mut payload = payload_clone;
+                                            let result = interceptor
+                                                .intercept(&subject_owned, &mut payload)
+                                                .await;
+                                            (result, payload)
+                                        })
+                                        .await
+                                })
+                                .await
                         }));
                     let abort_handle = handle.abort_handle();
                     let result = tokio::time::timeout(*timeout, handle).await;
