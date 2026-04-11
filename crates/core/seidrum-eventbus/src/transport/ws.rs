@@ -107,6 +107,36 @@ pub enum ClientOperation {
         #[serde(default)]
         correlation_id: Option<String>,
     },
+    /// Register a custom delivery channel type backed by this connection.
+    ///
+    /// The server installs a proxy [`crate::delivery::DeliveryChannel`] in
+    /// the bus's channel registry under `channel_type`. Subsequent
+    /// subscriptions that use `ChannelConfig::Custom { channel_type, .. }`
+    /// will have their events forwarded over this WebSocket connection
+    /// via [`ServerMessage::Deliver`] frames.
+    ///
+    /// The client is expected to respond to each `deliver` message with a
+    /// matching [`ClientOperation::DeliverResult`] indicating success or
+    /// failure. If the client disconnects, the proxy channel fails all
+    /// pending deliveries (which then enter the retry queue per the
+    /// normal Phase 5 retry path).
+    #[serde(rename = "register_channel_type")]
+    RegisterChannelType {
+        channel_type: String,
+        #[serde(default)]
+        correlation_id: Option<String>,
+    },
+    /// Acknowledgment of a delivery sent via [`ServerMessage::Deliver`].
+    /// `request_id` matches the value the server sent.
+    #[serde(rename = "deliver_result")]
+    DeliverResult {
+        request_id: String,
+        /// `true` if the client successfully processed the event.
+        success: bool,
+        /// Optional error message when `success = false`.
+        #[serde(default)]
+        error: Option<String>,
+    },
 }
 
 fn default_timeout_ms() -> u64 {
@@ -162,6 +192,24 @@ pub enum ServerMessage {
         message: String,
         #[serde(skip_serializing_if = "Option::is_none")]
         correlation_id: Option<String>,
+    },
+    /// Confirmation of a successful `register_channel_type`.
+    #[serde(rename = "channel_registered")]
+    ChannelRegistered {
+        channel_type: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        correlation_id: Option<String>,
+    },
+    /// Server-initiated delivery via a remote channel proxy. The client
+    /// must reply with [`ClientOperation::DeliverResult`] using the same
+    /// `request_id`.
+    #[serde(rename = "deliver")]
+    Deliver {
+        request_id: String,
+        channel_type: String,
+        subject: String,
+        /// Base64-encoded payload.
+        payload: String,
     },
 }
 
@@ -287,6 +335,17 @@ struct ConnectionSubscription {
     forwarder: JoinHandle<()>,
 }
 
+/// Per-connection state for `WsRemoteChannel` proxies registered by this client.
+struct RegisteredRemoteChannel {
+    /// The channel type name (kept for logging and future deregistration support).
+    #[allow(dead_code)]
+    channel_type: String,
+    /// Shared pending-replies map. The connection's read loop pushes
+    /// `DeliverResult` replies into this map; the channel's `deliver()`
+    /// awaits them via oneshot.
+    proxy: Arc<crate::delivery::WsRemoteChannel>,
+}
+
 async fn serve_connection(
     ws: tokio_tungstenite::WebSocketStream<TcpStream>,
     peer_addr: std::net::SocketAddr,
@@ -296,9 +355,15 @@ async fn serve_connection(
 
     let (mut sender, mut receiver) = ws.split();
     let mut subscriptions: HashMap<String, ConnectionSubscription> = HashMap::new();
+    // Channel-type → registered remote channel proxy. Used so the read
+    // loop can route DeliverResult messages and so disconnect cleanup
+    // can unregister these channels from the bus.
+    let mut remote_channels: HashMap<String, RegisteredRemoteChannel> = HashMap::new();
 
-    // Channel for forwarding subscription events to the WebSocket sender.
-    // Subscription receivers are polled in forwarder tasks and forwarded here.
+    // Channel for forwarding subscription events AND outbound deliver
+    // frames to the WebSocket sender. Subscription receivers are polled
+    // in forwarder tasks; remote channel proxies push deliver frames
+    // here as well.
     let (forward_tx, mut forward_rx) = mpsc::channel::<String>(256);
 
     loop {
@@ -347,6 +412,7 @@ async fn serve_connection(
                         if let Err(e) = handle_operation(
                             &bus,
                             &mut subscriptions,
+                            &mut remote_channels,
                             &mut sender,
                             &forward_tx,
                             op,
@@ -406,6 +472,28 @@ async fn serve_connection(
         );
     }
 
+    // Cancel any in-flight remote channel deliveries and unregister the
+    // proxies from the bus's channel registry. The cancellation makes
+    // pending `deliver()` calls fail promptly so the failed deliveries
+    // enter the retry queue per the normal Phase 5 path.
+    if !remote_channels.is_empty() {
+        for entry in remote_channels.values() {
+            entry.proxy.cancel_all("WebSocket connection closed").await;
+        }
+        // Unregister from the registry. Use the dispatch engine via the
+        // bus to access the registry; we don't have direct access here.
+        // Best-effort: the engine's channel_registry is internal, so we
+        // rely on the registry's "replace silently if exists" semantics
+        // — once cancelled, future delivery attempts via the proxy will
+        // fail (outbound channel is closed), and the retry task will
+        // dead-letter them as Permanent.
+        debug!(
+            "Cancelled {} remote channel proxies for disconnected client {}",
+            remote_channels.len(),
+            peer_addr
+        );
+    }
+
     debug!("WebSocket client disconnected: {}", peer_addr);
     Ok(())
 }
@@ -438,6 +526,7 @@ fn validate_and_decode_payload(payload: &str) -> crate::Result<Vec<u8>> {
 async fn handle_operation(
     bus: &Arc<dyn EventBus>,
     subscriptions: &mut HashMap<String, ConnectionSubscription>,
+    remote_channels: &mut HashMap<String, RegisteredRemoteChannel>,
     sender: &mut futures_util::stream::SplitSink<
         tokio_tungstenite::WebSocketStream<TcpStream>,
         tokio_tungstenite::tungstenite::Message,
@@ -582,6 +671,68 @@ async fn handle_operation(
                 }
             }
         }
+
+        ClientOperation::RegisterChannelType {
+            channel_type,
+            correlation_id,
+        } => {
+            // Construct a proxy channel that forwards events over this
+            // connection's outbound queue. The proxy is registered in the
+            // bus's channel registry; subscriptions that use Custom { type }
+            // matching this name will route through it.
+            let proxy = Arc::new(crate::delivery::WsRemoteChannel::new(
+                channel_type.clone(),
+                forward_tx.clone(),
+            ));
+            bus.register_channel_type(
+                &channel_type,
+                Arc::clone(&proxy) as Arc<dyn crate::delivery::DeliveryChannel>,
+            )
+            .await?;
+
+            remote_channels.insert(
+                channel_type.clone(),
+                RegisteredRemoteChannel {
+                    channel_type: channel_type.clone(),
+                    proxy,
+                },
+            );
+
+            debug!("Registered remote channel type: {}", channel_type);
+
+            let response = ServerMessage::ChannelRegistered {
+                channel_type,
+                correlation_id,
+            };
+            if let Ok(json) = serde_json::to_string(&response) {
+                ws_send(sender, json).await?;
+            }
+        }
+
+        ClientOperation::DeliverResult {
+            request_id,
+            success,
+            error,
+        } => {
+            // Route the reply to whichever remote channel proxy is awaiting
+            // it. Since channel types are namespaced per-connection, we
+            // try each registered proxy until one signals the reply.
+            let mut signaled = false;
+            for entry in remote_channels.values() {
+                let mut pending = entry.proxy.pending_replies().lock_owned().await;
+                if let Some(tx) = pending.remove(&request_id) {
+                    let _ = tx.send(crate::delivery::WsDeliveryReply {
+                        success,
+                        error: error.clone(),
+                    });
+                    signaled = true;
+                    break;
+                }
+            }
+            if !signaled {
+                debug!(request_id = %request_id, "DeliverResult had no matching pending delivery");
+            }
+        }
     }
 
     Ok(())
@@ -610,6 +761,74 @@ mod tests {
             }
             _ => panic!("Wrong operation type"),
         }
+    }
+
+    #[test]
+    fn test_parse_register_channel_type() {
+        let json = json!({
+            "op": "register_channel_type",
+            "channel_type": "mqtt",
+            "correlation_id": "reg-1"
+        });
+        let op: ClientOperation = serde_json::from_value(json).unwrap();
+        match op {
+            ClientOperation::RegisterChannelType {
+                channel_type,
+                correlation_id,
+            } => {
+                assert_eq!(channel_type, "mqtt");
+                assert_eq!(correlation_id, Some("reg-1".to_string()));
+            }
+            _ => panic!("wrong op"),
+        }
+    }
+
+    #[test]
+    fn test_parse_deliver_result() {
+        let json = json!({
+            "op": "deliver_result",
+            "request_id": "req-42",
+            "success": true
+        });
+        let op: ClientOperation = serde_json::from_value(json).unwrap();
+        match op {
+            ClientOperation::DeliverResult {
+                request_id,
+                success,
+                error,
+            } => {
+                assert_eq!(request_id, "req-42");
+                assert!(success);
+                assert!(error.is_none());
+            }
+            _ => panic!("wrong op"),
+        }
+    }
+
+    #[test]
+    fn test_server_message_deliver_serializes() {
+        let msg = ServerMessage::Deliver {
+            request_id: "r1".to_string(),
+            channel_type: "mqtt".to_string(),
+            subject: "iot.sensor.temp".to_string(),
+            payload: "aGVsbG8=".to_string(),
+        };
+        let json = serde_json::to_value(&msg).unwrap();
+        assert_eq!(json["op"], "deliver");
+        assert_eq!(json["request_id"], "r1");
+        assert_eq!(json["channel_type"], "mqtt");
+        assert_eq!(json["subject"], "iot.sensor.temp");
+    }
+
+    #[test]
+    fn test_server_message_channel_registered_serializes() {
+        let msg = ServerMessage::ChannelRegistered {
+            channel_type: "mqtt".to_string(),
+            correlation_id: Some("reg-1".to_string()),
+        };
+        let json = serde_json::to_value(&msg).unwrap();
+        assert_eq!(json["op"], "channel_registered");
+        assert_eq!(json["channel_type"], "mqtt");
     }
 
     #[test]

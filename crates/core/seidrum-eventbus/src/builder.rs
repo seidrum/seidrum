@@ -68,6 +68,18 @@ impl EventBus for OwnedBus {
     async fn metrics(&self) -> crate::Result<crate::bus::BusMetrics> {
         self.inner.metrics().await
     }
+    async fn get_event(&self, seq: u64) -> crate::Result<Option<crate::storage::StoredEvent>> {
+        self.inner.get_event(seq).await
+    }
+    async fn register_channel_type(
+        &self,
+        channel_type: &str,
+        provider: Arc<dyn DeliveryChannel>,
+    ) -> crate::Result<()> {
+        self.inner
+            .register_channel_type(channel_type, provider)
+            .await
+    }
 }
 
 /// Builder for constructing an EventBus with configurable options.

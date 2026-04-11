@@ -20,6 +20,7 @@ pub mod registry;
 pub mod retry;
 pub mod webhook;
 pub mod websocket;
+pub mod ws_remote;
 
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
@@ -31,6 +32,7 @@ pub use registry::ChannelRegistry;
 pub use retry::{calculate_backoff, next_retry_after, RetryConfig, RetryTask};
 pub use webhook::WebhookChannel;
 pub use websocket::{WebSocketChannel, WebSocketMessage};
+pub use ws_remote::{WsDeliveryReply, WsOutboundFrame, WsRemoteChannel};
 
 #[derive(Debug, Error)]
 pub enum DeliveryError {

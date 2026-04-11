@@ -1,9 +1,9 @@
-use crate::delivery::ChannelConfig;
+use crate::delivery::{ChannelConfig, DeliveryChannel};
 use crate::dispatch::{
     DispatchEngine, EventFilter, Interceptor, SubscriptionInfo, SubscriptionMode,
 };
 use crate::request_reply::RequestSubscription;
-use crate::storage::EventStore;
+use crate::storage::{EventStore, StoredEvent};
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
@@ -138,6 +138,32 @@ pub trait EventBus: Send + Sync + 'static {
 
     /// Get aggregate bus metrics.
     async fn metrics(&self) -> crate::Result<BusMetrics>;
+
+    /// Fetch a single persisted event by its sequence number.
+    /// Returns `Ok(None)` if no event with that seq exists (or has been
+    /// compacted away).
+    ///
+    /// Used by the HTTP transport's `GET /events/:seq` endpoint and by
+    /// debugging tools that need to inspect specific events without
+    /// scanning by status.
+    async fn get_event(&self, seq: u64) -> crate::Result<Option<StoredEvent>>;
+
+    /// Register a custom delivery channel type at runtime.
+    ///
+    /// Subscriptions that use `ChannelConfig::Custom { channel_type, .. }`
+    /// resolve their delivery channel via the bus's [`crate::delivery::ChannelRegistry`]
+    /// at retry time. This method is the runtime equivalent of
+    /// [`crate::EventBusBuilder::register_channel`] — it lets remote
+    /// plugins (or in-process code added after the bus is built) register
+    /// new channel types without rebuilding the bus.
+    ///
+    /// If a channel was already registered under the same `channel_type`,
+    /// it is silently replaced; the registry logs a warning.
+    async fn register_channel_type(
+        &self,
+        channel_type: &str,
+        provider: Arc<dyn DeliveryChannel>,
+    ) -> crate::Result<()>;
 }
 
 /// The default EventBus implementation.
@@ -283,6 +309,26 @@ impl EventBus for EventBusImpl {
             subscription_count: self.list_subscriptions(None).await?.len() as u64,
         })
     }
+
+    async fn get_event(&self, seq: u64) -> crate::Result<Option<StoredEvent>> {
+        self.engine
+            .store
+            .get(seq)
+            .await
+            .map_err(crate::EventBusError::Storage)
+    }
+
+    async fn register_channel_type(
+        &self,
+        channel_type: &str,
+        provider: Arc<dyn DeliveryChannel>,
+    ) -> crate::Result<()> {
+        self.engine
+            .channel_registry
+            .register(channel_type, provider)
+            .await;
+        Ok(())
+    }
 }
 
 #[cfg(test)]
@@ -379,6 +425,67 @@ mod tests {
         assert_eq!(metrics.events_published, 3);
         assert_eq!(metrics.events_delivered, 3);
         assert_eq!(metrics.subscription_count, 1);
+    }
+
+    #[tokio::test]
+    async fn test_get_event_round_trip() {
+        let store = Arc::new(InMemoryEventStore::new());
+        let bus = EventBusImpl::new(store);
+
+        let seq = bus.publish("test.get", b"hello get").await.unwrap();
+
+        let event = bus.get_event(seq).await.unwrap();
+        assert!(event.is_some());
+        let event = event.unwrap();
+        assert_eq!(event.seq, seq);
+        assert_eq!(event.subject, "test.get");
+        assert_eq!(event.payload, b"hello get");
+    }
+
+    #[tokio::test]
+    async fn test_get_event_not_found() {
+        let store = Arc::new(InMemoryEventStore::new());
+        let bus = EventBusImpl::new(store);
+
+        let event = bus.get_event(9999).await.unwrap();
+        assert!(event.is_none());
+    }
+
+    #[tokio::test]
+    async fn test_register_channel_type_via_bus() {
+        use crate::delivery::{
+            DeliveryChannel as DC, DeliveryError, DeliveryReceipt, DeliveryResult,
+        };
+        use async_trait::async_trait;
+
+        struct DummyChannel;
+
+        #[async_trait]
+        impl DC for DummyChannel {
+            async fn deliver(
+                &self,
+                _event: &[u8],
+                _subject: &str,
+                _config: &ChannelConfig,
+            ) -> DeliveryResult<DeliveryReceipt> {
+                Err(DeliveryError::NotReady)
+            }
+            async fn cleanup(&self, _config: &ChannelConfig) -> DeliveryResult<()> {
+                Ok(())
+            }
+            async fn is_healthy(&self, _config: &ChannelConfig) -> bool {
+                true
+            }
+        }
+
+        let store = Arc::new(InMemoryEventStore::new());
+        let bus = EventBusImpl::new(store);
+
+        // Should succeed without error.
+        let result = bus
+            .register_channel_type("dummy", Arc::new(DummyChannel) as Arc<dyn DC>)
+            .await;
+        assert!(result.is_ok());
     }
 
     #[tokio::test]

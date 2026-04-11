@@ -188,6 +188,7 @@ pub fn create_router(state: AppState) -> Router {
         .route("/request", post(make_request))
         .route("/subscribe", post(create_subscription))
         .route("/subscribe/:id", delete(remove_subscription))
+        .route("/events/:seq", get(get_event))
         .layer(axum::middleware::from_fn_with_state(
             state.clone(),
             auth_middleware,
@@ -490,6 +491,47 @@ async fn remove_subscription(
 
     debug!("Removed subscription {}", id);
     Ok(StatusCode::NO_CONTENT)
+}
+
+/// Get a stored event by its sequence number.
+///
+/// Returns the full `StoredEvent` (subject, payload, status, deliveries,
+/// reply_subject) as JSON. The payload is base64-encoded for safe transport
+/// inside JSON. Returns 404 if no event with the given seq exists or has
+/// been compacted away.
+async fn get_event(
+    State(state): State<AppState>,
+    Path(seq): Path<u64>,
+) -> Result<Json<Value>, HttpError> {
+    let event = state.bus.get_event(seq).await.map_err(|e| {
+        warn!("get_event failed for seq {}: {}", seq, e);
+        http_error(StatusCode::INTERNAL_SERVER_ERROR, format!("{}", e))
+    })?;
+    let event = match event {
+        Some(e) => e,
+        None => {
+            return Err(http_error_with_code(
+                StatusCode::NOT_FOUND,
+                format!("event {} not found", seq),
+                "EVENT_NOT_FOUND",
+            ));
+        }
+    };
+
+    // Encode the payload as base64 for JSON-safe transport. The rest of
+    // StoredEvent serializes via serde.
+    use base64::Engine;
+    let payload_b64 = base64::engine::general_purpose::STANDARD.encode(&event.payload);
+    let body = json!({
+        "seq": event.seq,
+        "subject": event.subject,
+        "payload": payload_b64,
+        "stored_at": event.stored_at,
+        "status": event.status,
+        "deliveries": event.deliveries,
+        "reply_subject": event.reply_subject,
+    });
+    Ok(Json(body))
 }
 
 #[cfg(test)]

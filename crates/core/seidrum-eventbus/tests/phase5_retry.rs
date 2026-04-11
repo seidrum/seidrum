@@ -830,8 +830,16 @@ async fn test_redb_retry_succeeds_after_failures() {
         flaky.calls()
     );
 
-    // The failed_deliveries_idx should be cleaned up after success
-    let pending = store.count_retryable(10).await.unwrap();
+    // The failed_deliveries_idx should be cleaned up after the retry task
+    // records the success (which is async and may lag a few ms behind the
+    // 3rd flaky call). Poll until the count drops to 0 instead of asserting
+    // on the first read.
+    let cleanup_deadline = Instant::now() + Duration::from_secs(2);
+    let mut pending = store.count_retryable(10).await.unwrap();
+    while pending > 0 && Instant::now() < cleanup_deadline {
+        tokio::time::sleep(Duration::from_millis(20)).await;
+        pending = store.count_retryable(10).await.unwrap();
+    }
     assert_eq!(pending, 0, "no retryable deliveries should remain");
 }
 
