@@ -1116,6 +1116,7 @@ mod tests {
             priority: 7,
             created_at: 12_345_678,
             kind: PersistedSubscriptionKind::AsyncWebhook,
+            timeout_ms: None,
         };
 
         // === Phase 1: open, save, drop ===
@@ -1171,6 +1172,7 @@ mod tests {
             priority: 1,
             created_at: 1000,
             kind: PersistedSubscriptionKind::AsyncWebhook,
+            timeout_ms: None,
         };
         let entry2 = PersistedSubscription {
             persisted_id: "id1".to_string(), // same id
@@ -1180,6 +1182,7 @@ mod tests {
             priority: 2,
             created_at: 2000,
             kind: PersistedSubscriptionKind::AsyncWebhook,
+            timeout_ms: None,
         };
 
         store.save_subscription(&entry1).await.unwrap();
@@ -1217,6 +1220,7 @@ mod tests {
                     priority: i as u32,
                     created_at: 1000 + i as u64,
                     kind: PersistedSubscriptionKind::AsyncWebhook,
+                    timeout_ms: None,
                 })
                 .await
                 .unwrap();

@@ -173,4 +173,11 @@ pub struct PersistedSubscription {
     /// entries persisted before the C3 PR landed.
     #[serde(default)]
     pub kind: PersistedSubscriptionKind,
+    /// Per-call timeout in milliseconds. Only meaningful for
+    /// `SyncInterceptor` entries — async webhooks use the bus
+    /// dispatch defaults. `None` means "use the engine default at
+    /// recreate time" (subject to remote-interceptor clamping).
+    /// Persisted so an operator's chosen timeout survives restart.
+    #[serde(default)]
+    pub timeout_ms: Option<u64>,
 }

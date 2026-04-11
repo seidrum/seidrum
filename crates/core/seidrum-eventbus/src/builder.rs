@@ -335,8 +335,10 @@ impl EventBusBuilder {
 
         // Single shared WebhookChannel — used by both the dispatch engine
         // (for retry-time delivery) and the HTTP transport (for live
-        // delivery from webhook subscriptions).
-        let webhook_channel = WebhookChannel::new();
+        // delivery from webhook subscriptions). Threaded with the
+        // configured SSRF policy so per-delivery DNS rebinding checks
+        // (N1) use the same policy as registration-time validation.
+        let webhook_channel = WebhookChannel::with_policy(self.webhook_url_policy);
 
         // Resolve retry config: defaults applied if `with_retry` was not
         // called. Always Some so the engine can use it for first-failure
@@ -423,7 +425,7 @@ impl EventBusBuilder {
                         .with_store(store_clone)
                         .with_webhook_url_policy(webhook_policy);
                 if http_dev_mode {
-                    http_server = http_server.unsafe_allow_dev_mode();
+                    http_server = http_server.unsafe_allow_http_dev_mode();
                 }
                 if let Err(e) = http_server.start(addr).await {
                     tracing::error!("HTTP server error: {}", e);

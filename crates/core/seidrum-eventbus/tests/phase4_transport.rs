@@ -200,6 +200,7 @@ mod tests {
             .storage(store_clone)
             .with_http(addr)
             .with_webhook_url_policy(seidrum_eventbus::delivery::WebhookUrlPolicy::Permissive)
+            .unsafe_allow_http_dev_mode()
             .build_with_handles()
             .await
             .unwrap();
@@ -246,6 +247,7 @@ mod tests {
             .storage(store_clone2)
             .with_http(addr)
             .with_webhook_url_policy(seidrum_eventbus::delivery::WebhookUrlPolicy::Permissive)
+            .unsafe_allow_http_dev_mode()
             .build_with_handles()
             .await
             .unwrap();
@@ -285,6 +287,7 @@ mod tests {
             .storage(Arc::clone(&store))
             .with_http(addr)
             .with_webhook_url_policy(seidrum_eventbus::delivery::WebhookUrlPolicy::Permissive)
+            .unsafe_allow_http_dev_mode()
             .build_with_handles()
             .await
             .unwrap();
@@ -518,10 +521,20 @@ mod tests {
         bus.publish("rec.beta", b"two").await.unwrap();
         bus.publish("other.subject", b"ignored").await.unwrap();
 
-        // Give the interceptor a beat to record (sync interceptors run in
-        // the same dispatch path so this should be immediate, but yield
-        // anyway to be safe).
-        tokio::task::yield_now().await;
+        // **N10 fix**: bounded poll instead of single yield_now. Sync
+        // interceptors run inside a tokio::spawn (panic isolation), so
+        // a single yield is not guaranteed to schedule and complete the
+        // spawned task. Poll up to 500ms total.
+        let deadline = tokio::time::Instant::now() + std::time::Duration::from_millis(500);
+        loop {
+            if recorder.count().await >= 2 {
+                break;
+            }
+            if tokio::time::Instant::now() >= deadline {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+        }
 
         let events = recorder.events().await;
         assert_eq!(events.len(), 2);
@@ -891,6 +904,7 @@ mod tests {
         let server_task = tokio::spawn(async move {
             let _ = axum::serve(listener, app).await;
         });
+        seidrum_eventbus::test_utils::wait_for_tcp_ready(interceptor_addr).await;
 
         let env = test_bus_with_transports().await;
         wait_for_http_ready(env.http_addr).await;
@@ -979,6 +993,7 @@ mod tests {
         let server_task = tokio::spawn(async move {
             let _ = axum::serve(listener, app).await;
         });
+        seidrum_eventbus::test_utils::wait_for_tcp_ready(interceptor_addr).await;
 
         let env = test_bus_with_transports().await;
         wait_for_http_ready(env.http_addr).await;
@@ -1021,6 +1036,515 @@ mod tests {
             result.is_err(),
             "subscriber should not receive a dropped event, got {:?}",
             result.ok().flatten().map(|e| e.payload)
+        );
+
+        env.handles.shutdown_and_join().await;
+        server_task.abort();
+    }
+
+    /// **N8b / C1 regression**: `POST /interceptors` rejects bypass
+    /// patterns at the API layer with 400 INVALID_INTERCEPTOR_PATTERN.
+    #[tokio::test]
+    async fn test_http_interceptors_rejects_bypass_patterns() {
+        use seidrum_eventbus::test_utils::{test_bus_with_transports, wait_for_http_ready};
+
+        let env = test_bus_with_transports().await;
+        wait_for_http_ready(env.http_addr).await;
+
+        let bypass_patterns = [">", "*.>", "*.*", "_reply", "_reply.>", "_reply.foo"];
+        for pattern in bypass_patterns {
+            let resp = reqwest::Client::new()
+                .post(format!("http://{}/interceptors", env.http_addr))
+                .json(&serde_json::json!({
+                    "pattern": pattern,
+                    "url": "http://127.0.0.1:1/never-called",
+                    "priority": 100,
+                }))
+                .send()
+                .await
+                .unwrap();
+            assert_eq!(
+                resp.status(),
+                400,
+                "pattern {:?} must be rejected",
+                pattern
+            );
+            let body: serde_json::Value = resp.json().await.unwrap();
+            assert_eq!(body["code"], "INVALID_INTERCEPTOR_PATTERN");
+        }
+
+        env.handles.shutdown_and_join().await;
+    }
+
+    /// **N8b / B2 regression**: `POST /interceptors` clamps a low
+    /// priority to MIN_REMOTE_INTERCEPTOR_PRIORITY (100). The persisted
+    /// entry should record the clamped value, not the requested one.
+    #[tokio::test]
+    async fn test_http_interceptors_priority_clamped() {
+        use seidrum_eventbus::storage::EventStore;
+        use seidrum_eventbus::test_utils::{
+            pick_ephemeral_addr, wait_for_http_ready,
+        };
+        use std::sync::Arc as SArc;
+
+        let store: SArc<dyn EventStore> =
+            SArc::new(seidrum_eventbus::storage::memory_store::InMemoryEventStore::new());
+        let addr = pick_ephemeral_addr();
+        let handles = EventBusBuilder::new()
+            .storage(SArc::clone(&store))
+            .with_http(addr)
+            .with_webhook_url_policy(seidrum_eventbus::delivery::WebhookUrlPolicy::Permissive)
+            .unsafe_allow_http_dev_mode()
+            .build_with_handles()
+            .await
+            .unwrap();
+        wait_for_http_ready(addr).await;
+
+        let resp = reqwest::Client::new()
+            .post(format!("http://{}/interceptors", addr))
+            .json(&serde_json::json!({
+                "pattern": "events.audit",
+                "url": "http://127.0.0.1:1/never-called",
+                "priority": 0, // attacker requesting priority 0
+            }))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), 200);
+
+        // The persisted entry should record priority 100, not 0.
+        let persisted = store.list_subscriptions().await.unwrap();
+        assert_eq!(persisted.len(), 1);
+        assert_eq!(
+            persisted[0].priority, 100,
+            "priority should be clamped to MIN_REMOTE_INTERCEPTOR_PRIORITY"
+        );
+        assert_eq!(
+            persisted[0].kind,
+            seidrum_eventbus::storage::PersistedSubscriptionKind::SyncInterceptor
+        );
+
+        handles.shutdown_and_join().await;
+    }
+
+    /// **N8b / B3 regression**: `POST /interceptors` rejects requests
+    /// that exceed MAX_HTTP_INTERCEPTORS (64) with 429.
+    #[tokio::test]
+    async fn test_http_interceptors_per_server_cap() {
+        use seidrum_eventbus::test_utils::{test_bus_with_transports, wait_for_http_ready};
+
+        let env = test_bus_with_transports().await;
+        wait_for_http_ready(env.http_addr).await;
+
+        let client = reqwest::Client::new();
+        // Register up to the cap (64).
+        for i in 0..64 {
+            let resp = client
+                .post(format!("http://{}/interceptors", env.http_addr))
+                .json(&serde_json::json!({
+                    "pattern": format!("cap.test.{}", i),
+                    "url": "http://127.0.0.1:1/never-called",
+                    "priority": 100,
+                }))
+                .send()
+                .await
+                .unwrap();
+            assert_eq!(resp.status(), 200, "request {} should succeed", i);
+        }
+        // The 65th must fail.
+        let resp = client
+            .post(format!("http://{}/interceptors", env.http_addr))
+            .json(&serde_json::json!({
+                "pattern": "cap.test.over",
+                "url": "http://127.0.0.1:1/never-called",
+                "priority": 100,
+            }))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), 429);
+        let body: serde_json::Value = resp.json().await.unwrap();
+        assert_eq!(body["code"], "INTERCEPTOR_LIMIT");
+
+        env.handles.shutdown_and_join().await;
+    }
+
+    /// **N8b / B4 regression**: under default `NoHttpAuth` (without
+    /// dev mode opt-in), `POST /interceptors` returns 401.
+    #[tokio::test]
+    async fn test_http_interceptors_blocked_under_open_auth() {
+        use seidrum_eventbus::storage::memory_store::InMemoryEventStore;
+        use seidrum_eventbus::test_utils::{pick_ephemeral_addr, wait_for_http_ready};
+        use std::sync::Arc as SArc;
+
+        let store = SArc::new(InMemoryEventStore::new());
+        let addr = pick_ephemeral_addr();
+        // No `unsafe_allow_http_dev_mode()` — defaults to refusing.
+        let handles = EventBusBuilder::new()
+            .storage(store)
+            .with_http(addr)
+            .with_webhook_url_policy(seidrum_eventbus::delivery::WebhookUrlPolicy::Permissive)
+            .build_with_handles()
+            .await
+            .unwrap();
+        wait_for_http_ready(addr).await;
+
+        let resp = reqwest::Client::new()
+            .post(format!("http://{}/interceptors", addr))
+            .json(&serde_json::json!({
+                "pattern": "events.foo",
+                "url": "http://127.0.0.1:1/never-called",
+                "priority": 100,
+            }))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), 401);
+        let body: serde_json::Value = resp.json().await.unwrap();
+        assert_eq!(body["code"], "AUTH_REQUIRED");
+
+        // Same for POST /subscribe.
+        let resp = reqwest::Client::new()
+            .post(format!("http://{}/subscribe", addr))
+            .json(&serde_json::json!({
+                "pattern": "events.foo",
+                "url": "http://127.0.0.1:1/never-called",
+                "priority": 0,
+            }))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), 401);
+
+        handles.shutdown_and_join().await;
+    }
+
+    /// **N8b / N3 regression**: SSRF errors are returned as a generic
+    /// `INVALID_WEBHOOK_URL` response with no internal IP / DNS leak.
+    #[tokio::test]
+    async fn test_http_subscribe_ssrf_error_is_generic() {
+        use seidrum_eventbus::storage::memory_store::InMemoryEventStore;
+        use seidrum_eventbus::test_utils::{pick_ephemeral_addr, wait_for_http_ready};
+        use std::sync::Arc as SArc;
+
+        // Use Strict policy so 127.0.0.1 is rejected, but allow dev
+        // mode so the auth gate doesn't fire first.
+        let store = SArc::new(InMemoryEventStore::new());
+        let addr = pick_ephemeral_addr();
+        let handles = EventBusBuilder::new()
+            .storage(store)
+            .with_http(addr)
+            // Strict policy on purpose
+            .unsafe_allow_http_dev_mode()
+            .build_with_handles()
+            .await
+            .unwrap();
+        wait_for_http_ready(addr).await;
+
+        let resp = reqwest::Client::new()
+            .post(format!("http://{}/subscribe", addr))
+            .json(&serde_json::json!({
+                "pattern": "events.foo",
+                "url": "http://127.0.0.1/hook",
+                "priority": 0,
+            }))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), 400);
+        let body: serde_json::Value = resp.json().await.unwrap();
+        assert_eq!(body["code"], "INVALID_WEBHOOK_URL");
+        // The error message must NOT contain the resolved IP or any
+        // DNS specifics. Just the generic phrase.
+        let err_msg = body["error"].as_str().unwrap();
+        assert_eq!(err_msg, "invalid webhook URL");
+        assert!(
+            !err_msg.contains("127.0.0.1") && !err_msg.contains("loopback"),
+            "error message must not leak resolved IP / classification"
+        );
+
+        handles.shutdown_and_join().await;
+    }
+
+    /// **N8c / C3 regression**: a SyncInterceptor entry persisted via
+    /// `POST /interceptors` is recreated as an interceptor (not as an
+    /// async subscription) on restart and runs as expected.
+    #[tokio::test]
+    async fn test_sync_interceptor_persistence_across_restart() {
+        use seidrum_eventbus::storage::EventStore;
+        use seidrum_eventbus::test_utils::{pick_ephemeral_addr, wait_for_http_ready};
+        use std::sync::Arc as SArc;
+        use std::time::Duration;
+
+        let store: SArc<dyn EventStore> =
+            SArc::new(seidrum_eventbus::storage::memory_store::InMemoryEventStore::new());
+        let addr = pick_ephemeral_addr();
+
+        // === First lifetime: register an interceptor ===
+        let handles_a = EventBusBuilder::new()
+            .storage(SArc::clone(&store))
+            .with_http(addr)
+            .with_webhook_url_policy(seidrum_eventbus::delivery::WebhookUrlPolicy::Permissive)
+            .unsafe_allow_http_dev_mode()
+            .build_with_handles()
+            .await
+            .unwrap();
+        wait_for_http_ready(addr).await;
+
+        let resp = reqwest::Client::new()
+            .post(format!("http://{}/interceptors", addr))
+            .json(&serde_json::json!({
+                "pattern": "events.persisted",
+                "url": "http://127.0.0.1:1/never-called",
+                "priority": 100,
+            }))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), 200);
+        let body: serde_json::Value = resp.json().await.unwrap();
+        let original_id = body["id"].as_str().unwrap().to_string();
+
+        // The persisted store should hold one SyncInterceptor entry.
+        let persisted = store.list_subscriptions().await.unwrap();
+        assert_eq!(persisted.len(), 1);
+        assert_eq!(
+            persisted[0].kind,
+            seidrum_eventbus::storage::PersistedSubscriptionKind::SyncInterceptor
+        );
+
+        handles_a.shutdown_and_join().await;
+        tokio::time::sleep(Duration::from_millis(50)).await;
+
+        // === Second lifetime: same store, fresh server ===
+        let handles_b = EventBusBuilder::new()
+            .storage(SArc::clone(&store))
+            .with_http(addr)
+            .with_webhook_url_policy(seidrum_eventbus::delivery::WebhookUrlPolicy::Permissive)
+            .unsafe_allow_http_dev_mode()
+            .build_with_handles()
+            .await
+            .unwrap();
+        wait_for_http_ready(addr).await;
+
+        // The new bus should have an interceptor on the persisted pattern.
+        let subs = handles_b.bus.list_subscriptions(None).await.unwrap();
+        let recreated = subs
+            .iter()
+            .find(|s| s.pattern == "events.persisted")
+            .expect("interceptor should be recreated on the new bus");
+        // Different runtime id from the original.
+        assert_ne!(recreated.id, original_id);
+        // Sync mode (interceptor) — not async (subscription).
+        // SubscriptionInfo::mode is the string representation.
+        assert_eq!(recreated.mode, "Sync");
+
+        handles_b.shutdown_and_join().await;
+    }
+
+    /// **N8c regression**: `PersistedSubscription` deserializes from a
+    /// JSON document with no `kind` field (entries persisted before
+    /// the C3 PR). The default is `AsyncWebhook`.
+    #[test]
+    fn test_persisted_subscription_backwards_compat_no_kind() {
+        let json = serde_json::json!({
+            "persisted_id": "old-1",
+            "pattern": "events.foo",
+            "url": "https://example.com/hook",
+            "headers": {},
+            "priority": 0,
+            "created_at": 1000,
+        });
+        let entry: seidrum_eventbus::storage::PersistedSubscription =
+            serde_json::from_value(json).unwrap();
+        assert_eq!(
+            entry.kind,
+            seidrum_eventbus::storage::PersistedSubscriptionKind::AsyncWebhook
+        );
+        assert_eq!(entry.timeout_ms, None);
+    }
+
+    /// **N8d / WebhookInterceptor fallback paths**: register an
+    /// interceptor whose remote returns 5xx, malformed JSON, or simply
+    /// can't be reached. All four cases must result in `Pass` (the
+    /// async subscriber gets the original payload).
+    #[tokio::test]
+    async fn test_webhook_interceptor_fallback_paths() {
+        use axum::{routing::post, Json as AJson, Router as ARouter};
+        use seidrum_eventbus::test_utils::{test_bus_with_transports, wait_for_http_ready};
+        use std::time::Duration;
+
+        // Spawn a mock that returns 500 on /500, garbage on /garbage,
+        // and unreachable for /never (we just don't bind it).
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let interceptor_addr = listener.local_addr().unwrap();
+        async fn five_hundred_handler() -> axum::http::StatusCode {
+            axum::http::StatusCode::INTERNAL_SERVER_ERROR
+        }
+        async fn garbage_handler() -> &'static str {
+            "{ this is not valid json"
+        }
+        async fn invalid_b64_handler() -> AJson<serde_json::Value> {
+            AJson(serde_json::json!({
+                "action": "modify",
+                "payload": "@@@not_base64@@@"
+            }))
+        }
+        let app = ARouter::new()
+            .route("/500", post(five_hundred_handler))
+            .route("/garbage", post(garbage_handler))
+            .route("/invalid_b64", post(invalid_b64_handler));
+        let server_task = tokio::spawn(async move {
+            let _ = axum::serve(listener, app).await;
+        });
+        seidrum_eventbus::test_utils::wait_for_tcp_ready(interceptor_addr).await;
+
+        let env = test_bus_with_transports().await;
+        wait_for_http_ready(env.http_addr).await;
+
+        // Register three interceptors on three different subjects.
+        let client = reqwest::Client::new();
+        for (suffix, path) in [
+            ("five_hundred", "/500"),
+            ("garbage", "/garbage"),
+            ("invalid_b64", "/invalid_b64"),
+        ] {
+            let resp = client
+                .post(format!("http://{}/interceptors", env.http_addr))
+                .json(&serde_json::json!({
+                    "pattern": format!("e2e.fallback.{}", suffix),
+                    "url": format!("http://{}{}", interceptor_addr, path),
+                    "priority": 100,
+                }))
+                .send()
+                .await
+                .unwrap();
+            assert_eq!(resp.status(), 200, "register {} should succeed", suffix);
+        }
+
+        // Subscribe to each subject and publish — the original payload
+        // should always reach the subscriber because every fallback
+        // path returns Pass.
+        for suffix in ["five_hundred", "garbage", "invalid_b64"] {
+            let subject = format!("e2e.fallback.{}", suffix);
+            let opts = SubscribeOpts {
+                priority: 200,
+                mode: SubscriptionMode::Async,
+                channel: ChannelConfig::InProcess,
+                timeout: Duration::from_secs(5),
+                filter: None,
+            };
+            let mut sub = env.handles.bus.subscribe(&subject, opts).await.unwrap();
+            env.handles
+                .bus
+                .publish(&subject, b"original")
+                .await
+                .unwrap();
+            let received = tokio::time::timeout(Duration::from_secs(3), sub.rx.recv())
+                .await
+                .expect("subscriber should receive event")
+                .expect("rx not closed");
+            assert_eq!(
+                received.payload, b"original",
+                "fallback {} should leave payload unchanged",
+                suffix
+            );
+        }
+
+        env.handles.shutdown_and_join().await;
+        server_task.abort();
+    }
+
+    /// **N8d / header propagation**: custom headers in the
+    /// `RegisterInterceptorRequest` actually reach the remote endpoint.
+    #[tokio::test]
+    async fn test_webhook_interceptor_propagates_custom_headers() {
+        use axum::{
+            extract::State as ASt, http::HeaderMap, routing::post, Json as AJson,
+            Router as ARouter,
+        };
+        use seidrum_eventbus::test_utils::{test_bus_with_transports, wait_for_http_ready};
+        use std::sync::{Arc as SArc, Mutex};
+        use std::time::Duration;
+
+        // Mock that records headers and returns Pass.
+        type Captured = SArc<Mutex<Option<HeaderMap>>>;
+        let captured: Captured = SArc::new(Mutex::new(None));
+        let captured_clone = SArc::clone(&captured);
+
+        async fn handler(
+            ASt(captured): ASt<Captured>,
+            headers: HeaderMap,
+            AJson(_body): AJson<serde_json::Value>,
+        ) -> AJson<serde_json::Value> {
+            *captured.lock().unwrap() = Some(headers);
+            AJson(serde_json::json!({"action": "pass"}))
+        }
+        let app = ARouter::new()
+            .route("/intercept", post(handler))
+            .with_state(captured_clone);
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let interceptor_addr = listener.local_addr().unwrap();
+        let server_task = tokio::spawn(async move {
+            let _ = axum::serve(listener, app).await;
+        });
+        seidrum_eventbus::test_utils::wait_for_tcp_ready(interceptor_addr).await;
+
+        let env = test_bus_with_transports().await;
+        wait_for_http_ready(env.http_addr).await;
+
+        let resp = reqwest::Client::new()
+            .post(format!("http://{}/interceptors", env.http_addr))
+            .json(&serde_json::json!({
+                "pattern": "e2e.headers",
+                "url": format!("http://{}/intercept", interceptor_addr),
+                "headers": {
+                    "X-Custom": "custom-value",
+                    "X-Trace-Id": "abc-123"
+                },
+                "priority": 100,
+            }))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), 200);
+
+        env.handles
+            .bus
+            .publish("e2e.headers", b"hello")
+            .await
+            .unwrap();
+
+        // **N10 fix**: bounded poll for the captured headers (instead
+        // of a fixed sleep) so this works even when the runner is slow.
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(2);
+        loop {
+            if captured.lock().unwrap().is_some() {
+                break;
+            }
+            if tokio::time::Instant::now() >= deadline {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+
+        // Snapshot the headers and drop the guard before any await.
+        let snapshot: Option<HeaderMap> = captured.lock().unwrap().clone();
+        let headers = snapshot.expect("interceptor should have been called");
+        assert_eq!(
+            headers
+                .get("x-custom")
+                .and_then(|v| v.to_str().ok())
+                .unwrap_or(""),
+            "custom-value"
+        );
+        assert_eq!(
+            headers
+                .get("x-trace-id")
+                .and_then(|v| v.to_str().ok())
+                .unwrap_or(""),
+            "abc-123"
         );
 
         env.handles.shutdown_and_join().await;

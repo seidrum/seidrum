@@ -37,34 +37,8 @@ const MAX_SUBSCRIPTIONS_PER_CONNECTION: usize = 64;
 /// bus pays for each registered interceptor.
 const MAX_INTERCEPTORS_PER_CONNECTION: usize = 16;
 
-/// Minimum priority value a remote-registered interceptor may use. Lower
-/// priorities run first; reserving values below this for in-process,
-/// trusted interceptors prevents a remote client from inserting itself
-/// ahead of e.g. an audit-log or rate-limit interceptor.
-const MIN_REMOTE_INTERCEPTOR_PRIORITY: u32 = 100;
-
 /// Maximum size of a single incoming WebSocket text frame (2 MiB).
 const MAX_FRAME_SIZE: usize = 2_097_152;
-
-/// Reject patterns that a remote (untrusted) caller must not be allowed to
-/// intercept. Specifically:
-/// - `_reply.*` and `_reply.>` are reserved for internal request/reply
-///   correlation. A remote interceptor on these subjects could rewrite
-///   every reply on the bus.
-/// - `>` (catch-all) gives a remote caller a hook on every event,
-///   including reply subjects via wildcard matching.
-fn validate_remote_interceptor_pattern(pattern: &str) -> Result<(), String> {
-    if pattern == ">" {
-        return Err("remote interceptors cannot register on the catch-all '>' pattern".to_string());
-    }
-    if pattern.starts_with("_reply.") || pattern == "_reply" {
-        return Err(
-            "remote interceptors cannot register on '_reply.*' (reserved for internal request/reply)"
-                .to_string(),
-        );
-    }
-    Ok(())
-}
 
 /// Authentication request context provided to the [`Authenticator`].
 ///
@@ -910,17 +884,20 @@ async fn handle_operation(
             timeout_ms,
             correlation_id,
         } => {
-            // === C1 hardening ===
-            // Reject patterns that target reserved internal subjects or
-            // the catch-all wildcard. These checks apply only to remote
-            // (untrusted) callers — in-process code can still call
-            // bus.intercept(...) on any pattern.
-            if let Err(reason) = validate_remote_interceptor_pattern(&pattern) {
-                return Err(crate::EventBusError::InvalidSubject(reason));
+            // === C1 / B1 hardening ===
+            // Token-aware pattern validation: rejects '>', '*.*', '*.>',
+            // '_reply.*', leading whitespace, etc. Shared between WS and
+            // HTTP so the policies cannot drift.
+            if let Err(e) = crate::transport::validate_remote_interceptor_pattern(&pattern) {
+                return Err(crate::EventBusError::InvalidSubject(e.to_string()));
             }
             // Reserve low priorities for trusted in-process interceptors.
-            // A remote caller must accept being run after them.
-            let effective_priority = priority.max(MIN_REMOTE_INTERCEPTOR_PRIORITY);
+            let effective_priority =
+                crate::transport::clamp_remote_interceptor_priority(priority);
+            // Cap the per-call timeout to prevent slowloris stalls of
+            // the dispatch chain.
+            let clamped_timeout_ms =
+                crate::transport::clamp_remote_interceptor_timeout(timeout_ms);
             // Per-connection cap so a single client can't fill the
             // interceptor table for the whole bus.
             if remote_interceptors.len() >= MAX_INTERCEPTORS_PER_CONNECTION {
@@ -934,8 +911,7 @@ async fn handle_operation(
             // Use a proxy timeout slightly shorter than the engine
             // timeout (H1 fix) so the proxy's PendingGuard reclaims the
             // pending entry before the engine's abort_handle fires.
-            let engine_timeout =
-                timeout_ms.map(Duration::from_millis);
+            let engine_timeout = clamped_timeout_ms.map(Duration::from_millis);
             let proxy_timeout = engine_timeout
                 .map(|d| d.saturating_sub(Duration::from_millis(250)))
                 .map(|d| d.max(Duration::from_millis(100)));
@@ -1220,6 +1196,87 @@ mod tests {
     #[test]
     fn test_validate_payload_invalid_base64() {
         let result = validate_and_decode_payload("not-valid-base64!!!");
+        assert!(result.is_err());
+    }
+
+    // === N8b: WireInterceptAction parser tests ===
+
+    #[test]
+    fn test_parse_intercept_result_pass() {
+        let json = json!({
+            "op": "intercept_result",
+            "request_id": "r1",
+            "action": "pass"
+        });
+        let op: ClientOperation = serde_json::from_value(json).unwrap();
+        match op {
+            ClientOperation::InterceptResult { request_id, action } => {
+                assert_eq!(request_id, "r1");
+                assert!(matches!(action, WireInterceptAction::Pass));
+            }
+            _ => panic!("wrong op"),
+        }
+    }
+
+    #[test]
+    fn test_parse_intercept_result_drop() {
+        let json = json!({
+            "op": "intercept_result",
+            "request_id": "r1",
+            "action": "drop"
+        });
+        let op: ClientOperation = serde_json::from_value(json).unwrap();
+        assert!(matches!(
+            op,
+            ClientOperation::InterceptResult {
+                action: WireInterceptAction::Drop,
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn test_parse_intercept_result_modify_with_payload() {
+        let json = json!({
+            "op": "intercept_result",
+            "request_id": "r1",
+            "action": "modify",
+            "payload": "aGVsbG8="
+        });
+        let op: ClientOperation = serde_json::from_value(json).unwrap();
+        match op {
+            ClientOperation::InterceptResult {
+                action: WireInterceptAction::Modify { payload },
+                ..
+            } => {
+                assert_eq!(payload, "aGVsbG8=");
+            }
+            _ => panic!("expected Modify"),
+        }
+    }
+
+    #[test]
+    fn test_parse_intercept_result_modify_without_payload_rejected() {
+        // serde must enforce the modify-implies-payload invariant at
+        // parse time. Previously this was a runtime check that left the
+        // pending intercept call hanging until its 5s timeout.
+        let json = json!({
+            "op": "intercept_result",
+            "request_id": "r1",
+            "action": "modify"
+        });
+        let result: Result<ClientOperation, _> = serde_json::from_value(json);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_parse_intercept_result_unknown_action_rejected() {
+        let json = json!({
+            "op": "intercept_result",
+            "request_id": "r1",
+            "action": "explode"
+        });
+        let result: Result<ClientOperation, _> = serde_json::from_value(json);
         assert!(result.is_err());
     }
 }

@@ -89,13 +89,18 @@ pub mod transport;
 pub use builder::{BusHandles, EventBusBuilder};
 pub use bus::{BusMetrics, EventBus, EventBusImpl, SubscribeOpts, Subscription};
 pub use delivery::{
-    ChannelConfig, ChannelRegistry, DeliveryChannel, DeliveryError, DeliveryReceipt,
-    DeliveryResult, WebSocketChannel, WebhookChannel,
+    validate_webhook_url, validate_webhook_url_with_policy, ChannelConfig, ChannelRegistry,
+    DeliveryChannel, DeliveryError, DeliveryReceipt, DeliveryResult, WebSocketChannel,
+    WebhookChannel, WebhookInterceptor, WebhookUrlError, WebhookUrlPolicy, WsInterceptAction,
+    WsInterceptReply, WsRemoteInterceptor,
 };
 pub use dispatch::{EventFilter, InterceptResult, Interceptor, SubscriptionInfo, SubscriptionMode};
 pub use request_reply::{DispatchedEvent, Replier, RequestMessage, RequestSubscription};
-pub use storage::{EventStatus, EventStore, StoredEvent};
-pub use transport::{HttpAuthenticator, HttpServer, NoHttpAuth, WebSocketServer};
+pub use storage::{EventStatus, EventStore, PersistedSubscription, PersistedSubscriptionKind, StoredEvent};
+pub use transport::{
+    HttpAuthenticator, HttpServer, NoHttpAuth, WebSocketServer, MAX_REMOTE_INTERCEPTOR_TIMEOUT_MS,
+    MIN_REMOTE_INTERCEPTOR_PRIORITY,
+};
 
 /// Errors that can occur in the event bus.
 #[derive(Debug, thiserror::Error)]
@@ -222,6 +227,34 @@ pub mod test_utils {
         let addr = listener.local_addr().unwrap();
         drop(listener);
         addr
+    }
+
+    /// Poll a TCP server until `connect()` succeeds, with a 2-second
+    /// budget. Panics on timeout. Use this for ad-hoc test servers
+    /// (axum, hyper, etc.) that don't expose a higher-level health
+    /// endpoint — the only signal we can rely on is "the listener
+    /// accepts a connection".
+    pub async fn wait_for_tcp_ready(addr: SocketAddr) {
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(2);
+        loop {
+            if tokio::time::Instant::now() >= deadline {
+                panic!("TCP server at {} did not become ready in time", addr);
+            }
+            match tokio::time::timeout(
+                Duration::from_millis(200),
+                tokio::net::TcpStream::connect(addr),
+            )
+            .await
+            {
+                Ok(Ok(stream)) => {
+                    drop(stream);
+                    return;
+                }
+                _ => {
+                    tokio::time::sleep(Duration::from_millis(20)).await;
+                }
+            }
+        }
     }
 
     /// Poll an HTTP server's `/health` endpoint until it responds, with a

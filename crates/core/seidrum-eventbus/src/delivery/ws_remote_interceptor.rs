@@ -414,4 +414,84 @@ mod tests {
         let result = interceptor.intercept("test.closed", &mut payload).await;
         assert_eq!(result, InterceptResult::Pass);
     }
+
+    /// **N8b / M2 regression**: filling pending_replies to the cap
+    /// causes new intercept calls to return Pass immediately instead of
+    /// growing memory unboundedly. We don't insert MAX_PENDING_INTERCEPTS
+    /// real entries (1024) — that would be slow — instead we directly
+    /// populate the map and call intercept on the same proxy.
+    #[tokio::test]
+    async fn test_pending_intercepts_cap_returns_pass() {
+        let (tx, _rx) = mpsc::channel::<WsOutboundFrame>(8);
+        let interceptor = Arc::new(
+            WsRemoteInterceptor::new("test.cap".to_string(), tx)
+                .with_timeout(Duration::from_millis(100)),
+        );
+
+        // Fill the map directly with dummy entries.
+        {
+            let pending = interceptor.pending_replies();
+            let mut guard = pending.lock().await;
+            for i in 0..MAX_PENDING_INTERCEPTS {
+                let (tx, _rx) = oneshot::channel::<WsInterceptReply>();
+                guard.insert(format!("dummy-{}", i), tx);
+            }
+        }
+
+        let mut payload = b"y".to_vec();
+        let result = interceptor.intercept("test.cap", &mut payload).await;
+        assert_eq!(
+            result,
+            InterceptResult::Pass,
+            "intercept must return Pass when pending_replies is at cap"
+        );
+        // Payload preserved.
+        assert_eq!(payload, b"y");
+    }
+
+    /// **N8b / H1 regression**: when the engine aborts the spawned
+    /// interceptor task mid-await, the PendingGuard's Drop impl must
+    /// reclaim the pending_replies entry. Without the guard, that entry
+    /// would leak forever.
+    #[tokio::test]
+    async fn test_pending_guard_reclaims_on_abort() {
+        let (tx, _rx) = mpsc::channel::<WsOutboundFrame>(8);
+        let interceptor = Arc::new(
+            WsRemoteInterceptor::new("test.abort".to_string(), tx)
+                .with_timeout(Duration::from_secs(60)), // long timeout
+        );
+        let pending_handle = interceptor.pending_replies();
+
+        // Spawn the interceptor call and abort it after a moment.
+        let interceptor_clone = Arc::clone(&interceptor);
+        let task = tokio::spawn(async move {
+            let mut p = b"x".to_vec();
+            interceptor_clone.intercept("test.abort", &mut p).await
+        });
+
+        // Let the call register its pending entry.
+        tokio::time::sleep(Duration::from_millis(20)).await;
+
+        // Sanity: the entry is in the map.
+        assert_eq!(
+            pending_handle.lock().await.len(),
+            1,
+            "pending entry should be present before abort"
+        );
+
+        // Abort mid-await — this is what the engine timeout does.
+        task.abort();
+        let _ = task.await;
+
+        // Give the Drop guard's spawn-task a beat to run if it had to
+        // fall back from try_lock.
+        tokio::time::sleep(Duration::from_millis(20)).await;
+
+        // The entry must be gone.
+        assert_eq!(
+            pending_handle.lock().await.len(),
+            0,
+            "PendingGuard Drop impl must reclaim the pending entry on abort"
+        );
+    }
 }

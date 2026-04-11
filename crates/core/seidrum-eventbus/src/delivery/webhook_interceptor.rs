@@ -47,6 +47,7 @@
 //! `reqwest::Client` configured with `redirect(Policy::none())` so a
 //! server can't 302 the request to a private address.
 
+use crate::delivery::{validate_webhook_url_with_policy, WebhookUrlPolicy};
 use crate::dispatch::{InterceptResult, Interceptor};
 use async_trait::async_trait;
 use base64::Engine;
@@ -68,6 +69,9 @@ pub struct WebhookInterceptor {
     /// Per-call timeout. The bus's interceptor timeout is also enforced
     /// independently by the dispatch engine.
     intercept_timeout: Duration,
+    /// SSRF policy applied on every `intercept()` call to mitigate DNS
+    /// rebinding (N1). Defaults to Strict.
+    policy: WebhookUrlPolicy,
 }
 
 /// Wire-level intercept result returned by a webhook interceptor.
@@ -83,8 +87,20 @@ enum WebhookInterceptResult {
 }
 
 impl WebhookInterceptor {
-    /// Create a new webhook interceptor pointed at `url`.
+    /// Create a new webhook interceptor pointed at `url` with the
+    /// strict SSRF policy.
     pub fn new(pattern: String, url: String, headers: HashMap<String, String>) -> Self {
+        Self::with_policy(pattern, url, headers, WebhookUrlPolicy::Strict)
+    }
+
+    /// Create a new webhook interceptor with an explicit SSRF policy.
+    /// Tests use `Permissive` to allow loopback URLs.
+    pub fn with_policy(
+        pattern: String,
+        url: String,
+        headers: HashMap<String, String>,
+        policy: WebhookUrlPolicy,
+    ) -> Self {
         let client = Client::builder()
             .redirect(Policy::none())
             .timeout(Duration::from_secs(5))
@@ -96,6 +112,7 @@ impl WebhookInterceptor {
             headers,
             client,
             intercept_timeout: Duration::from_secs(5),
+            policy,
         }
     }
 
@@ -126,6 +143,21 @@ impl WebhookInterceptor {
 #[async_trait]
 impl Interceptor for WebhookInterceptor {
     async fn intercept(&self, subject: &str, payload: &mut Vec<u8>) -> InterceptResult {
+        // N1: re-validate the URL against the policy on every call so a
+        // DNS rebinding attack (host that resolved to a public IP at
+        // registration now resolves to 127.0.0.1) returns Pass instead
+        // of forwarding the (potentially-secret) payload to an internal
+        // address. Returning Pass keeps dispatch flowing.
+        if let Err(e) = validate_webhook_url_with_policy(&self.url, self.policy) {
+            warn!(
+                pattern = %self.pattern,
+                url = %self.url,
+                error = %e,
+                "WebhookInterceptor URL no longer passes policy (DNS rebinding?); passing through"
+            );
+            return InterceptResult::Pass;
+        }
+
         let payload_b64 = base64::engine::general_purpose::STANDARD.encode(payload.as_slice());
         let body = serde_json::json!({
             "subject": subject,
@@ -203,16 +235,18 @@ mod tests {
     use serde_json::json;
 
     /// Verify the response wire format parses correctly for each action.
+    /// **N9 fix:** previous version of these tests used bare `matches!`
+    /// without `assert!`, so they passed regardless of the variant.
     #[test]
     fn test_parse_pass() {
         let v: WebhookInterceptResult = serde_json::from_value(json!({"action": "pass"})).unwrap();
-        matches!(v, WebhookInterceptResult::Pass);
+        assert!(matches!(v, WebhookInterceptResult::Pass));
     }
 
     #[test]
     fn test_parse_drop() {
         let v: WebhookInterceptResult = serde_json::from_value(json!({"action": "drop"})).unwrap();
-        matches!(v, WebhookInterceptResult::Drop);
+        assert!(matches!(v, WebhookInterceptResult::Drop));
     }
 
     #[test]

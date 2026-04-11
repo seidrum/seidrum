@@ -126,6 +126,11 @@ pub struct AppState {
     /// Map of bus subscription id → persisted subscription id. Used by
     /// `DELETE /subscribe/:id` to find the persisted entry to delete.
     pub bus_to_persisted: Arc<tokio::sync::RwLock<std::collections::HashMap<String, String>>>,
+    /// Counter for HTTP-registered sync interceptors. Capped at
+    /// MAX_HTTP_INTERCEPTORS so an attacker can't fill the interceptor
+    /// table or unbounded-grow the redb subscriptions table via
+    /// `POST /interceptors` (B3).
+    pub interceptor_count: Arc<AtomicUsize>,
     /// SSRF validation policy applied to webhook URLs in `/subscribe`
     /// and during persisted-subscription recreation on startup.
     pub webhook_url_policy: crate::delivery::WebhookUrlPolicy,
@@ -382,13 +387,17 @@ impl HttpServer {
     }
 
     /// **Dangerous.** Allow access to sensitive endpoints (currently
-    /// `GET /events/:seq`) even when the configured authenticator is
-    /// open (i.e. [`NoHttpAuth`]). Without this opt-in, an open
+    /// `GET /events/:seq`, `POST /subscribe`, `POST /interceptors`)
+    /// even when the configured authenticator is open
+    /// (i.e. [`NoHttpAuth`]). Without this opt-in, an open
     /// authenticator causes those endpoints to return 401.
     ///
     /// Use only in tests or trusted local development. Production
     /// deployments should provide a real [`HttpAuthenticator`] instead.
-    pub fn unsafe_allow_dev_mode(mut self) -> Self {
+    ///
+    /// Named to match `EventBusBuilder::unsafe_allow_http_dev_mode` so
+    /// the two opt-ins are visually consistent (N11).
+    pub fn unsafe_allow_http_dev_mode(mut self) -> Self {
         self.dev_mode = true;
         self
     }
@@ -400,6 +409,7 @@ impl HttpServer {
     /// subscriptions are recreated against the bus before serving requests.
     pub async fn start(&self, addr: SocketAddr) -> crate::Result<()> {
         let subscription_count = Arc::new(AtomicUsize::new(0));
+        let interceptor_count = Arc::new(AtomicUsize::new(0));
         let bus_to_persisted: Arc<
             tokio::sync::RwLock<std::collections::HashMap<String, String>>,
         > = Arc::new(tokio::sync::RwLock::new(std::collections::HashMap::new()));
@@ -408,16 +418,29 @@ impl HttpServer {
         // entry becomes a fresh bus subscription with a new bus id; the
         // mapping bus_id → persisted_id is recorded so DELETE can clean up
         // both the bus subscription and the persisted entry.
+        //
+        // **N5 fix:** if list_subscriptions returns an error (e.g. the
+        // operator wired a custom EventStore that doesn't implement the
+        // Phase-4 subscription methods), warn loudly and continue with
+        // zero recreated subscriptions. The previous default of
+        // `Ok(vec![])` silently masked this state.
         if let Some(store) = &self.store {
-            let persisted = store.list_subscriptions().await.map_err(|e| {
-                crate::EventBusError::Internal(format!(
-                    "failed to list persisted subscriptions: {}",
-                    e
-                ))
-            })?;
+            let persisted = match store.list_subscriptions().await {
+                Ok(v) => v,
+                Err(e) => {
+                    warn!(
+                        error = %e,
+                        "EventStore does not support subscription persistence — \
+                         starting with zero recreated webhook subscriptions. \
+                         POST /subscribe and POST /interceptors will return 500 \
+                         until a store with persistence is wired."
+                    );
+                    Vec::new()
+                }
+            };
             if !persisted.is_empty() {
                 info!(
-                    "Recreating {} persisted webhook subscriptions",
+                    "Recreating {} persisted webhook subscriptions/interceptors",
                     persisted.len()
                 );
             }
@@ -426,6 +449,7 @@ impl HttpServer {
                     &self.bus,
                     &self.webhook_channel,
                     &subscription_count,
+                    &interceptor_count,
                     &bus_to_persisted,
                     &entry,
                     self.webhook_url_policy,
@@ -439,13 +463,13 @@ impl HttpServer {
                             pattern = entry.pattern,
                             url = entry.url,
                             reason = reason,
-                            "deleting persisted subscription that can no longer be recreated"
+                            "deleting persisted entry that can no longer be recreated"
                         );
                         if let Err(e) = store.delete_subscription(&entry.persisted_id).await {
                             warn!(
                                 persisted_id = entry.persisted_id,
                                 error = %e,
-                                "failed to garbage-collect permanently-failed persisted subscription"
+                                "failed to garbage-collect permanently-failed persisted entry"
                             );
                         }
                     }
@@ -455,7 +479,7 @@ impl HttpServer {
                             pattern = entry.pattern,
                             url = entry.url,
                             reason = reason,
-                            "transient failure recreating persisted subscription; will retry next restart"
+                            "transient failure recreating persisted entry; will retry next restart"
                         );
                     }
                 }
@@ -468,6 +492,7 @@ impl HttpServer {
             webhook_channel: Arc::clone(&self.webhook_channel),
             authenticator: Arc::clone(&self.authenticator),
             subscription_count,
+            interceptor_count,
             store: self.store.clone(),
             bus_to_persisted,
             webhook_url_policy: self.webhook_url_policy,
@@ -641,6 +666,7 @@ async fn recreate_persisted_subscription(
     bus: &Arc<dyn EventBus>,
     webhook_channel: &Arc<WebhookChannel>,
     subscription_count: &Arc<AtomicUsize>,
+    interceptor_count: &Arc<AtomicUsize>,
     bus_to_persisted: &Arc<tokio::sync::RwLock<HashMap<String, String>>>,
     entry: &crate::storage::PersistedSubscription,
     policy: crate::delivery::WebhookUrlPolicy,
@@ -666,7 +692,14 @@ async fn recreate_persisted_subscription(
             .await
         }
         crate::storage::PersistedSubscriptionKind::SyncInterceptor => {
-            recreate_persisted_sync_interceptor(bus, bus_to_persisted, entry).await
+            recreate_persisted_sync_interceptor(
+                bus,
+                interceptor_count,
+                bus_to_persisted,
+                entry,
+                policy,
+            )
+            .await
         }
     }
 }
@@ -731,25 +764,67 @@ async fn recreate_persisted_async_webhook(
 
 async fn recreate_persisted_sync_interceptor(
     bus: &Arc<dyn EventBus>,
+    interceptor_count: &Arc<AtomicUsize>,
     bus_to_persisted: &Arc<tokio::sync::RwLock<HashMap<String, String>>>,
     entry: &crate::storage::PersistedSubscription,
+    policy: crate::delivery::WebhookUrlPolicy,
 ) -> RecreateOutcome {
-    let interceptor: Arc<dyn crate::dispatch::Interceptor> =
-        Arc::new(crate::delivery::WebhookInterceptor::new(
-            entry.pattern.clone(),
-            entry.url.clone(),
-            entry.headers.clone(),
-        ));
+    // === N4 hardening ===
+    // Re-run the same validation that POST /interceptors enforces, so a
+    // policy that was tightened across releases can't be bypassed by
+    // entries persisted under the older policy.
 
+    if let Err(e) = crate::transport::validate_remote_interceptor_pattern(&entry.pattern) {
+        return RecreateOutcome::PermanentFailure(format!(
+            "pattern no longer permitted: {}",
+            e
+        ));
+    }
+    let effective_priority =
+        crate::transport::clamp_remote_interceptor_priority(entry.priority);
+    let clamped_timeout_ms =
+        crate::transport::clamp_remote_interceptor_timeout(entry.timeout_ms);
+
+    // Reserve a slot up front. If we exceed the cap, classify as
+    // transient — the entry stays in storage and will be retried on
+    // the next restart (when other entries may have been deleted).
+    let prev = interceptor_count.fetch_add(1, Ordering::Relaxed);
+    if prev >= MAX_HTTP_INTERCEPTORS {
+        interceptor_count.fetch_sub(1, Ordering::Relaxed);
+        return RecreateOutcome::TransientFailure(format!(
+            "interceptor cap reached ({} max)",
+            MAX_HTTP_INTERCEPTORS
+        ));
+    }
+
+    let mut interceptor = crate::delivery::WebhookInterceptor::with_policy(
+        entry.pattern.clone(),
+        entry.url.clone(),
+        entry.headers.clone(),
+        policy,
+    );
+    if let Some(ms) = clamped_timeout_ms {
+        interceptor = interceptor.with_timeout(Duration::from_millis(ms));
+    }
+    let interceptor: Arc<dyn crate::dispatch::Interceptor> = Arc::new(interceptor);
+
+    let engine_timeout = clamped_timeout_ms.map(Duration::from_millis);
     let bus_id = match bus
-        .intercept(&entry.pattern, entry.priority, interceptor, None)
+        .intercept(
+            &entry.pattern,
+            effective_priority,
+            interceptor,
+            engine_timeout,
+        )
         .await
     {
         Ok(id) => id,
         Err(crate::EventBusError::InvalidSubject(msg)) => {
+            interceptor_count.fetch_sub(1, Ordering::Relaxed);
             return RecreateOutcome::PermanentFailure(format!("invalid pattern: {}", msg));
         }
         Err(e) => {
+            interceptor_count.fetch_sub(1, Ordering::Relaxed);
             return RecreateOutcome::TransientFailure(format!("{}", e));
         }
     };
@@ -774,17 +849,17 @@ async fn create_subscription(
     State(state): State<AppState>,
     Json(req): Json<SubscribeRequest>,
 ) -> Result<Json<SubscribeResponse>, HttpError> {
+    // B4: refuse state-changing webhook registration under open auth.
+    refuse_if_unauth_state_changing(&state, "POST /subscribe")?;
+
     // Validate the webhook URL up front so a failed validation doesn't
     // touch the bus or counter at all. SSRF mitigation (C2).
     if let Err(e) =
         crate::delivery::validate_webhook_url_with_policy(&req.url, state.webhook_url_policy)
     {
+        // N3: log specifics server-side, return generic to caller.
         warn!("rejected webhook subscribe with unsafe URL {}: {}", req.url, e);
-        return Err(http_error_with_code(
-            StatusCode::BAD_REQUEST,
-            format!("invalid webhook URL: {}", e),
-            "INVALID_WEBHOOK_URL",
-        ));
+        return Err(http_error_invalid_webhook_url());
     }
 
     // Atomically reserve a slot. If we exceed the limit, roll back.
@@ -832,9 +907,10 @@ async fn create_subscription(
 
     let sub_id = sub.id.clone();
 
-    // Persist the subscription if a store is configured. We persist BEFORE
-    // spawning the delivery task so that if persistence fails the caller
-    // sees the error and the bus subscription is rolled back.
+    // Persist the subscription if a store is configured. **N6 ordering:**
+    // we insert into bus_to_persisted BEFORE save_subscription so that a
+    // racing DELETE always finds the mapping; if save fails we delete
+    // both the mapping and the bus subscription before returning.
     if let Some(store) = &state.store {
         let persisted_id = format!("ws-{}", ulid::Ulid::new());
         let now_ms = std::time::SystemTime::now()
@@ -849,10 +925,25 @@ async fn create_subscription(
             priority: req.priority,
             created_at: now_ms,
             kind: crate::storage::PersistedSubscriptionKind::AsyncWebhook,
+            timeout_ms: None,
         };
+
+        state
+            .bus_to_persisted
+            .write()
+            .await
+            .insert(sub_id.clone(), persisted_id.clone());
+
         if let Err(e) = store.save_subscription(&entry).await {
-            // Roll back the bus subscription before failing the request.
-            let _ = state.bus.unsubscribe(&sub_id).await;
+            // Roll back the mapping AND the bus subscription.
+            state.bus_to_persisted.write().await.remove(&sub_id);
+            if let Err(unsub_err) = state.bus.unsubscribe(&sub_id).await {
+                warn!(
+                    sub_id = %sub_id,
+                    error = %unsub_err,
+                    "rollback unsubscribe failed after save_subscription error"
+                );
+            }
             count.fetch_sub(1, Ordering::Relaxed);
             warn!(
                 "Failed to persist subscription for pattern {}: {}",
@@ -863,11 +954,6 @@ async fn create_subscription(
                 format!("failed to persist subscription: {}", e),
             ));
         }
-        state
-            .bus_to_persisted
-            .write()
-            .await
-            .insert(sub_id.clone(), persisted_id);
     }
 
     spawn_webhook_delivery_task(
@@ -921,40 +1007,77 @@ async fn remove_subscription(
     Ok(StatusCode::NO_CONTENT)
 }
 
-/// Reject patterns that an HTTP-API caller must not be allowed to
-/// intercept. Mirrors the WS server's `validate_remote_interceptor_pattern`.
-fn validate_http_interceptor_pattern(pattern: &str) -> Result<(), String> {
-    if pattern == ">" {
-        return Err("HTTP interceptors cannot register on the catch-all '>' pattern".to_string());
-    }
-    if pattern.starts_with("_reply.") || pattern == "_reply" {
-        return Err(
-            "HTTP interceptors cannot register on '_reply.*' (reserved for internal request/reply)"
-                .to_string(),
-        );
+/// Maximum number of HTTP-registered sync interceptors a server may hold.
+/// Independent of subscription count because interceptors run on every
+/// matching publish whereas subscriptions just receive events.
+const MAX_HTTP_INTERCEPTORS: usize = 64;
+
+/// Refuse a state-changing webhook-registration request when the
+/// configured authenticator is open (e.g. [`NoHttpAuth`]) and dev mode
+/// is not explicitly enabled. Used by `POST /subscribe` and
+/// `POST /interceptors`.
+///
+/// **B4 fix:** these endpoints install persistent webhook deliveries
+/// that survive restart. Allowing them under `NoHttpAuth` lets an
+/// unauthenticated attacker siphon every matching event for the life
+/// of the process.
+fn refuse_if_unauth_state_changing(state: &AppState, op_name: &str) -> Result<(), HttpError> {
+    if state.authenticator.is_open() && !state.dev_mode {
+        return Err(http_error_with_code(
+            StatusCode::UNAUTHORIZED,
+            format!(
+                "{} requires a real authenticator (or HttpServer::unsafe_allow_http_dev_mode() for tests)",
+                op_name
+            ),
+            "AUTH_REQUIRED",
+        ));
     }
     Ok(())
 }
 
+/// Map a [`crate::delivery::WebhookUrlError`] to a generic 400 response
+/// that does NOT leak resolved IPs or DNS specifics. Server-side
+/// callers log the underlying error themselves before invoking this.
+///
+/// **N3 fix:** the previous error format included the resolved IP
+/// (`URL host internal.example.com resolves to 10.0.4.17`), letting an
+/// attacker enumerate internal DNS topology via the response body.
+fn http_error_invalid_webhook_url() -> HttpError {
+    http_error_with_code(
+        StatusCode::BAD_REQUEST,
+        "invalid webhook URL",
+        "INVALID_WEBHOOK_URL",
+    )
+}
+
 /// Register a webhook-backed sync interceptor (C3 — Phase 4 D6 webhook half).
 ///
-/// Validates the URL via the configured SSRF policy, builds a
-/// [`crate::delivery::WebhookInterceptor`], registers it on the bus
-/// interceptor chain, and persists the entry so it survives restart.
+/// Hardening (post-re-review):
+/// - **B4** auth gate (refuses under open auth without dev mode)
+/// - **B1** shared token-aware pattern validator (rejects `*.>`, `*.*`, etc.)
+/// - **B2** priority floor at `MIN_REMOTE_INTERCEPTOR_PRIORITY`
+/// - **B3** per-server cap at `MAX_HTTP_INTERCEPTORS`
+/// - **N2** timeout clamp at `MAX_REMOTE_INTERCEPTOR_TIMEOUT_MS`
+/// - **N3** generic SSRF error response (no DNS leak)
+/// - **N6** mapping inserted before `save_subscription`, rolled back on failure
 async fn create_interceptor(
     State(state): State<AppState>,
     Json(req): Json<RegisterInterceptorRequest>,
 ) -> Result<Json<RegisterInterceptorResponse>, HttpError> {
-    // Pattern allowlist (mirrors C1 for the WS path).
-    if let Err(reason) = validate_http_interceptor_pattern(&req.pattern) {
+    // B4: refuse state-changing webhook registration under open auth.
+    refuse_if_unauth_state_changing(&state, "POST /interceptors")?;
+
+    // B1: shared token-aware pattern validator.
+    if let Err(e) = crate::transport::validate_remote_interceptor_pattern(&req.pattern) {
         return Err(http_error_with_code(
             StatusCode::BAD_REQUEST,
-            reason,
+            e.to_string(),
             "INVALID_INTERCEPTOR_PATTERN",
         ));
     }
 
-    // SSRF validation against the configured policy.
+    // C2/N3: SSRF validation against the configured policy. Log specifics
+    // server-side; return generic to caller.
     if let Err(e) =
         crate::delivery::validate_webhook_url_with_policy(&req.url, state.webhook_url_policy)
     {
@@ -962,18 +1085,37 @@ async fn create_interceptor(
             "rejected interceptor register with unsafe URL {}: {}",
             req.url, e
         );
+        return Err(http_error_invalid_webhook_url());
+    }
+
+    // B2: priority floor.
+    let effective_priority =
+        crate::transport::clamp_remote_interceptor_priority(req.priority);
+    // N2: timeout clamp.
+    let clamped_timeout_ms =
+        crate::transport::clamp_remote_interceptor_timeout(req.timeout_ms);
+
+    // B3: reserve a slot up front. Roll back on any subsequent failure.
+    let icount = Arc::clone(&state.interceptor_count);
+    let prev = icount.fetch_add(1, Ordering::Relaxed);
+    if prev >= MAX_HTTP_INTERCEPTORS {
+        icount.fetch_sub(1, Ordering::Relaxed);
         return Err(http_error_with_code(
-            StatusCode::BAD_REQUEST,
-            format!("invalid webhook URL: {}", e),
-            "INVALID_WEBHOOK_URL",
+            StatusCode::TOO_MANY_REQUESTS,
+            format!(
+                "Interceptor limit reached ({} max)",
+                MAX_HTTP_INTERCEPTORS
+            ),
+            "INTERCEPTOR_LIMIT",
         ));
     }
 
-    let timeout = req.timeout_ms.map(Duration::from_millis);
-    let mut interceptor = crate::delivery::WebhookInterceptor::new(
+    let timeout = clamped_timeout_ms.map(Duration::from_millis);
+    let mut interceptor = crate::delivery::WebhookInterceptor::with_policy(
         req.pattern.clone(),
         req.url.clone(),
         req.headers.clone(),
+        state.webhook_url_policy,
     );
     if let Some(t) = timeout {
         interceptor = interceptor.with_timeout(t);
@@ -982,11 +1124,12 @@ async fn create_interceptor(
 
     let bus_id = match state
         .bus
-        .intercept(&req.pattern, req.priority, interceptor, timeout)
+        .intercept(&req.pattern, effective_priority, interceptor, timeout)
         .await
     {
         Ok(id) => id,
         Err(e) => {
+            icount.fetch_sub(1, Ordering::Relaxed);
             warn!(
                 "Interceptor registration failed for pattern {}: {}",
                 req.pattern, e
@@ -998,9 +1141,9 @@ async fn create_interceptor(
         }
     };
 
-    // Persist the interceptor as a SyncInterceptor entry. Failure rolls
-    // back the bus registration so the caller sees the error and the
-    // bus state stays clean.
+    // Persist the interceptor as a SyncInterceptor entry. **N6 ordering:**
+    // insert mapping first, then save; on failure roll back both the
+    // mapping and the bus registration AND the cap counter.
     if let Some(store) = &state.store {
         let persisted_id = format!("hi-{}", ulid::Ulid::new());
         let now_ms = std::time::SystemTime::now()
@@ -1012,13 +1155,29 @@ async fn create_interceptor(
             pattern: req.pattern.clone(),
             url: req.url.clone(),
             headers: req.headers.clone(),
-            priority: req.priority,
+            priority: effective_priority,
             created_at: now_ms,
             kind: crate::storage::PersistedSubscriptionKind::SyncInterceptor,
+            timeout_ms: clamped_timeout_ms,
         };
+
+        state
+            .bus_to_persisted
+            .write()
+            .await
+            .insert(bus_id.clone(), persisted_id.clone());
+
         if let Err(e) = store.save_subscription(&entry).await {
-            // Roll back the bus registration before failing the request.
-            let _ = state.bus.unsubscribe(&bus_id).await;
+            // Roll back mapping, bus registration, and cap counter.
+            state.bus_to_persisted.write().await.remove(&bus_id);
+            if let Err(unsub_err) = state.bus.unsubscribe(&bus_id).await {
+                warn!(
+                    bus_id = %bus_id,
+                    error = %unsub_err,
+                    "rollback unsubscribe failed after interceptor save error"
+                );
+            }
+            icount.fetch_sub(1, Ordering::Relaxed);
             warn!(
                 "Failed to persist interceptor for pattern {}: {}",
                 req.pattern, e
@@ -1028,11 +1187,6 @@ async fn create_interceptor(
                 format!("failed to persist interceptor: {}", e),
             ));
         }
-        state
-            .bus_to_persisted
-            .write()
-            .await
-            .insert(bus_id.clone(), persisted_id);
     }
 
     debug!(
@@ -1050,10 +1204,30 @@ async fn remove_interceptor(
     State(state): State<AppState>,
     Path(id): Path<String>,
 ) -> Result<StatusCode, HttpError> {
+    // Track whether the bus actually had the entry (to decide whether
+    // to decrement the cap counter — DELETE is idempotent so unknown
+    // ids must not double-decrement).
+    let was_present = state
+        .bus
+        .list_subscriptions(None)
+        .await
+        .map(|subs| subs.iter().any(|s| s.id == id))
+        .unwrap_or(false);
+
     state.bus.unsubscribe(&id).await.map_err(|e| {
         warn!("Interceptor unsubscribe failed for id {}: {}", id, e);
         http_error(StatusCode::INTERNAL_SERVER_ERROR, format!("{}", e))
     })?;
+
+    if was_present {
+        // Decrement the cap counter so a subsequent register can use
+        // the slot. Saturating sub guards against any edge case where
+        // the counter is already 0.
+        let prev = state.interceptor_count.load(Ordering::Relaxed);
+        if prev > 0 {
+            state.interceptor_count.fetch_sub(1, Ordering::Relaxed);
+        }
+    }
 
     if let Some(store) = &state.store {
         let persisted_id = state.bus_to_persisted.write().await.remove(&id);
@@ -1086,13 +1260,7 @@ async fn get_event(
     // M1: refuse data exfiltration when no real authenticator is wired.
     // Sequences are monotonic from 1, so an open server would let any
     // caller `for seq in 1..N: GET /events/$seq` and dump the entire bus.
-    if state.authenticator.is_open() && !state.dev_mode {
-        return Err(http_error_with_code(
-            StatusCode::UNAUTHORIZED,
-            "GET /events/:seq requires a real authenticator (or call HttpServer::unsafe_allow_dev_mode() for tests)",
-            "AUTH_REQUIRED",
-        ));
-    }
+    refuse_if_unauth_state_changing(&state, "GET /events/:seq")?;
 
     let event = state.bus.get_event(seq).await.map_err(|e| {
         warn!("get_event failed for seq {}: {}", seq, e);
