@@ -219,7 +219,7 @@ impl RegistryService {
     /// Returns a `JoinHandle` for the spawned task.
     pub async fn spawn(
         self,
-        nats_client: async_nats::Client,
+        nats_client: seidrum_common::bus_client::BusClient,
     ) -> Result<tokio::task::JoinHandle<()>> {
         let mut register_sub = nats_client
             .subscribe("plugin.register".to_string())
@@ -283,7 +283,7 @@ impl RegistryService {
                                     match serde_json::to_vec(&response) {
                                         Ok(bytes) => {
                                             if let Err(e) = nats_client
-                                                .publish(reply, bytes.into())
+                                                .publish_bytes(reply, bytes)
                                                 .await
                                             {
                                                 warn!(
@@ -317,7 +317,7 @@ impl RegistryService {
                                         error: Some(format!("invalid query: {e}")),
                                     };
                                     if let Ok(bytes) = serde_json::to_vec(&err_resp) {
-                                        let _ = nats_client.publish(reply, bytes.into()).await;
+                                        let _ = nats_client.publish_bytes(reply, bytes).await;
                                     }
                                 }
                             }

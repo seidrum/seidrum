@@ -1,7 +1,7 @@
 use anyhow::Result;
 use futures::StreamExt;
+use seidrum_common::bus_client::BusClient;
 use seidrum_common::events::{ChannelOutbound, EventEnvelope};
-use seidrum_common::nats_utils::NatsClient;
 use teloxide::prelude::*;
 use teloxide::types::{ChatId, MessageId, ParseMode, ReplyParameters, ThreadId};
 use tracing::{error, info, warn};
@@ -9,7 +9,7 @@ use tracing::{error, info, warn};
 /// Run the outbound loop: subscribe to NATS for outbound messages and send them
 /// to Telegram. Handles message splitting, markdown formatting with fallback,
 /// and reply-to threading.
-pub async fn run_outbound_loop(bot: Bot, nats: NatsClient) {
+pub async fn run_outbound_loop(bot: Bot, nats: BusClient) {
     let mut subscriber = match nats.subscribe("channel.telegram.outbound").await {
         Ok(s) => s,
         Err(err) => {

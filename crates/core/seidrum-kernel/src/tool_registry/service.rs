@@ -200,7 +200,7 @@ impl ToolRegistryService {
     async fn register_capability(
         &self,
         payload: ToolRegisterPayload,
-        nats: &async_nats::Client,
+        nats: &seidrum_common::bus_client::BusClient,
     ) -> Result<()> {
         let tool_id = payload.tool_id.clone();
         let plugin_id = payload.plugin_id.clone();
@@ -260,7 +260,7 @@ impl ToolRegistryService {
             match serde_json::to_vec(registered_entry) {
                 Ok(bytes) => {
                     if let Err(e) = nats
-                        .publish("capability.registered".to_string(), bytes.into())
+                        .publish_bytes("capability.registered".to_string(), bytes)
                         .await
                     {
                         warn!(error = %e, "failed to publish capability.registered");
@@ -288,7 +288,7 @@ impl ToolRegistryService {
     async fn deregister_by_plugin(
         &self,
         plugin_id: &str,
-        nats: &async_nats::Client,
+        nats: &seidrum_common::bus_client::BusClient,
     ) -> Vec<String> {
         let mut tools = self.tools.write().await;
         let tool_ids: Vec<String> = tools
@@ -320,7 +320,7 @@ impl ToolRegistryService {
                 let event = serde_json::json!({ "tool_id": tid, "plugin_id": plugin_id });
                 if let Ok(bytes) = serde_json::to_vec(&event) {
                     let _ = nats
-                        .publish("capability.deregistered".to_string(), bytes.into())
+                        .publish_bytes("capability.deregistered".to_string(), bytes)
                         .await;
                 }
             }
@@ -472,7 +472,10 @@ impl ToolRegistryService {
     }
 
     /// Register the built-in meta-capabilities that the kernel itself provides.
-    async fn register_meta_capabilities(&self, nats: &async_nats::Client) -> Result<()> {
+    async fn register_meta_capabilities(
+        &self,
+        nats: &seidrum_common::bus_client::BusClient,
+    ) -> Result<()> {
         let meta_capabilities = vec![
             ToolRegisterPayload {
                 tool_id: "brain-query".to_string(),
@@ -569,7 +572,7 @@ impl ToolRegistryService {
     /// Returns a `JoinHandle` for the spawned task.
     pub async fn spawn(
         self,
-        nats_client: async_nats::Client,
+        nats_client: seidrum_common::bus_client::BusClient,
     ) -> Result<tokio::task::JoinHandle<()>> {
         // Load existing capabilities from the database.
         if let Err(e) = self.load_from_db().await {
@@ -636,7 +639,7 @@ impl ToolRegistryService {
                                     match serde_json::to_vec(&response) {
                                         Ok(bytes) => {
                                             if let Err(e) = nats_client
-                                                .publish(reply, bytes.into())
+                                                .publish_bytes(reply, bytes)
                                                 .await
                                             {
                                                 warn!(
@@ -662,7 +665,7 @@ impl ToolRegistryService {
                                 if let Some(reply) = msg.reply {
                                     let err_resp = ToolSearchResponse { tools: vec![] };
                                     if let Ok(bytes) = serde_json::to_vec(&err_resp) {
-                                        let _ = nats_client.publish(reply, bytes.into()).await;
+                                        let _ = nats_client.publish_bytes(reply, bytes).await;
                                     }
                                 }
                             }
@@ -676,7 +679,7 @@ impl ToolRegistryService {
                                     match serde_json::to_vec(&response) {
                                         Ok(bytes) => {
                                             if let Err(e) = nats_client
-                                                .publish(reply, bytes.into())
+                                                .publish_bytes(reply, bytes)
                                                 .await
                                             {
                                                 warn!(
@@ -702,7 +705,7 @@ impl ToolRegistryService {
                                 if let Some(reply) = msg.reply {
                                     let err_resp: Option<ToolDescribeResponse> = None;
                                     if let Ok(bytes) = serde_json::to_vec(&err_resp) {
-                                        let _ = nats_client.publish(reply, bytes.into()).await;
+                                        let _ = nats_client.publish_bytes(reply, bytes).await;
                                     }
                                 }
                             }

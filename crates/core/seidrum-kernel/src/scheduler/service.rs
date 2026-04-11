@@ -39,14 +39,18 @@ FOR fact IN facts
 /// Scheduler service that manages periodic kernel jobs.
 pub struct SchedulerService {
     arango: ArangoClient,
-    nats: async_nats::Client,
+    nats: seidrum_common::bus_client::BusClient,
     registry: RegistryService,
     start_time: chrono::DateTime<Utc>,
 }
 
 impl SchedulerService {
     /// Create a new scheduler service.
-    pub fn new(arango: ArangoClient, nats: async_nats::Client, registry: RegistryService) -> Self {
+    pub fn new(
+        arango: ArangoClient,
+        nats: seidrum_common::bus_client::BusClient,
+        registry: RegistryService,
+    ) -> Self {
         Self {
             arango,
             nats,
@@ -187,7 +191,7 @@ const MAX_HEALTH_FAILURES: u32 = 3;
 /// Ping every registered plugin via NATS request/reply and publish a SystemHealth event.
 /// Tracks consecutive failures and auto-deregisters unresponsive plugins.
 async fn run_health_check(
-    nats: &async_nats::Client,
+    nats: &seidrum_common::bus_client::BusClient,
     registry: &RegistryService,
     start_time: chrono::DateTime<Utc>,
     failure_counts: &Mutex<HashMap<String, u32>>,
@@ -204,12 +208,12 @@ async fn run_health_check(
 
         let is_responsive = match tokio::time::timeout(
             Duration::from_secs(5),
-            nats.request(health_subject.clone(), request_payload.into()),
+            nats.request_bytes(health_subject.clone(), request_payload),
         )
         .await
         {
             Ok(Ok(response)) => {
-                match serde_json::from_slice::<PluginHealthResponse>(&response.payload) {
+                match serde_json::from_slice::<PluginHealthResponse>(&response) {
                     Ok(health) => {
                         if health.status != "healthy" {
                             warn!(
@@ -281,7 +285,7 @@ async fn run_health_check(
                 // both subscribe to this and will clean up
                 let dereg = PluginDeregister { id: id.clone() };
                 if let Ok(bytes) = serde_json::to_vec(&dereg) {
-                    if let Err(e) = nats.publish("plugin.deregister", bytes.into()).await {
+                    if let Err(e) = nats.publish_bytes("plugin.deregister", bytes).await {
                         error!(error = %e, plugin_id = %id, "failed to publish auto-deregister");
                     }
                 }
@@ -308,7 +312,7 @@ async fn run_health_check(
 
 /// Helper to wrap a payload in an EventEnvelope and publish to NATS.
 async fn publish_event<T: serde::Serialize>(
-    nats: &async_nats::Client,
+    nats: &seidrum_common::bus_client::BusClient,
     subject: &str,
     source: &str,
     payload: &T,
@@ -316,7 +320,7 @@ async fn publish_event<T: serde::Serialize>(
     let envelope = EventEnvelope::new(subject, source, None, None, payload)
         .context("failed to create event envelope")?;
     let bytes = serde_json::to_vec(&envelope).context("failed to serialize envelope")?;
-    nats.publish(subject.to_string(), bytes.into())
+    nats.publish_bytes(subject.to_string(), bytes)
         .await
         .context("failed to publish event")?;
     Ok(())

@@ -3,8 +3,8 @@ use std::collections::HashMap;
 use anyhow::Result;
 use clap::Parser;
 use futures::StreamExt;
+use seidrum_common::bus_client::BusClient;
 use seidrum_common::events::{ChannelInbound, ChannelOutbound, EventEnvelope, PluginRegister};
-use seidrum_common::nats_utils::NatsClient;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tracing::{error, info};
 
@@ -25,7 +25,7 @@ async fn main() -> Result<()> {
     info!(nats_url = %cli.nats_url, "Starting seidrum-cli plugin...");
 
     // Connect to NATS
-    let nats = NatsClient::connect(&cli.nats_url, "cli").await?;
+    let nats = BusClient::connect(&cli.nats_url, "cli").await?;
 
     // Register with kernel
     let registration = PluginRegister {

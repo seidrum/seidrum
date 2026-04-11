@@ -317,7 +317,7 @@ pub async fn update_plugin_config(
 
     let subject = format!("plugin.{}.config.update", plugin_id);
     if let Ok(bytes) = serde_json::to_vec(&update) {
-        let _ = state.nats.inner().publish(subject, bytes.into()).await;
+        let _ = state.nats.publish_bytes(&subject, bytes).await;
     }
 
     Json(serde_json::json!({"success": true})).into_response()

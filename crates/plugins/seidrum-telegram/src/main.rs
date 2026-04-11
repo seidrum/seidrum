@@ -10,8 +10,8 @@ use std::sync::Arc;
 
 use anyhow::Result;
 use clap::Parser;
+use seidrum_common::bus_client::BusClient;
 use seidrum_common::events::PluginRegister;
-use seidrum_common::nats_utils::NatsClient;
 use teloxide::prelude::*;
 use teloxide::types::Message;
 use tracing::{error, info, warn};
@@ -65,7 +65,7 @@ async fn main() -> Result<()> {
     );
 
     // Connect to NATS
-    let nats = NatsClient::connect(&cli.nats_url, "telegram").await?;
+    let nats = BusClient::connect(&cli.nats_url, "telegram").await?;
     info!("Connected to NATS at {}", cli.nats_url);
 
     // Register plugin
@@ -218,7 +218,7 @@ async fn main() -> Result<()> {
 /// Shared inbound handler logic: whitelist check + dispatch to inbound module.
 async fn handle_inbound(
     msg: &Message,
-    nats: &NatsClient,
+    nats: &BusClient,
     config: &InboundConfig,
     allowed: &[u64],
     is_edited: bool,

@@ -127,7 +127,7 @@ pub async fn start_plugin(
 
     state
         .nats
-        .publish("daemon.plugin.start".to_string(), payload.into())
+        .publish_bytes("daemon.plugin.start".to_string(), payload)
         .await
         .map_err(|e| {
             error!("Failed to publish plugin.start: {}", e);
@@ -148,7 +148,7 @@ pub async fn stop_plugin(
 
     state
         .nats
-        .publish("daemon.plugin.stop".to_string(), payload.into())
+        .publish_bytes("daemon.plugin.stop".to_string(), payload)
         .await
         .map_err(|e| {
             error!("Failed to publish plugin.stop: {}", e);
@@ -252,13 +252,13 @@ async fn query_running_plugins(
 
     match tokio::time::timeout(
         std::time::Duration::from_secs(2),
-        state.nats.request("registry.query", request.into()),
+        state.nats.request_bytes("registry.query", request),
     )
     .await
     {
         Ok(Ok(reply)) => {
             let response: std::collections::HashSet<String> =
-                serde_json::from_slice(&reply.payload).unwrap_or_default();
+                serde_json::from_slice(&reply).unwrap_or_default();
             Ok(response)
         }
         Err(_) => {

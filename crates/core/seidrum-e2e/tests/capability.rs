@@ -34,7 +34,7 @@ async fn test_capability_register_and_search() {
     };
 
     let bytes = serde_json::to_vec(&register).unwrap();
-    nats.publish("capability.register", bytes.into())
+    nats.publish_bytes("capability.register", bytes)
         .await
         .unwrap();
 
@@ -84,7 +84,7 @@ async fn test_capability_kind_filter() {
     };
 
     let bytes = serde_json::to_vec(&register).unwrap();
-    nats.publish("capability.register", bytes.into())
+    nats.publish_bytes("capability.register", bytes)
         .await
         .unwrap();
 

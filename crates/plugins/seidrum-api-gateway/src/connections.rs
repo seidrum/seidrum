@@ -22,11 +22,11 @@ pub struct ExternalPluginConnection {
     pub events_processed: AtomicU64,
 }
 
-/// A pending NATS request/reply awaiting a response from an external plugin.
+/// A pending bus request/reply awaiting a response from an external plugin.
 pub struct PendingRequest {
-    pub reply_subject: async_nats::Subject,
+    pub reply_subject: seidrum_common::bus_client::Subject,
     pub deadline: Instant,
-    pub nats_client: async_nats::Client,
+    pub nats_client: seidrum_common::bus_client::BusClient,
     /// Whether this is a health check (shorter timeout, different error response).
     pub is_health_check: bool,
 }
@@ -153,7 +153,7 @@ impl ConnectionManager {
                 if let Ok(bytes) = serde_json::to_vec(&response) {
                     if let Err(e) = pending
                         .nats_client
-                        .publish(pending.reply_subject, bytes.into())
+                        .reply_to(&pending.reply_subject, bytes)
                         .await
                     {
                         warn!(error = %e, %request_id, "Failed to publish timeout response");

@@ -87,7 +87,7 @@ async fn main() -> Result<()> {
     info!(plugin = PLUGIN_ID, "Starting event emitter plugin");
 
     // Connect to NATS
-    let client = async_nats::connect(&args.nats_url)
+    let client = seidrum_common::bus_client::BusClient::connect(&args.nats_url, "event-emitter")
         .await
         .context("Failed to connect to NATS")?;
 
@@ -115,10 +115,7 @@ async fn main() -> Result<()> {
         EventEnvelope::new("plugin.register", PLUGIN_ID, None, None, &register)?;
 
     client
-        .publish(
-            "plugin.register",
-            serde_json::to_vec(&register_envelope)?.into(),
-        )
+        .publish_bytes("plugin.register", serde_json::to_vec(&register_envelope)?)
         .await
         .context("Failed to publish plugin.register")?;
 
@@ -259,7 +256,7 @@ fn extract_actions(content: &str) -> StructuredActions {
 }
 
 async fn process_response(
-    nats: &async_nats::Client,
+    nats: &seidrum_common::bus_client::BusClient,
     llm_response: &LlmResponse,
     correlation_id: &Option<String>,
     scope: &Option<String>,
@@ -317,12 +314,9 @@ async fn process_response(
             &task_payload,
         )?;
 
-        nats.publish(
-            "brain.task.upsert",
-            serde_json::to_vec(&task_envelope)?.into(),
-        )
-        .await
-        .context("Failed to publish brain.task.upsert")?;
+        nats.publish_bytes("brain.task.upsert", serde_json::to_vec(&task_envelope)?)
+            .await
+            .context("Failed to publish brain.task.upsert")?;
 
         info!(title = %task.title, "Published task upsert");
     }
@@ -347,12 +341,9 @@ async fn process_response(
             &fact_upsert,
         )?;
 
-        nats.publish(
-            "brain.fact.upsert",
-            serde_json::to_vec(&fact_envelope)?.into(),
-        )
-        .await
-        .context("Failed to publish brain.fact.upsert")?;
+        nats.publish_bytes("brain.fact.upsert", serde_json::to_vec(&fact_envelope)?)
+            .await
+            .context("Failed to publish brain.fact.upsert")?;
 
         info!(
             subject = %fact.subject,
@@ -380,7 +371,7 @@ async fn process_response(
         )?;
 
         let wake_bytes = serde_json::to_vec(&wake_envelope)?;
-        nats.publish(wake_subject, wake_bytes.into())
+        nats.publish_bytes(wake_subject, wake_bytes)
             .await
             .context("Failed to publish agent wake event")?;
 

@@ -116,7 +116,7 @@ async fn main() -> Result<()> {
     let api_key = resolve_google_api_key(&cli.google_api_key)?;
 
     // Connect to NATS
-    let nats = async_nats::connect(&cli.nats_url).await?;
+    let nats = seidrum_common::bus_client::BusClient::connect(&cli.nats_url, "llm-google").await?;
     info!("Connected to NATS");
 
     // Publish plugin registration
@@ -134,11 +134,8 @@ async fn main() -> Result<()> {
     };
     let register_envelope =
         EventEnvelope::new("plugin.register", "llm-google", None, None, &register)?;
-    nats.publish(
-        "plugin.register",
-        serde_json::to_vec(&register_envelope)?.into(),
-    )
-    .await?;
+    nats.publish_bytes("plugin.register", serde_json::to_vec(&register_envelope)?)
+        .await?;
     info!("Published plugin.register");
 
     // Subscribe to llm.provider.google (request/reply service)
@@ -189,7 +186,7 @@ async fn main() -> Result<()> {
                         }
                     };
                     if let Err(e) = nats_clone
-                        .publish(reply.to_string(), resp_bytes.into())
+                        .publish_bytes(reply.to_string(), resp_bytes)
                         .await
                     {
                         error!(error = %e, "Failed to reply to llm.provider.google request");
@@ -215,7 +212,7 @@ async fn main() -> Result<()> {
                         tool_rounds: 0,
                     };
                     if let Ok(bytes) = serde_json::to_vec(&err_response) {
-                        let _ = nats_clone.publish(reply.to_string(), bytes.into()).await;
+                        let _ = nats_clone.publish_bytes(reply.to_string(), bytes).await;
                     }
                 }
             }
@@ -237,7 +234,7 @@ async fn handle_provider_request(
     model: &str,
     max_tokens: u32,
     max_tool_rounds: u32,
-    nats: &async_nats::Client,
+    nats: &seidrum_common::bus_client::BusClient,
 ) -> Result<LlmResponse> {
     // Parse the UnifiedLlmRequest from the payload
     let request: UnifiedLlmRequest = serde_json::from_slice(payload)?;
@@ -406,32 +403,30 @@ async fn handle_provider_request(
 
             let tool_result = match tokio::time::timeout(
                 std::time::Duration::from_secs(30),
-                nats.request("capability.call", req_bytes.into()),
+                nats.request_bytes("capability.call", req_bytes),
             )
             .await
             {
-                Ok(Ok(resp_msg)) => {
-                    match serde_json::from_slice::<ToolCallResponse>(&resp_msg.payload) {
-                        Ok(resp) => {
-                            info!(
-                                tool_id = %resp.tool_id,
-                                is_error = resp.is_error,
-                                "Tool call completed"
-                            );
-                            resp
-                        }
-                        Err(e) => {
-                            warn!(error = %e, "Failed to parse tool call response");
-                            ToolCallResponse {
-                                tool_id: tc.name.clone(),
-                                result: serde_json::json!({
-                                    "error": format!("Failed to parse response: {}", e)
-                                }),
-                                is_error: true,
-                            }
+                Ok(Ok(resp_msg)) => match serde_json::from_slice::<ToolCallResponse>(&resp_msg) {
+                    Ok(resp) => {
+                        info!(
+                            tool_id = %resp.tool_id,
+                            is_error = resp.is_error,
+                            "Tool call completed"
+                        );
+                        resp
+                    }
+                    Err(e) => {
+                        warn!(error = %e, "Failed to parse tool call response");
+                        ToolCallResponse {
+                            tool_id: tc.name.clone(),
+                            result: serde_json::json!({
+                                "error": format!("Failed to parse response: {}", e)
+                            }),
+                            is_error: true,
                         }
                     }
-                }
+                },
                 Ok(Err(e)) => {
                     error!(error = %e, tool = %tc.name, "NATS request to capability.call failed");
                     ToolCallResponse {

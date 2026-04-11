@@ -123,7 +123,7 @@ async fn poll_calendar(
     client: &reqwest::Client,
     api_key: &str,
     calendar_id: &str,
-    nats: &async_nats::Client,
+    nats: &seidrum_common::bus_client::BusClient,
     seen: &Arc<Mutex<HashSet<String>>>,
 ) -> Result<()> {
     let now = chrono::Utc::now();
@@ -217,7 +217,7 @@ async fn poll_calendar(
             EventEnvelope::new("channel.calendar.inbound", "calendar", None, None, &inbound)?;
 
         let bytes = serde_json::to_vec(&envelope)?;
-        nats.publish("channel.calendar.inbound", bytes.into())
+        nats.publish_bytes("channel.calendar.inbound", bytes)
             .await?;
 
         seen_lock.insert(event_id.clone());
@@ -348,7 +348,7 @@ async fn main() -> Result<()> {
     let api_key = resolve_google_api_key(&cli.google_api_key)?;
 
     // Connect to NATS
-    let nats = async_nats::connect(&cli.nats_url).await?;
+    let nats = seidrum_common::bus_client::BusClient::connect(&cli.nats_url, "calendar").await?;
     info!("Connected to NATS at {}", cli.nats_url);
 
     // Register plugin
@@ -367,7 +367,7 @@ async fn main() -> Result<()> {
     let register_envelope =
         EventEnvelope::new("plugin.register", "calendar", None, None, &register)?;
     let register_bytes = serde_json::to_vec(&register_envelope)?;
-    nats.publish("plugin.register", register_bytes.into())
+    nats.publish_bytes("plugin.register", register_bytes)
         .await?;
     info!("Published plugin.register event");
 
@@ -396,11 +396,8 @@ async fn main() -> Result<()> {
         "kind": "tool"
     });
 
-    nats.publish(
-        "capability.register",
-        serde_json::to_vec(&search_tool)?.into(),
-    )
-    .await?;
+    nats.publish_bytes("capability.register", serde_json::to_vec(&search_tool)?)
+        .await?;
     info!("Tool 'search-calendar' registered with kernel");
 
     let create_tool = serde_json::json!({
@@ -439,11 +436,8 @@ async fn main() -> Result<()> {
         "kind": "tool"
     });
 
-    nats.publish(
-        "capability.register",
-        serde_json::to_vec(&create_tool)?.into(),
-    )
-    .await?;
+    nats.publish_bytes("capability.register", serde_json::to_vec(&create_tool)?)
+        .await?;
     info!("Tool 'create-calendar-event' registered with kernel");
 
     // Subscribe to event creation requests
@@ -545,11 +539,9 @@ async fn main() -> Result<()> {
                         is_error: true,
                     };
                     if let Err(e) = tool_nats
-                        .publish(
+                        .publish_bytes(
                             reply,
-                            serde_json::to_vec(&error_response)
-                                .unwrap_or_default()
-                                .into(),
+                            serde_json::to_vec(&error_response).unwrap_or_default(),
                         )
                         .await
                     {
@@ -664,11 +656,9 @@ async fn main() -> Result<()> {
             };
 
             if let Err(err) = tool_nats
-                .publish(
+                .publish_bytes(
                     reply,
-                    serde_json::to_vec(&tool_response)
-                        .unwrap_or_default()
-                        .into(),
+                    serde_json::to_vec(&tool_response).unwrap_or_default(),
                 )
                 .await
             {

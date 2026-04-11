@@ -32,7 +32,7 @@ pub struct RuntimeSubscription {
 
 /// Handle `subscribe-events` — dynamically subscribe an agent to NATS subjects.
 pub async fn handle_subscribe_events(
-    nats: &async_nats::Client,
+    nats: &seidrum_common::bus_client::BusClient,
     agent_id: &str,
     args: &SubscribeEventsRequest,
     runtime_subs: &Arc<RwLock<HashMap<String, Vec<RuntimeSubscription>>>>,
@@ -122,10 +122,7 @@ pub async fn handle_subscribe_events(
 
                 let consciousness_subject = format!("agent.{}.consciousness", agent_id_clone);
                 if let Ok(bytes) = serde_json::to_vec(&event) {
-                    if let Err(e) = nats_clone
-                        .publish(consciousness_subject, bytes.into())
-                        .await
-                    {
+                    if let Err(e) = nats_clone.publish_bytes(consciousness_subject, bytes).await {
                         warn!(%e, "Failed to publish consciousness event");
                     }
                 }
@@ -189,7 +186,7 @@ pub async fn handle_unsubscribe_events(
 
 /// Handle `delegate-task` — create an agent-to-agent conversation.
 pub async fn handle_delegate_task(
-    nats: &async_nats::Client,
+    nats: &seidrum_common::bus_client::BusClient,
     from_agent_id: &str,
     args: &DelegateTaskRequest,
 ) -> ToolCallResponse {
@@ -291,7 +288,7 @@ pub async fn handle_delegate_task(
 
     let subject = format!("agent.{}.consciousness", args.to_agent_id);
     if let Ok(bytes) = serde_json::to_vec(&event) {
-        let _ = nats.publish(subject, bytes.into()).await;
+        let _ = nats.publish_bytes(subject, bytes).await;
     }
 
     info!(
@@ -313,7 +310,7 @@ pub async fn handle_delegate_task(
 
 /// Handle `schedule-wake` — set a timer that fires on the consciousness stream.
 pub async fn handle_schedule_wake(
-    nats: &async_nats::Client,
+    nats: &seidrum_common::bus_client::BusClient,
     agent_id: &str,
     args: &ScheduleWakeRequest,
 ) -> ToolCallResponse {
@@ -343,7 +340,7 @@ pub async fn handle_schedule_wake(
 
         let subject = format!("agent.{}.consciousness", agent_id_clone);
         if let Ok(bytes) = serde_json::to_vec(&event) {
-            let _ = nats_clone.publish(subject, bytes.into()).await;
+            let _ = nats_clone.publish_bytes(subject, bytes).await;
         }
 
         info!(
@@ -369,7 +366,7 @@ pub async fn handle_schedule_wake(
 
 /// Handle `send-notification` — proactively message the user.
 pub async fn handle_send_notification(
-    nats: &async_nats::Client,
+    nats: &seidrum_common::bus_client::BusClient,
     args: &SendNotificationRequest,
 ) -> ToolCallResponse {
     let outbound = ChannelOutbound {
@@ -404,7 +401,7 @@ pub async fn handle_send_notification(
         }
     };
 
-    match nats.publish(subject, bytes.into()).await {
+    match nats.publish_bytes(subject, bytes).await {
         Ok(_) => ToolCallResponse {
             tool_id: "send-notification".to_string(),
             result: serde_json::json!({
@@ -424,7 +421,7 @@ pub async fn handle_send_notification(
 
 /// Handle `get-conversation` — load a conversation by ID.
 pub async fn handle_get_conversation(
-    nats: &async_nats::Client,
+    nats: &seidrum_common::bus_client::BusClient,
     args: &ConversationGetRequest,
 ) -> ToolCallResponse {
     match tokio::time::timeout(
@@ -453,7 +450,7 @@ pub async fn handle_get_conversation(
 
 /// Handle `list-conversations` — list recent conversations.
 pub async fn handle_list_conversations(
-    nats: &async_nats::Client,
+    nats: &seidrum_common::bus_client::BusClient,
     agent_id: &str,
     args: &ConversationListRequest,
 ) -> ToolCallResponse {
@@ -490,7 +487,7 @@ pub async fn handle_list_conversations(
 
 /// Handle `search-skills` — search skills by text query via brain service.
 pub async fn handle_search_skills(
-    nats: &async_nats::Client,
+    nats: &seidrum_common::bus_client::BusClient,
     args: &seidrum_common::events::SkillSearchRequest,
 ) -> ToolCallResponse {
     match tokio::time::timeout(
@@ -523,7 +520,7 @@ pub async fn handle_search_skills(
 
 /// Handle `load-skill` — load a specific skill by ID.
 pub async fn handle_load_skill(
-    nats: &async_nats::Client,
+    nats: &seidrum_common::bus_client::BusClient,
     args: &seidrum_common::events::SkillGetRequest,
 ) -> ToolCallResponse {
     match tokio::time::timeout(
@@ -562,7 +559,7 @@ pub async fn handle_load_skill(
 
 /// Handle `save-skill` — save a learned behavioral skill.
 pub async fn handle_save_skill(
-    nats: &async_nats::Client,
+    nats: &seidrum_common::bus_client::BusClient,
     args: &seidrum_common::events::SkillSaveRequest,
 ) -> ToolCallResponse {
     match tokio::time::timeout(
