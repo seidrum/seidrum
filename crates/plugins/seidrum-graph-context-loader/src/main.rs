@@ -109,7 +109,7 @@ async fn generate_embedding(
 
 /// Send a brain query request via NATS request/reply and parse the response.
 async fn brain_query(
-    nats: &async_nats::Client,
+    nats: &seidrum_common::bus_client::BusClient,
     request: &BrainQueryRequest,
 ) -> Result<BrainQueryResponse> {
     let envelope = EventEnvelope::new(
@@ -122,12 +122,12 @@ async fn brain_query(
     let payload = serde_json::to_vec(&envelope)?;
 
     let reply = nats
-        .request("brain.query.request", payload.into())
+        .request_bytes("brain.query.request", payload)
         .await
         .context("brain.query.request NATS request failed")?;
 
-    let reply_envelope: EventEnvelope = serde_json::from_slice(&reply.payload)
-        .context("failed to parse brain query reply envelope")?;
+    let reply_envelope: EventEnvelope =
+        serde_json::from_slice(&reply).context("failed to parse brain query reply envelope")?;
 
     let response: BrainQueryResponse = serde_json::from_value(reply_envelope.payload)
         .context("failed to parse BrainQueryResponse from reply payload")?;
@@ -137,7 +137,7 @@ async fn brain_query(
 
 /// Request vector-similar content from the brain using an embedding.
 async fn query_vector_search(
-    nats: &async_nats::Client,
+    nats: &seidrum_common::bus_client::BusClient,
     embedding: &[f64],
     limit: u32,
     user_id: Option<String>,
@@ -163,7 +163,7 @@ async fn query_vector_search(
 
 /// Request high-level context from the brain (entities, facts, tasks).
 async fn query_get_context(
-    nats: &async_nats::Client,
+    nats: &seidrum_common::bus_client::BusClient,
     text: &str,
     graph_depth: u32,
     max_facts: u32,
@@ -191,7 +191,7 @@ async fn query_get_context(
 
 /// Request recent conversation history from the brain.
 async fn query_conversation_history(
-    nats: &async_nats::Client,
+    nats: &seidrum_common::bus_client::BusClient,
     chat_id: &str,
     limit: u32,
     user_id: Option<String>,
@@ -250,7 +250,7 @@ async fn query_conversation_history(
 
 /// Request active tasks from the brain, scoped to user when available.
 async fn query_active_tasks(
-    nats: &async_nats::Client,
+    nats: &seidrum_common::bus_client::BusClient,
     user_id: Option<String>,
 ) -> Result<BrainQueryResponse> {
     let aql = if user_id.is_some() {
@@ -296,7 +296,7 @@ async fn query_active_tasks(
 
 /// Search for relevant skills via the brain.skill.search NATS endpoint.
 async fn query_skill_search(
-    nats: &async_nats::Client,
+    nats: &seidrum_common::bus_client::BusClient,
     query: &str,
     scope: Option<&str>,
 ) -> Result<SkillSearchResponse> {
@@ -316,12 +316,12 @@ async fn query_skill_search(
     let payload = serde_json::to_vec(&envelope)?;
 
     let reply = nats
-        .request("brain.skill.search", payload.into())
+        .request_bytes("brain.skill.search", payload)
         .await
         .context("brain.skill.search NATS request failed")?;
 
-    let reply_envelope: EventEnvelope = serde_json::from_slice(&reply.payload)
-        .context("failed to parse skill search reply envelope")?;
+    let reply_envelope: EventEnvelope =
+        serde_json::from_slice(&reply).context("failed to parse skill search reply envelope")?;
 
     let response: SkillSearchResponse = serde_json::from_value(reply_envelope.payload)
         .context("failed to parse SkillSearchResponse from reply payload")?;
@@ -414,9 +414,10 @@ async fn main() -> Result<()> {
     );
 
     // Connect to NATS
-    let nats = async_nats::connect(&cli.nats_url)
-        .await
-        .context("failed to connect to NATS")?;
+    let nats =
+        seidrum_common::bus_client::BusClient::connect(&cli.nats_url, "graph-context-loader")
+            .await
+            .context("failed to connect to NATS")?;
     info!("Connected to NATS");
 
     // Register with kernel
@@ -441,7 +442,7 @@ async fn main() -> Result<()> {
         &register,
     )?;
     let register_bytes = serde_json::to_vec(&register_envelope)?;
-    nats.publish("plugin.register", register_bytes.into())
+    nats.publish_bytes("plugin.register", register_bytes)
         .await
         .context("failed to publish plugin.register")?;
     info!("Published plugin.register");
@@ -677,7 +678,7 @@ async fn main() -> Result<()> {
         let context_bytes = serde_json::to_vec(&context_envelope)?;
 
         if let Err(err) = nats
-            .publish("agent.context.loaded", context_bytes.into())
+            .publish_bytes("agent.context.loaded", context_bytes)
             .await
         {
             error!(

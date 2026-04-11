@@ -148,7 +148,7 @@ impl PluginStorageService {
     /// Spawn the service: subscribe to storage NATS subjects and handle requests.
     pub async fn spawn(
         self,
-        nats_client: async_nats::Client,
+        nats_client: seidrum_common::bus_client::BusClient,
     ) -> Result<tokio::task::JoinHandle<()>> {
         let mut get_sub = nats_client
             .subscribe("storage.get".to_string())
@@ -181,7 +181,7 @@ impl PluginStorageService {
                                 let resp = self.handle_get(req).await;
                                 if let Some(reply) = msg.reply {
                                     if let Ok(bytes) = serde_json::to_vec(&resp) {
-                                        let _ = nats_client.publish(reply, bytes.into()).await;
+                                        let _ = nats_client.publish_bytes(reply, bytes).await;
                                     }
                                 }
                             }
@@ -194,7 +194,7 @@ impl PluginStorageService {
                                 let resp = self.handle_set(req).await;
                                 if let Some(reply) = msg.reply {
                                     if let Ok(bytes) = serde_json::to_vec(&resp) {
-                                        let _ = nats_client.publish(reply, bytes.into()).await;
+                                        let _ = nats_client.publish_bytes(reply, bytes).await;
                                     }
                                 }
                             }
@@ -207,7 +207,7 @@ impl PluginStorageService {
                                 let resp = self.handle_delete(req).await;
                                 if let Some(reply) = msg.reply {
                                     if let Ok(bytes) = serde_json::to_vec(&resp) {
-                                        let _ = nats_client.publish(reply, bytes.into()).await;
+                                        let _ = nats_client.publish_bytes(reply, bytes).await;
                                     }
                                 }
                             }
@@ -220,7 +220,7 @@ impl PluginStorageService {
                                 let resp = self.handle_list(req).await;
                                 if let Some(reply) = msg.reply {
                                     if let Ok(bytes) = serde_json::to_vec(&resp) {
-                                        let _ = nats_client.publish(reply, bytes.into()).await;
+                                        let _ = nats_client.publish_bytes(reply, bytes).await;
                                     }
                                 }
                             }

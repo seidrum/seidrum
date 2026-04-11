@@ -126,7 +126,7 @@ async fn main() -> Result<()> {
     );
 
     // Connect to NATS
-    let client = async_nats::connect(&args.nats_url)
+    let client = seidrum_common::bus_client::BusClient::connect(&args.nats_url, "task-detector")
         .await
         .context("Failed to connect to NATS")?;
 
@@ -151,10 +151,7 @@ async fn main() -> Result<()> {
         EventEnvelope::new("plugin.register", PLUGIN_ID, None, None, &register)?;
 
     client
-        .publish(
-            "plugin.register",
-            serde_json::to_vec(&register_envelope)?.into(),
-        )
+        .publish_bytes("plugin.register", serde_json::to_vec(&register_envelope)?)
         .await
         .context("Failed to publish plugin.register")?;
 
@@ -226,7 +223,7 @@ async fn main() -> Result<()> {
 }
 
 async fn detect_and_publish_tasks(
-    nats: &async_nats::Client,
+    nats: &seidrum_common::bus_client::BusClient,
     http: &reqwest::Client,
     api_key: &str,
     model: &str,
@@ -273,12 +270,9 @@ async fn detect_and_publish_tasks(
             &upsert_payload,
         )?;
 
-        nats.publish(
-            "brain.task.upsert",
-            serde_json::to_vec(&upsert_envelope)?.into(),
-        )
-        .await
-        .context("Failed to publish brain.task.upsert")?;
+        nats.publish_bytes("brain.task.upsert", serde_json::to_vec(&upsert_envelope)?)
+            .await
+            .context("Failed to publish brain.task.upsert")?;
 
         info!(
             title = %task.title,

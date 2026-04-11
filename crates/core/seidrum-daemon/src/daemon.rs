@@ -271,19 +271,20 @@ pub async fn start(paths: &SeidrumPaths) -> Result<()> {
     // 3. Connect to NATS and subscribe to plugin control subjects
     let nats_url =
         std::env::var("NATS_URL").unwrap_or_else(|_| "nats://localhost:4222".to_string());
-    let nats_client = match async_nats::connect(&nats_url).await {
-        Ok(client) => {
-            info!("Connected to NATS for plugin lifecycle control");
-            Some(client)
-        }
-        Err(e) => {
-            warn!(
-                "Failed to connect to NATS ({}), plugin lifecycle control via NATS unavailable",
-                e
-            );
-            None
-        }
-    };
+    let nats_client =
+        match seidrum_common::bus_client::BusClient::connect(&nats_url, "daemon").await {
+            Ok(client) => {
+                info!("Connected to bus for plugin lifecycle control");
+                Some(client)
+            }
+            Err(e) => {
+                warn!(
+                    "Failed to connect to bus ({}), plugin lifecycle control unavailable",
+                    e
+                );
+                None
+            }
+        };
 
     let mut start_sub = None;
     let mut stop_sub = None;
@@ -519,10 +520,10 @@ pub async fn stop(paths: &SeidrumPaths) -> Result<()> {
 
 /// Handle a plugin start request from NATS.
 async fn handle_plugin_start(
-    msg: &async_nats::Message,
+    msg: &seidrum_common::bus_client::Message,
     processes: &mut Vec<ManagedProcess>,
     paths: &SeidrumPaths,
-    client: &async_nats::Client,
+    client: &seidrum_common::bus_client::BusClient,
 ) {
     // Parse the command
     let cmd: PluginStartCommand = match serde_json::from_slice(&msg.payload) {
@@ -535,10 +536,7 @@ async fn handle_plugin_start(
                     message: format!("Failed to parse command: {}", e),
                 };
                 let _ = client
-                    .publish(
-                        reply.clone(),
-                        serde_json::to_vec(&response).unwrap_or_default().into(),
-                    )
+                    .reply_to(reply, serde_json::to_vec(&response).unwrap_or_default())
                     .await;
             }
             return;
@@ -557,10 +555,7 @@ async fn handle_plugin_start(
             };
             if let Some(reply) = &msg.reply {
                 let _ = client
-                    .publish(
-                        reply.clone(),
-                        serde_json::to_vec(&response).unwrap_or_default().into(),
-                    )
+                    .reply_to(reply, serde_json::to_vec(&response).unwrap_or_default())
                     .await;
             }
             return;
@@ -576,10 +571,7 @@ async fn handle_plugin_start(
             };
             if let Some(reply) = &msg.reply {
                 let _ = client
-                    .publish(
-                        reply.clone(),
-                        serde_json::to_vec(&response).unwrap_or_default().into(),
-                    )
+                    .reply_to(reply, serde_json::to_vec(&response).unwrap_or_default())
                     .await;
             }
             return;
@@ -596,10 +588,7 @@ async fn handle_plugin_start(
                 };
                 if let Some(reply) = &msg.reply {
                     let _ = client
-                        .publish(
-                            reply.clone(),
-                            serde_json::to_vec(&response).unwrap_or_default().into(),
-                        )
+                        .reply_to(reply, serde_json::to_vec(&response).unwrap_or_default())
                         .await;
                 }
                 return;
@@ -631,10 +620,7 @@ async fn handle_plugin_start(
             };
             if let Some(reply) = &msg.reply {
                 let _ = client
-                    .publish(
-                        reply.clone(),
-                        serde_json::to_vec(&response).unwrap_or_default().into(),
-                    )
+                    .reply_to(reply, serde_json::to_vec(&response).unwrap_or_default())
                     .await;
             }
         }
@@ -646,10 +632,7 @@ async fn handle_plugin_start(
             };
             if let Some(reply) = &msg.reply {
                 let _ = client
-                    .publish(
-                        reply.clone(),
-                        serde_json::to_vec(&response).unwrap_or_default().into(),
-                    )
+                    .reply_to(reply, serde_json::to_vec(&response).unwrap_or_default())
                     .await;
             }
         }
@@ -658,10 +641,10 @@ async fn handle_plugin_start(
 
 /// Handle a plugin stop request from NATS.
 async fn handle_plugin_stop(
-    msg: &async_nats::Message,
+    msg: &seidrum_common::bus_client::Message,
     processes: &mut Vec<ManagedProcess>,
     paths: &SeidrumPaths,
-    client: &async_nats::Client,
+    client: &seidrum_common::bus_client::BusClient,
 ) {
     // Parse the command
     let cmd: PluginStopCommand = match serde_json::from_slice(&msg.payload) {
@@ -674,10 +657,7 @@ async fn handle_plugin_stop(
                     message: format!("Failed to parse command: {}", e),
                 };
                 let _ = client
-                    .publish(
-                        reply.clone(),
-                        serde_json::to_vec(&response).unwrap_or_default().into(),
-                    )
+                    .reply_to(reply, serde_json::to_vec(&response).unwrap_or_default())
                     .await;
             }
             return;
@@ -697,10 +677,7 @@ async fn handle_plugin_stop(
             };
             if let Some(reply) = &msg.reply {
                 let _ = client
-                    .publish(
-                        reply.clone(),
-                        serde_json::to_vec(&response).unwrap_or_default().into(),
-                    )
+                    .reply_to(reply, serde_json::to_vec(&response).unwrap_or_default())
                     .await;
             }
             return;
@@ -716,10 +693,7 @@ async fn handle_plugin_stop(
             };
             if let Some(reply) = &msg.reply {
                 let _ = client
-                    .publish(
-                        reply.clone(),
-                        serde_json::to_vec(&response).unwrap_or_default().into(),
-                    )
+                    .reply_to(reply, serde_json::to_vec(&response).unwrap_or_default())
                     .await;
             }
             return;
@@ -737,10 +711,7 @@ async fn handle_plugin_stop(
         };
         if let Some(reply) = &msg.reply {
             let _ = client
-                .publish(
-                    reply.clone(),
-                    serde_json::to_vec(&response).unwrap_or_default().into(),
-                )
+                .reply_to(reply, serde_json::to_vec(&response).unwrap_or_default())
                 .await;
         }
         // Remove entry from processes vector
@@ -765,10 +736,7 @@ async fn handle_plugin_stop(
             };
             if let Some(reply) = &msg.reply {
                 let _ = client
-                    .publish(
-                        reply.clone(),
-                        serde_json::to_vec(&response).unwrap_or_default().into(),
-                    )
+                    .reply_to(reply, serde_json::to_vec(&response).unwrap_or_default())
                     .await;
             }
             info!(name = %plugin_name, "Plugin stopped via NATS");
@@ -789,10 +757,7 @@ async fn handle_plugin_stop(
     };
     if let Some(reply) = &msg.reply {
         let _ = client
-            .publish(
-                reply.clone(),
-                serde_json::to_vec(&response).unwrap_or_default().into(),
-            )
+            .reply_to(reply, serde_json::to_vec(&response).unwrap_or_default())
             .await;
     }
     info!(name = %plugin_name, "Plugin killed via NATS");

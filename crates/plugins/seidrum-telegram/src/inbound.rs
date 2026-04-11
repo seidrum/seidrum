@@ -1,8 +1,8 @@
 use std::collections::HashMap;
 
 use anyhow::Result;
+use seidrum_common::bus_client::BusClient;
 use seidrum_common::events::{Attachment, ChannelInbound};
-use seidrum_common::nats_utils::NatsClient;
 use teloxide::prelude::*;
 use teloxide::types::Message;
 use tracing::{info, warn};
@@ -21,7 +21,7 @@ pub struct InboundConfig {
 /// and publishes the appropriate event to NATS.
 pub async fn handle_message(
     msg: &Message,
-    nats: &NatsClient,
+    nats: &BusClient,
     config: &InboundConfig,
     is_edited: bool,
     bot: &Bot,
@@ -222,7 +222,7 @@ fn build_inbound(
 }
 
 /// Wrap a ChannelInbound in an EventEnvelope and publish to NATS.
-async fn publish_inbound(nats: &NatsClient, inbound: &ChannelInbound) -> Result<()> {
+async fn publish_inbound(nats: &BusClient, inbound: &ChannelInbound) -> Result<()> {
     // Build correlation_id in the format "telegram:{chat_id}:{message_id}"
     // The response formatter uses this to route outbound messages back to the right channel
     let msg_id = inbound

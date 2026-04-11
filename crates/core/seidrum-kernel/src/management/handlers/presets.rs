@@ -249,14 +249,14 @@ pub async fn apply_preset(
     // Publish reload signals
     let _ = state
         .nats
-        .publish("kernel.agents.reload".to_string(), "".into())
+        .publish_bytes("kernel.agents.reload".to_string(), "")
         .await;
 
     for plugin_name in &enabled_plugins {
         let payload = serde_json::json!({ "plugin": plugin_name }).to_string();
         let _ = state
             .nats
-            .publish("daemon.plugin.start".to_string(), payload.into())
+            .publish_bytes("daemon.plugin.start".to_string(), payload)
             .await;
     }
 

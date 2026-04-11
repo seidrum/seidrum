@@ -82,7 +82,7 @@ fn is_authorized(auth_source: &Option<String>) -> bool {
 }
 
 pub struct TraceCollectorService {
-    nats: async_nats::Client,
+    nats: seidrum_common::bus_client::BusClient,
     /// correlation_id -> Trace
     traces: Arc<RwLock<HashMap<String, Trace>>>,
     max_traces: usize,
@@ -91,7 +91,7 @@ pub struct TraceCollectorService {
 }
 
 impl TraceCollectorService {
-    pub fn new(nats: async_nats::Client, max_traces: usize) -> Self {
+    pub fn new(nats: seidrum_common::bus_client::BusClient, max_traces: usize) -> Self {
         Self {
             nats,
             traces: Arc::new(RwLock::new(HashMap::with_capacity(max_traces))),
@@ -244,7 +244,7 @@ impl TraceCollectorService {
                                 );
                                 let error = serde_json::json!({"error": "unauthorized"});
                                 if let Ok(bytes) = serde_json::to_vec(&error) {
-                                    let _ = nats.publish(reply, bytes.into()).await;
+                                    let _ = nats.publish_bytes(reply, bytes).await;
                                 }
                                 continue;
                             }
@@ -252,7 +252,7 @@ impl TraceCollectorService {
                             let store = traces.read().await;
                             let response = store.get(&req.correlation_id).cloned();
                             if let Ok(bytes) = serde_json::to_vec(&response) {
-                                let _ = nats.publish(reply.clone(), bytes.into()).await;
+                                let _ = nats.publish_bytes(reply.clone(), bytes).await;
                             }
                         }
                     }
@@ -274,7 +274,7 @@ impl TraceCollectorService {
                             );
                             let error_resp = TraceListResponse { traces: vec![] };
                             if let Ok(bytes) = serde_json::to_vec(&error_resp) {
-                                let _ = nats.publish(reply, bytes.into()).await;
+                                let _ = nats.publish_bytes(reply, bytes).await;
                             }
                             continue;
                         }
@@ -305,7 +305,7 @@ impl TraceCollectorService {
 
                         let response = TraceListResponse { traces: summaries };
                         if let Ok(bytes) = serde_json::to_vec(&response) {
-                            let _ = nats.publish(reply.clone(), bytes.into()).await;
+                            let _ = nats.publish_bytes(reply.clone(), bytes).await;
                         }
                     }
                 }

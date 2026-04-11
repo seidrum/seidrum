@@ -15,7 +15,7 @@ pub struct ManagementServer {
 
 impl ManagementServer {
     pub fn new(
-        nats: async_nats::Client,
+        nats: seidrum_common::bus_client::BusClient,
         config_dir: PathBuf,
         agents_dir: PathBuf,
         workflows_dir: PathBuf,

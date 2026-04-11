@@ -69,7 +69,7 @@ struct HealthResponse {
 }
 
 async fn health(State(state): State<ManagementState>) -> Json<HealthResponse> {
-    let nats_connected = state.nats.connection_state() == async_nats::connection::State::Connected;
+    let nats_connected = state.nats.is_connected();
     Json(HealthResponse {
         status: "ok".to_string(),
         uptime_seconds: 0, // TODO: track actual uptime

@@ -55,7 +55,7 @@ async fn main() -> Result<()> {
     info!(plugin = PLUGIN_ID, "Starting notification plugin");
 
     // Connect to NATS
-    let client = async_nats::connect(&args.nats_url)
+    let client = seidrum_common::bus_client::BusClient::connect(&args.nats_url, "notification")
         .await
         .context("Failed to connect to NATS")?;
 
@@ -86,10 +86,7 @@ async fn main() -> Result<()> {
         EventEnvelope::new("plugin.register", PLUGIN_ID, None, None, &register)?;
 
     client
-        .publish(
-            "plugin.register",
-            serde_json::to_vec(&register_envelope)?.into(),
-        )
+        .publish_bytes("plugin.register", serde_json::to_vec(&register_envelope)?)
         .await
         .context("Failed to publish plugin.register")?;
 
@@ -125,9 +122,9 @@ async fn main() -> Result<()> {
     });
 
     client
-        .publish(
+        .publish_bytes(
             "capability.register",
-            serde_json::to_vec(&send_notification_tool)?.into(),
+            serde_json::to_vec(&send_notification_tool)?,
         )
         .await
         .context("Failed to publish capability.register for send-notification")?;
@@ -205,7 +202,7 @@ async fn main() -> Result<()> {
                             is_error: true,
                         };
                         if let Err(e) = client
-                            .publish(reply, serde_json::to_vec(&error_response).unwrap_or_default().into())
+                            .publish_bytes(reply, serde_json::to_vec(&error_response).unwrap_or_default())
                             .await
                         {
                             error!(%e, "Failed to publish error reply");
@@ -267,7 +264,7 @@ async fn main() -> Result<()> {
                 };
 
                 if let Err(err) = client
-                    .publish(reply, serde_json::to_vec(&tool_response).unwrap_or_default().into())
+                    .publish_bytes(reply, serde_json::to_vec(&tool_response).unwrap_or_default())
                     .await
                 {
                     error!(%err, "Failed to publish tool call reply");
@@ -281,7 +278,7 @@ async fn main() -> Result<()> {
 }
 
 async fn handle_task_created(
-    nats: &async_nats::Client,
+    nats: &seidrum_common::bus_client::BusClient,
     payload: &[u8],
     channel: &str,
 ) -> Result<()> {
@@ -307,7 +304,7 @@ async fn handle_task_created(
 }
 
 async fn handle_task_completed(
-    nats: &async_nats::Client,
+    nats: &seidrum_common::bus_client::BusClient,
     payload: &[u8],
     channel: &str,
 ) -> Result<()> {
@@ -333,7 +330,7 @@ async fn handle_task_completed(
 }
 
 async fn handle_system_health(
-    nats: &async_nats::Client,
+    nats: &seidrum_common::bus_client::BusClient,
     payload: &[u8],
     channel: &str,
     min_importance: Importance,
@@ -381,7 +378,7 @@ async fn handle_system_health(
 }
 
 async fn send_notification(
-    nats: &async_nats::Client,
+    nats: &seidrum_common::bus_client::BusClient,
     channel: &str,
     text: &str,
     format: &str,
@@ -401,7 +398,7 @@ async fn send_notification(
 
     let envelope = EventEnvelope::new(&subject, PLUGIN_ID, correlation_id, scope, &outbound)?;
 
-    nats.publish(subject.clone(), serde_json::to_vec(&envelope)?.into())
+    nats.publish_bytes(subject.clone(), serde_json::to_vec(&envelope)?)
         .await
         .context("Failed to publish notification")?;
 

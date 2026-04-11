@@ -185,11 +185,11 @@ pub async fn install_package(
 
     match state
         .nats
-        .request("daemon.pkg.install".to_string(), payload.into())
+        .request_bytes("daemon.pkg.install".to_string(), payload)
         .await
     {
         Ok(response) => {
-            let body = String::from_utf8_lossy(&response.payload);
+            let body = String::from_utf8_lossy(&response);
             info!("Install response: {}", body);
             (StatusCode::OK, body.to_string()).into_response()
         }
@@ -225,11 +225,11 @@ pub async fn uninstall_package(
 
     match state
         .nats
-        .request("daemon.pkg.uninstall".to_string(), payload.into())
+        .request_bytes("daemon.pkg.uninstall".to_string(), payload)
         .await
     {
         Ok(response) => {
-            let body = String::from_utf8_lossy(&response.payload);
+            let body = String::from_utf8_lossy(&response);
             info!("Uninstall response: {}", body);
             (StatusCode::OK, body.to_string()).into_response()
         }

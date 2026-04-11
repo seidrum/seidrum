@@ -71,7 +71,7 @@ pub mod trace_collector {
 
 use axum::extract::ws::{Message, WebSocket};
 use futures::{SinkExt, StreamExt};
-use seidrum_common::nats_utils::NatsClient;
+use seidrum_common::bus_client::BusClient;
 use serde::Serialize;
 use tracing::{debug, error, info};
 
@@ -97,7 +97,7 @@ pub struct StreamEvent {
 
 pub async fn handle_event_stream(
     socket: WebSocket,
-    nats: NatsClient,
+    nats: BusClient,
     filter: Option<String>,
     correlation_id_filter: Option<String>,
 ) {
@@ -105,7 +105,7 @@ pub async fn handle_event_stream(
 
     // Subscribe to all events or a filtered pattern
     let subject_pattern = filter.as_deref().unwrap_or(">");
-    let mut sub = match nats.inner().subscribe(subject_pattern.to_string()).await {
+    let mut sub = match nats.subscribe(subject_pattern).await {
         Ok(s) => s,
         Err(e) => {
             error!(error = %e, "Failed to subscribe to NATS for event stream");

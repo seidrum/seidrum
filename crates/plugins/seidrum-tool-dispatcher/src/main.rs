@@ -8,11 +8,11 @@ use futures::StreamExt as _;
 use tokio::sync::RwLock;
 use tracing::{error, info, warn};
 
+use seidrum_common::bus_client::BusClient;
 use seidrum_common::events::{
     EventEnvelope, PluginRegister, ToolCallRequest, ToolCallResponse, ToolDescribeRequest,
     ToolDescribeResponse, ToolRegistered,
 };
-use seidrum_common::nats_utils::NatsClient;
 
 // ---------------------------------------------------------------------------
 // CLI args
@@ -69,7 +69,7 @@ async fn main() -> Result<()> {
     );
 
     // Connect to NATS
-    let nats = NatsClient::connect(&cli.nats_url, "tool-dispatcher").await?;
+    let nats = BusClient::connect(&cli.nats_url, "tool-dispatcher").await?;
 
     // Publish plugin registration
     let register = PluginRegister {
@@ -103,10 +103,7 @@ async fn main() -> Result<()> {
     });
 
     // Subscribe to capability.call (request/reply service)
-    let mut sub = nats
-        .inner()
-        .subscribe("capability.call".to_string())
-        .await?;
+    let mut sub = nats.subscribe("capability.call").await?;
     info!("Subscribed to capability.call (request/reply)");
 
     while let Some(msg) = sub.next().await {
@@ -127,7 +124,7 @@ async fn main() -> Result<()> {
 // tool.registered listener — keeps cache fresh
 // ---------------------------------------------------------------------------
 
-async fn listen_tool_registered(nats: &NatsClient, cache: ToolCache) -> Result<()> {
+async fn listen_tool_registered(nats: &BusClient, cache: ToolCache) -> Result<()> {
     let mut sub = nats.subscribe("capability.registered").await?;
     info!("Subscribed to capability.registered (cache updater)");
 
@@ -181,7 +178,7 @@ async fn listen_tool_registered(nats: &NatsClient, cache: ToolCache) -> Result<(
 // tool.describe helper
 // ---------------------------------------------------------------------------
 
-async fn describe_tool(nats: &NatsClient, tool_id: &str) -> Result<ToolDescribeResponse> {
+async fn describe_tool(nats: &BusClient, tool_id: &str) -> Result<ToolDescribeResponse> {
     let req = ToolDescribeRequest {
         tool_id: tool_id.to_string(),
     };
@@ -194,8 +191,8 @@ async fn describe_tool(nats: &NatsClient, tool_id: &str) -> Result<ToolDescribeR
 // ---------------------------------------------------------------------------
 
 async fn handle_tool_call(
-    msg: async_nats::Message,
-    nats: &NatsClient,
+    msg: seidrum_common::bus_client::Message,
+    nats: &BusClient,
     cache: &ToolCache,
     timeout: Duration,
 ) -> Result<()> {
@@ -256,9 +253,7 @@ async fn handle_tool_call(
                         is_error: true,
                     };
                     let bytes = serde_json::to_vec(&err_resp)?;
-                    nats.inner()
-                        .publish(reply.to_string(), bytes.into())
-                        .await?;
+                    nats.reply_to(&reply, bytes).await?;
                     return Ok(());
                 }
             }
@@ -278,17 +273,16 @@ async fn handle_tool_call(
     let forward_payload = serde_json::to_vec(&call_req)?;
     let forward_result = tokio::time::timeout(
         timeout,
-        nats.inner()
-            .request(entry.call_subject.clone(), forward_payload.into()),
+        nats.request_bytes(&entry.call_subject, forward_payload),
     )
     .await;
 
     let duration = start.elapsed();
 
     let response = match forward_result {
-        Ok(Ok(resp_msg)) => {
+        Ok(Ok(resp_payload)) => {
             // 5. Parse the owning plugin's response
-            match serde_json::from_slice::<ToolCallResponse>(&resp_msg.payload) {
+            match serde_json::from_slice::<ToolCallResponse>(&resp_payload) {
                 Ok(tool_resp) => {
                     info!(
                         tool_id = %tool_id,
@@ -353,9 +347,7 @@ async fn handle_tool_call(
 
     // 6. Reply to the original caller
     let resp_bytes = serde_json::to_vec(&response)?;
-    nats.inner()
-        .publish(reply.to_string(), resp_bytes.into())
-        .await?;
+    nats.reply_to(&reply, resp_bytes).await?;
 
     Ok(())
 }

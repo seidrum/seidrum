@@ -114,7 +114,7 @@ async fn main() -> Result<()> {
     );
 
     // Connect to NATS
-    let nats = async_nats::connect(&cli.nats_url)
+    let nats = seidrum_common::bus_client::BusClient::connect(&cli.nats_url, "content-ingester")
         .await
         .context("failed to connect to NATS")?;
     info!("Connected to NATS");
@@ -136,7 +136,7 @@ async fn main() -> Result<()> {
     let register_envelope =
         EventEnvelope::new("plugin.register", "content-ingester", None, None, &register)?;
     let register_bytes = serde_json::to_vec(&register_envelope)?;
-    nats.publish("plugin.register", register_bytes.into())
+    nats.publish_bytes("plugin.register", register_bytes)
         .await
         .context("failed to publish plugin.register")?;
     info!("Published plugin.register");
@@ -240,10 +240,7 @@ async fn main() -> Result<()> {
         )?;
         let store_bytes = serde_json::to_vec(&store_envelope)?;
 
-        if let Err(err) = nats
-            .publish("brain.content.store", store_bytes.into())
-            .await
-        {
+        if let Err(err) = nats.publish_bytes("brain.content.store", store_bytes).await {
             error!(
                 %err,
                 event_id = %envelope.id,

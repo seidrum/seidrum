@@ -263,7 +263,7 @@ impl WorkflowEngine {
     /// subscriptions for trigger events, and handle response routing.
     pub async fn spawn(
         self,
-        nats_client: async_nats::Client,
+        nats_client: seidrum_common::bus_client::BusClient,
         agents_dir: &str,
         workflows_dir: &str,
     ) -> Result<tokio::task::JoinHandle<()>> {
@@ -431,7 +431,7 @@ impl WorkflowEngine {
                             match serde_json::to_vec(&envelope) {
                                 Ok(bytes) => {
                                     if let Err(e) =
-                                        nats.publish(pipeline_subject.clone(), bytes.into()).await
+                                        nats.publish_bytes(pipeline_subject.clone(), bytes).await
                                     {
                                         error!(
                                             error = %e,
@@ -512,7 +512,7 @@ impl WorkflowEngine {
                             match serde_json::to_vec(&enriched) {
                                 Ok(bytes) => {
                                     if let Err(e) =
-                                        nats.publish(outbound_subject.clone(), bytes.into()).await
+                                        nats.publish_bytes(outbound_subject.clone(), bytes).await
                                     {
                                         error!(
                                             error = %e,
