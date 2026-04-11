@@ -137,13 +137,11 @@ pub struct AppState {
     /// async webhook subscription via the wrong endpoint, and to
     /// keep `interceptor_count` consistent. Mirrors a similar set
     /// for subscriptions tracked separately. (F4 fix.)
-    pub interceptor_ids:
-        Arc<tokio::sync::RwLock<std::collections::HashSet<String>>>,
+    pub interceptor_ids: Arc<tokio::sync::RwLock<std::collections::HashSet<String>>>,
     /// Set of bus subscription ids that were registered through
     /// `POST /subscribe` (AsyncWebhook kind). Used by
     /// `DELETE /subscribe/:id` for symmetric cross-type protection.
-    pub subscription_ids:
-        Arc<tokio::sync::RwLock<std::collections::HashSet<String>>>,
+    pub subscription_ids: Arc<tokio::sync::RwLock<std::collections::HashSet<String>>>,
     /// **F13** Rate limiter for state-changing registration ops.
     /// Tuple is (window_start_unix_secs, request_count_in_window).
     pub registration_rate: Arc<std::sync::Mutex<(u64, u64)>>,
@@ -394,10 +392,7 @@ impl HttpServer {
     /// Override the SSRF validation policy for webhook URLs. Default
     /// `Strict` (https-only, no private/loopback). Use `Permissive` only
     /// for tests or trusted networks.
-    pub fn with_webhook_url_policy(
-        mut self,
-        policy: crate::delivery::WebhookUrlPolicy,
-    ) -> Self {
+    pub fn with_webhook_url_policy(mut self, policy: crate::delivery::WebhookUrlPolicy) -> Self {
         self.webhook_url_policy = policy;
         self
     }
@@ -426,15 +421,12 @@ impl HttpServer {
     pub async fn start(&self, addr: SocketAddr) -> crate::Result<()> {
         let subscription_count = Arc::new(AtomicUsize::new(0));
         let interceptor_count = Arc::new(AtomicUsize::new(0));
-        let bus_to_persisted: Arc<
-            tokio::sync::RwLock<std::collections::HashMap<String, String>>,
-        > = Arc::new(tokio::sync::RwLock::new(std::collections::HashMap::new()));
-        let interceptor_ids: Arc<
-            tokio::sync::RwLock<std::collections::HashSet<String>>,
-        > = Arc::new(tokio::sync::RwLock::new(std::collections::HashSet::new()));
-        let subscription_ids: Arc<
-            tokio::sync::RwLock<std::collections::HashSet<String>>,
-        > = Arc::new(tokio::sync::RwLock::new(std::collections::HashSet::new()));
+        let bus_to_persisted: Arc<tokio::sync::RwLock<std::collections::HashMap<String, String>>> =
+            Arc::new(tokio::sync::RwLock::new(std::collections::HashMap::new()));
+        let interceptor_ids: Arc<tokio::sync::RwLock<std::collections::HashSet<String>>> =
+            Arc::new(tokio::sync::RwLock::new(std::collections::HashSet::new()));
+        let subscription_ids: Arc<tokio::sync::RwLock<std::collections::HashSet<String>>> =
+            Arc::new(tokio::sync::RwLock::new(std::collections::HashSet::new()));
 
         // F12: warn at startup if dev mode was opted into. Operators
         // who left this on accidentally see it on every boot.
@@ -821,15 +813,10 @@ async fn recreate_persisted_sync_interceptor(
     // entries persisted under the older policy.
 
     if let Err(e) = crate::transport::validate_remote_pattern(&entry.pattern) {
-        return RecreateOutcome::PermanentFailure(format!(
-            "pattern no longer permitted: {}",
-            e
-        ));
+        return RecreateOutcome::PermanentFailure(format!("pattern no longer permitted: {}", e));
     }
-    let effective_priority =
-        crate::transport::clamp_remote_interceptor_priority(entry.priority);
-    let clamped_timeout_ms =
-        crate::transport::clamp_remote_interceptor_timeout(entry.timeout_ms);
+    let effective_priority = crate::transport::clamp_remote_interceptor_priority(entry.priority);
+    let clamped_timeout_ms = crate::transport::clamp_remote_interceptor_timeout(entry.timeout_ms);
 
     // Reserve a slot up front. If we exceed the cap, classify as
     // transient — the entry stays in storage and will be retried on
@@ -920,7 +907,10 @@ async fn create_subscription(
         crate::delivery::validate_webhook_url_with_policy(&req.url, state.webhook_url_policy)
     {
         // N3: log specifics server-side, return generic to caller.
-        warn!("rejected webhook subscribe with unsafe URL {}: {}", req.url, e);
+        warn!(
+            "rejected webhook subscribe with unsafe URL {}: {}",
+            req.url, e
+        );
         return Err(http_error_invalid_webhook_url());
     }
 
@@ -997,11 +987,7 @@ async fn create_subscription(
             .insert(sub_id.clone(), persisted_id.clone());
         // F4: track this id as an AsyncWebhook subscription so DELETE
         // can refuse cross-type deletion.
-        state
-            .subscription_ids
-            .write()
-            .await
-            .insert(sub_id.clone());
+        state.subscription_ids.write().await.insert(sub_id.clone());
 
         if let Err(e) = store.save_subscription(&entry).await {
             // Roll back the mapping, the type set, and the bus subscription.
@@ -1027,11 +1013,7 @@ async fn create_subscription(
     } else {
         // No store configured — still track the bus id so DELETE can
         // refuse cross-type deletion even without persistence.
-        state
-            .subscription_ids
-            .write()
-            .await
-            .insert(sub_id.clone());
+        state.subscription_ids.write().await.insert(sub_id.clone());
     }
 
     spawn_webhook_delivery_task(
@@ -1228,11 +1210,9 @@ async fn create_interceptor(
     }
 
     // B2: priority floor.
-    let effective_priority =
-        crate::transport::clamp_remote_interceptor_priority(req.priority);
+    let effective_priority = crate::transport::clamp_remote_interceptor_priority(req.priority);
     // N2: timeout clamp.
-    let clamped_timeout_ms =
-        crate::transport::clamp_remote_interceptor_timeout(req.timeout_ms);
+    let clamped_timeout_ms = crate::transport::clamp_remote_interceptor_timeout(req.timeout_ms);
 
     // B3: reserve a slot up front. Roll back on any subsequent failure.
     let icount = Arc::clone(&state.interceptor_count);
@@ -1241,10 +1221,7 @@ async fn create_interceptor(
         icount.fetch_sub(1, Ordering::Relaxed);
         return Err(http_error_with_code(
             StatusCode::TOO_MANY_REQUESTS,
-            format!(
-                "Interceptor limit reached ({} max)",
-                MAX_HTTP_INTERCEPTORS
-            ),
+            format!("Interceptor limit reached ({} max)", MAX_HTTP_INTERCEPTORS),
             "INTERCEPTOR_LIMIT",
         ));
     }
@@ -1307,11 +1284,7 @@ async fn create_interceptor(
             .insert(bus_id.clone(), persisted_id.clone());
         // F4: track this id as a SyncInterceptor so DELETE can refuse
         // cross-type deletion.
-        state
-            .interceptor_ids
-            .write()
-            .await
-            .insert(bus_id.clone());
+        state.interceptor_ids.write().await.insert(bus_id.clone());
 
         if let Err(e) = store.save_subscription(&entry).await {
             // Roll back mapping, type set, bus registration, cap counter.
@@ -1336,11 +1309,7 @@ async fn create_interceptor(
         }
     } else {
         // No store configured — still track the bus id.
-        state
-            .interceptor_ids
-            .write()
-            .await
-            .insert(bus_id.clone());
+        state.interceptor_ids.write().await.insert(bus_id.clone());
     }
 
     debug!(

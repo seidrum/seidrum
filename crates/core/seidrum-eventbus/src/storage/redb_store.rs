@@ -47,10 +47,9 @@ impl RedbEventStore {
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
-            if let Err(e) = std::fs::set_permissions(
-                path_ref,
-                std::fs::Permissions::from_mode(0o600),
-            ) {
+            if let Err(e) =
+                std::fs::set_permissions(path_ref, std::fs::Permissions::from_mode(0o600))
+            {
                 tracing::warn!(
                     path = %path_ref.display(),
                     error = %e,
@@ -771,15 +770,12 @@ impl EventStore for RedbEventStore {
             let serialized = serde_json::to_vec(&sub).map_err(|e| {
                 StorageError::OperationFailed(format!("serialize subscription: {}", e))
             })?;
-            let write_txn = db.begin_write().map_err(|e| {
-                StorageError::DatabaseError(format!("begin write: {}", e))
-            })?;
+            let write_txn = db
+                .begin_write()
+                .map_err(|e| StorageError::DatabaseError(format!("begin write: {}", e)))?;
             {
                 let mut t = write_txn.open_table(SUBSCRIPTIONS_TABLE).map_err(|e| {
-                    StorageError::DatabaseError(format!(
-                        "open subscriptions table: {}",
-                        e
-                    ))
+                    StorageError::DatabaseError(format!("open subscriptions table: {}", e))
                 })?;
                 t.insert(sub.persisted_id.as_str(), serialized.as_slice())
                     .map_err(|e| {
@@ -800,25 +796,20 @@ impl EventStore for RedbEventStore {
             let read_txn = db
                 .begin_read()
                 .map_err(|e| StorageError::DatabaseError(format!("begin read: {}", e)))?;
-            let table = read_txn.open_table(SUBSCRIPTIONS_TABLE).map_err(|e| {
-                StorageError::DatabaseError(format!("open subscriptions: {}", e))
-            })?;
+            let table = read_txn
+                .open_table(SUBSCRIPTIONS_TABLE)
+                .map_err(|e| StorageError::DatabaseError(format!("open subscriptions: {}", e)))?;
             let mut results = Vec::new();
             let iter = table
                 .iter()
                 .map_err(|e| StorageError::DatabaseError(format!("iterate: {}", e)))?;
             for item in iter {
-                let (_, value) = item.map_err(|e| {
-                    StorageError::DatabaseError(format!("iterate row: {}", e))
-                })?;
+                let (_, value) =
+                    item.map_err(|e| StorageError::DatabaseError(format!("iterate row: {}", e)))?;
                 let bytes = value.value().to_vec();
-                let sub: PersistedSubscription =
-                    serde_json::from_slice(&bytes).map_err(|e| {
-                        StorageError::OperationFailed(format!(
-                            "deserialize subscription: {}",
-                            e
-                        ))
-                    })?;
+                let sub: PersistedSubscription = serde_json::from_slice(&bytes).map_err(|e| {
+                    StorageError::OperationFailed(format!("deserialize subscription: {}", e))
+                })?;
                 results.push(sub);
             }
             Ok(results)
@@ -836,10 +827,7 @@ impl EventStore for RedbEventStore {
                 .map_err(|e| StorageError::DatabaseError(format!("begin write: {}", e)))?;
             {
                 let mut t = write_txn.open_table(SUBSCRIPTIONS_TABLE).map_err(|e| {
-                    StorageError::DatabaseError(format!(
-                        "open subscriptions table: {}",
-                        e
-                    ))
+                    StorageError::DatabaseError(format!("open subscriptions table: {}", e))
                 })?;
                 let _ = t.remove(persisted_id.as_str());
             }
@@ -1137,8 +1125,14 @@ mod tests {
             assert_eq!(listed[0].url, "https://hook.example.com/path");
             assert_eq!(listed[0].priority, 7);
             assert_eq!(listed[0].created_at, 12_345_678);
-            assert_eq!(listed[0].headers.get("Authorization").map(|s| s.as_str()), Some("Bearer secret"));
-            assert_eq!(listed[0].headers.get("X-Custom").map(|s| s.as_str()), Some("value"));
+            assert_eq!(
+                listed[0].headers.get("Authorization").map(|s| s.as_str()),
+                Some("Bearer secret")
+            );
+            assert_eq!(
+                listed[0].headers.get("X-Custom").map(|s| s.as_str()),
+                Some("value")
+            );
         }
 
         // === Phase 3: reopen, delete, verify ===

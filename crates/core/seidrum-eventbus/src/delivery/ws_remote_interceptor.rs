@@ -499,9 +499,7 @@ mod tests {
                 break;
             }
             if tokio::time::Instant::now() >= deadline {
-                panic!(
-                    "PendingGuard Drop impl did not reclaim the pending entry within 2s"
-                );
+                panic!("PendingGuard Drop impl did not reclaim the pending entry within 2s");
             }
             tokio::time::sleep(Duration::from_millis(5)).await;
         }

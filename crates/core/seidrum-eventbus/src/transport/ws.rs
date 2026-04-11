@@ -687,10 +687,7 @@ async fn serve_connection(
             }
         }
         for entry in remote_interceptors.values() {
-            entry
-                .proxy
-                .cancel_all("WebSocket connection closed")
-                .await;
+            entry.proxy.cancel_all("WebSocket connection closed").await;
         }
         debug!(
             "Cleaned up {} remote interceptor proxies for disconnected client {}",
@@ -1044,12 +1041,10 @@ async fn handle_operation(
                 return Err(crate::EventBusError::InvalidSubject(e.to_string()));
             }
             // Reserve low priorities for trusted in-process interceptors.
-            let effective_priority =
-                crate::transport::clamp_remote_interceptor_priority(priority);
+            let effective_priority = crate::transport::clamp_remote_interceptor_priority(priority);
             // Cap the per-call timeout to prevent slowloris stalls of
             // the dispatch chain.
-            let clamped_timeout_ms =
-                crate::transport::clamp_remote_interceptor_timeout(timeout_ms);
+            let clamped_timeout_ms = crate::transport::clamp_remote_interceptor_timeout(timeout_ms);
             // Per-connection cap so a single client can't fill the
             // interceptor table for the whole bus.
             if remote_interceptors.len() >= MAX_INTERCEPTORS_PER_CONNECTION {
@@ -1067,10 +1062,8 @@ async fn handle_operation(
             let proxy_timeout = engine_timeout
                 .map(|d| d.saturating_sub(Duration::from_millis(250)))
                 .map(|d| d.max(Duration::from_millis(100)));
-            let mut proxy = crate::delivery::WsRemoteInterceptor::new(
-                pattern.clone(),
-                forward_tx.clone(),
-            );
+            let mut proxy =
+                crate::delivery::WsRemoteInterceptor::new(pattern.clone(), forward_tx.clone());
             if let Some(t) = proxy_timeout {
                 proxy = proxy.with_timeout(t);
             }

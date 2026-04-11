@@ -120,7 +120,10 @@ pub fn validate_webhook_url_resolved(
     }
 
     let host_obj = parsed.host().ok_or(WebhookUrlError::NoHost)?;
-    let host_str = parsed.host_str().ok_or(WebhookUrlError::NoHost)?.to_string();
+    let host_str = parsed
+        .host_str()
+        .ok_or(WebhookUrlError::NoHost)?
+        .to_string();
     let port = parsed.port_or_known_default().unwrap_or(443);
 
     // N7: handle literal IPs directly so we don't depend on getaddrinfo
@@ -606,16 +609,12 @@ mod tests {
 
     #[test]
     fn test_ssrf_permissive_accepts_loopback_but_rejects_unspecified() {
-        let r = validate_webhook_url_with_policy(
-            "http://127.0.0.1/hook",
-            WebhookUrlPolicy::Permissive,
-        );
+        let r =
+            validate_webhook_url_with_policy("http://127.0.0.1/hook", WebhookUrlPolicy::Permissive);
         assert!(r.is_ok(), "Permissive should accept loopback, got {:?}", r);
 
-        let r = validate_webhook_url_with_policy(
-            "http://0.0.0.0/hook",
-            WebhookUrlPolicy::Permissive,
-        );
+        let r =
+            validate_webhook_url_with_policy("http://0.0.0.0/hook", WebhookUrlPolicy::Permissive);
         assert!(
             matches!(r, Err(WebhookUrlError::PrivateAddress(_, _))),
             "Permissive must still reject 0.0.0.0, got {:?}",

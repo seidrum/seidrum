@@ -333,9 +333,7 @@ mod tests {
     /// the event. Verifies the HTTP transport is wired through to the bus.
     #[tokio::test]
     async fn test_http_publish_to_inprocess_subscriber_e2e() {
-        use seidrum_eventbus::test_utils::{
-            test_bus_with_transports, wait_for_http_ready,
-        };
+        use seidrum_eventbus::test_utils::{test_bus_with_transports, wait_for_http_ready};
         use std::time::Duration;
 
         let env = test_bus_with_transports().await;
@@ -440,8 +438,8 @@ mod tests {
         use base64::Engine;
         let mut decoded_payloads: Vec<Vec<u8>> = Vec::new();
         for d in &deliveries {
-            let body: serde_json::Value = serde_json::from_slice(&d.body)
-                .expect("webhook body should be JSON");
+            let body: serde_json::Value =
+                serde_json::from_slice(&d.body).expect("webhook body should be JSON");
             assert_eq!(body["subject"].as_str(), Some("e2e.webhook"));
             let b64 = body["payload"].as_str().expect("payload should be string");
             decoded_payloads.push(
@@ -887,7 +885,9 @@ mod tests {
         // Spin up a tiny ad-hoc server here instead.
         use axum::{routing::post, Json as AJson, Router as ARouter};
         let interceptor_addr: std::net::SocketAddr = "127.0.0.1:0".parse().unwrap();
-        let listener = tokio::net::TcpListener::bind(interceptor_addr).await.unwrap();
+        let listener = tokio::net::TcpListener::bind(interceptor_addr)
+            .await
+            .unwrap();
         let interceptor_addr = listener.local_addr().unwrap();
         async fn modify_handler(
             AJson(_body): AJson<serde_json::Value>,
@@ -984,9 +984,7 @@ mod tests {
         use axum::{routing::post, Json as AJson, Router as ARouter};
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let interceptor_addr = listener.local_addr().unwrap();
-        async fn drop_handler(
-            AJson(_body): AJson<serde_json::Value>,
-        ) -> AJson<serde_json::Value> {
+        async fn drop_handler(AJson(_body): AJson<serde_json::Value>) -> AJson<serde_json::Value> {
             AJson(serde_json::json!({"action": "drop"}))
         }
         let app = ARouter::new().route("/intercept", post(drop_handler));
@@ -1063,12 +1061,7 @@ mod tests {
                 .send()
                 .await
                 .unwrap();
-            assert_eq!(
-                resp.status(),
-                400,
-                "pattern {:?} must be rejected",
-                pattern
-            );
+            assert_eq!(resp.status(), 400, "pattern {:?} must be rejected", pattern);
             let body: serde_json::Value = resp.json().await.unwrap();
             assert_eq!(body["code"], "INVALID_INTERCEPTOR_PATTERN");
         }
@@ -1082,9 +1075,7 @@ mod tests {
     #[tokio::test]
     async fn test_http_interceptors_priority_clamped() {
         use seidrum_eventbus::storage::EventStore;
-        use seidrum_eventbus::test_utils::{
-            pick_ephemeral_addr, wait_for_http_ready,
-        };
+        use seidrum_eventbus::test_utils::{pick_ephemeral_addr, wait_for_http_ready};
         use std::sync::Arc as SArc;
 
         let store: SArc<dyn EventStore> =
@@ -1460,8 +1451,7 @@ mod tests {
     #[tokio::test]
     async fn test_webhook_interceptor_propagates_custom_headers() {
         use axum::{
-            extract::State as ASt, http::HeaderMap, routing::post, Json as AJson,
-            Router as ARouter,
+            extract::State as ASt, http::HeaderMap, routing::post, Json as AJson, Router as ARouter,
         };
         use seidrum_eventbus::test_utils::{test_bus_with_transports, wait_for_http_ready};
         use std::sync::{Arc as SArc, Mutex};
@@ -1620,8 +1610,7 @@ mod tests {
                 .unwrap()
                 .unwrap()
                 .unwrap();
-            let parsed: serde_json::Value =
-                serde_json::from_str(msg.to_text().unwrap()).unwrap();
+            let parsed: serde_json::Value = serde_json::from_str(msg.to_text().unwrap()).unwrap();
             assert_eq!(
                 parsed["op"], "error",
                 "WS subscribe with pattern {:?} must error",
@@ -1745,8 +1734,7 @@ mod tests {
                 .unwrap()
                 .unwrap()
                 .unwrap();
-            let parsed: serde_json::Value =
-                serde_json::from_str(msg.to_text().unwrap()).unwrap();
+            let parsed: serde_json::Value = serde_json::from_str(msg.to_text().unwrap()).unwrap();
             assert_eq!(
                 parsed["op"], "error",
                 "channel name {:?} must be rejected",
@@ -1841,9 +1829,7 @@ mod tests {
             url: "http://127.0.0.1:1/hook".to_string(),
             headers: StdHashMap::new(),
         };
-        let result = channel
-            .deliver(b"event", "test.subject", &config)
-            .await;
+        let result = channel.deliver(b"event", "test.subject", &config).await;
         // Must be Permanent so the retry task doesn't keep trying.
         assert!(
             matches!(result, Err(DeliveryError::Permanent(_))),
@@ -1902,11 +1888,7 @@ mod tests {
             async fn get(&self, seq: u64) -> StorageResult<Option<StoredEvent>> {
                 self.0.get(seq).await
             }
-            async fn update_status(
-                &self,
-                seq: u64,
-                status: EventStatus,
-            ) -> StorageResult<()> {
+            async fn update_status(&self, seq: u64, status: EventStatus) -> StorageResult<()> {
                 self.0.update_status(seq, status).await
             }
             async fn record_delivery(
@@ -2050,9 +2032,7 @@ mod tests {
     /// stored event.
     #[tokio::test]
     async fn test_webhook_interceptor_envelope_carries_seq_and_stored_at() {
-        use axum::{
-            extract::State as ASt, routing::post, Json as AJson, Router as ARouter,
-        };
+        use axum::{extract::State as ASt, routing::post, Json as AJson, Router as ARouter};
         use seidrum_eventbus::test_utils::{test_bus_with_transports, wait_for_http_ready};
         use std::sync::{Arc as SArc, Mutex};
         use std::time::Duration;

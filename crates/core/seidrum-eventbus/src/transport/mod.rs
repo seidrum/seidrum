@@ -290,8 +290,14 @@ mod tests {
 
     #[test]
     fn test_priority_clamp() {
-        assert_eq!(clamp_remote_interceptor_priority(0), MIN_REMOTE_INTERCEPTOR_PRIORITY);
-        assert_eq!(clamp_remote_interceptor_priority(50), MIN_REMOTE_INTERCEPTOR_PRIORITY);
+        assert_eq!(
+            clamp_remote_interceptor_priority(0),
+            MIN_REMOTE_INTERCEPTOR_PRIORITY
+        );
+        assert_eq!(
+            clamp_remote_interceptor_priority(50),
+            MIN_REMOTE_INTERCEPTOR_PRIORITY
+        );
         assert_eq!(clamp_remote_interceptor_priority(100), 100);
         assert_eq!(clamp_remote_interceptor_priority(200), 200);
     }

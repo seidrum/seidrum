@@ -100,10 +100,9 @@ pub use storage::{
     EventStatus, EventStore, PersistedSubscription, PersistedSubscriptionKind, StoredEvent,
 };
 pub use transport::{
-    clamp_remote_interceptor_priority, clamp_remote_interceptor_timeout,
-    validate_remote_pattern, HttpAuthenticator, HttpServer, NoHttpAuth, RemotePatternError,
-    WebSocketServer, MAX_REMOTE_INTERCEPTOR_TIMEOUT_MS, MAX_REMOTE_PATTERN_LENGTH,
-    MIN_REMOTE_INTERCEPTOR_PRIORITY,
+    clamp_remote_interceptor_priority, clamp_remote_interceptor_timeout, validate_remote_pattern,
+    HttpAuthenticator, HttpServer, NoHttpAuth, RemotePatternError, WebSocketServer,
+    MAX_REMOTE_INTERCEPTOR_TIMEOUT_MS, MAX_REMOTE_PATTERN_LENGTH, MIN_REMOTE_INTERCEPTOR_PRIORITY,
 };
 
 /// Errors that can occur in the event bus.
@@ -377,7 +376,10 @@ pub mod test_utils {
         timeout: Duration,
     ) -> Option<DispatchedEvent> {
         bus.publish(subject, payload).await.ok()?;
-        tokio::time::timeout(timeout, rx.recv()).await.ok().flatten()
+        tokio::time::timeout(timeout, rx.recv())
+            .await
+            .ok()
+            .flatten()
     }
 
     /// Drain up to `count` events from `rx` with a per-event timeout.
