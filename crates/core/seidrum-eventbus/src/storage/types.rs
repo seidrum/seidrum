@@ -109,3 +109,32 @@ pub struct RetryableDelivery {
     /// results so the earliest-due deliveries are returned first.
     pub next_retry: Option<u64>,
 }
+
+/// A persisted subscription that survives restart.
+///
+/// Used by the HTTP transport's webhook subscription persistence: when a
+/// client creates a webhook subscription via `POST /subscribe`, the HTTP
+/// server stores a `PersistedSubscription` so the subscription is recreated
+/// after a process restart. The persisted entry is keyed by an internal
+/// `persisted_id` (a ULID); the HTTP API exposes the runtime bus
+/// subscription ID, and the server maintains a mapping from runtime ID to
+/// persisted ID for unsubscribe lookups.
+///
+/// In-process subscriptions are not persisted — only durable transports
+/// (webhooks) where the bus knows how to deliver after restart use this.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PersistedSubscription {
+    /// Stable identifier for the persisted entry. Different from the
+    /// runtime bus subscription ID (which changes across restarts).
+    pub persisted_id: String,
+    /// Subject pattern.
+    pub pattern: String,
+    /// Webhook URL.
+    pub url: String,
+    /// Custom HTTP headers to send with each delivery.
+    pub headers: std::collections::HashMap<String, String>,
+    /// Subscription priority.
+    pub priority: u32,
+    /// Unix-millis timestamp of when this entry was first persisted.
+    pub created_at: u64,
+}

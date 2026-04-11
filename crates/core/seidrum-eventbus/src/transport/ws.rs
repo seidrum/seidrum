@@ -137,6 +137,40 @@ pub enum ClientOperation {
         #[serde(default)]
         error: Option<String>,
     },
+    /// Register a remote sync interceptor.
+    ///
+    /// The server installs a proxy [`crate::dispatch::Interceptor`] in the
+    /// bus's interceptor chain at the requested priority and pattern.
+    /// Subsequent events whose subjects match `pattern` will be forwarded
+    /// to the client via [`ServerMessage::Intercept`] frames; the client
+    /// must respond with [`ClientOperation::InterceptResult`] using the
+    /// matching `request_id`.
+    ///
+    /// If the client does not respond within `timeout_ms` (default 5000ms),
+    /// the proxy returns `Pass` so the dispatch chain continues. On
+    /// disconnect, all in-flight intercept calls are cancelled with `Pass`.
+    #[serde(rename = "register_interceptor")]
+    RegisterInterceptor {
+        pattern: String,
+        #[serde(default)]
+        priority: u32,
+        #[serde(default)]
+        timeout_ms: Option<u64>,
+        #[serde(default)]
+        correlation_id: Option<String>,
+    },
+    /// Acknowledgment of an [`ServerMessage::Intercept`] frame.
+    ///
+    /// `action` is one of `"pass"`, `"modify"`, `"drop"`. When `action` is
+    /// `"modify"`, `payload` must be set to the new base64-encoded payload.
+    #[serde(rename = "intercept_result")]
+    InterceptResult {
+        request_id: String,
+        action: String,
+        /// Required when `action == "modify"`; ignored otherwise.
+        #[serde(default)]
+        payload: Option<String>,
+    },
 }
 
 fn default_timeout_ms() -> u64 {
@@ -207,6 +241,25 @@ pub enum ServerMessage {
     Deliver {
         request_id: String,
         channel_type: String,
+        subject: String,
+        /// Base64-encoded payload.
+        payload: String,
+    },
+    /// Confirmation of a successful `register_interceptor`.
+    #[serde(rename = "interceptor_registered")]
+    InterceptorRegistered {
+        /// Bus subscription id for the registered interceptor. The client
+        /// uses this to unsubscribe later via [`ClientOperation::Unsubscribe`].
+        id: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        correlation_id: Option<String>,
+    },
+    /// Server-initiated intercept call. The client must inspect the
+    /// payload and reply with [`ClientOperation::InterceptResult`] using
+    /// the same `request_id`.
+    #[serde(rename = "intercept")]
+    Intercept {
+        request_id: String,
         subject: String,
         /// Base64-encoded payload.
         payload: String,
@@ -346,6 +399,20 @@ struct RegisteredRemoteChannel {
     proxy: Arc<crate::delivery::WsRemoteChannel>,
 }
 
+/// Per-connection state for `WsRemoteInterceptor` proxies registered by
+/// this client. Mirrors [`RegisteredRemoteChannel`] but for the interceptor
+/// chain instead of delivery channels.
+struct RegisteredRemoteInterceptor {
+    /// Pattern this interceptor was registered against (logging/debug).
+    #[allow(dead_code)]
+    pattern: String,
+    /// Bus subscription id, used to unsubscribe on disconnect.
+    bus_id: String,
+    /// Shared pending-replies map. The read loop pushes `intercept_result`
+    /// messages here; `intercept()` awaits them via oneshot.
+    proxy: Arc<crate::dispatch::WsRemoteInterceptor>,
+}
+
 async fn serve_connection(
     ws: tokio_tungstenite::WebSocketStream<TcpStream>,
     peer_addr: std::net::SocketAddr,
@@ -359,6 +426,10 @@ async fn serve_connection(
     // loop can route DeliverResult messages and so disconnect cleanup
     // can unregister these channels from the bus.
     let mut remote_channels: HashMap<String, RegisteredRemoteChannel> = HashMap::new();
+    // Bus interceptor id → registered remote interceptor proxy. The read
+    // loop walks this map to route `intercept_result` messages back to the
+    // proxy that issued the corresponding `intercept` frame.
+    let mut remote_interceptors: HashMap<String, RegisteredRemoteInterceptor> = HashMap::new();
 
     // Channel for forwarding subscription events AND outbound deliver
     // frames to the WebSocket sender. Subscription receivers are polled
@@ -413,6 +484,7 @@ async fn serve_connection(
                             &bus,
                             &mut subscriptions,
                             &mut remote_channels,
+                            &mut remote_interceptors,
                             &mut sender,
                             &forward_tx,
                             op,
@@ -494,6 +566,34 @@ async fn serve_connection(
         );
     }
 
+    // Cancel any in-flight remote interceptor calls and unregister the
+    // proxies from the bus's interceptor chain. Pending intercept calls
+    // are signaled with `Pass` so the dispatch loop continues immediately.
+    if !remote_interceptors.is_empty() {
+        for entry in remote_interceptors.values() {
+            entry
+                .proxy
+                .cancel_all("WebSocket connection closed")
+                .await;
+        }
+        // Unsubscribe each one from the bus. Failures are logged but not
+        // propagated — the connection is dropping anyway.
+        let interceptor_ids: Vec<String> = remote_interceptors.keys().cloned().collect();
+        for id in &interceptor_ids {
+            if let Err(e) = bus.unsubscribe(id).await {
+                debug!(
+                    "Failed to unregister remote interceptor {} on disconnect from {}: {}",
+                    id, peer_addr, e
+                );
+            }
+        }
+        debug!(
+            "Cleaned up {} remote interceptor proxies for disconnected client {}",
+            interceptor_ids.len(),
+            peer_addr
+        );
+    }
+
     debug!("WebSocket client disconnected: {}", peer_addr);
     Ok(())
 }
@@ -527,6 +627,7 @@ async fn handle_operation(
     bus: &Arc<dyn EventBus>,
     subscriptions: &mut HashMap<String, ConnectionSubscription>,
     remote_channels: &mut HashMap<String, RegisteredRemoteChannel>,
+    remote_interceptors: &mut HashMap<String, RegisteredRemoteInterceptor>,
     sender: &mut futures_util::stream::SplitSink<
         tokio_tungstenite::WebSocketStream<TcpStream>,
         tokio_tungstenite::tungstenite::Message,
@@ -636,6 +737,17 @@ async fn handle_operation(
                     "Unsubscribed from pattern: {} (id={})",
                     conn_sub.pattern, id
                 );
+            } else if let Some(entry) = remote_interceptors.remove(&id) {
+                // Also handles unsubscribing remote interceptors so the
+                // client can use the same op to detach either subscription
+                // type. Cancel any pending replies first so in-flight
+                // intercept calls return Pass instead of hanging.
+                entry.proxy.cancel_all("interceptor unregistered").await;
+                bus.unsubscribe(&entry.bus_id).await?;
+                debug!(
+                    "Unregistered remote interceptor (id={}, pattern={})",
+                    id, entry.pattern
+                );
             }
         }
 
@@ -731,6 +843,126 @@ async fn handle_operation(
             }
             if !signaled {
                 debug!(request_id = %request_id, "DeliverResult had no matching pending delivery");
+            }
+        }
+
+        ClientOperation::RegisterInterceptor {
+            pattern,
+            priority,
+            timeout_ms,
+            correlation_id,
+        } => {
+            // Build the proxy interceptor and register it with the bus.
+            let mut proxy = crate::dispatch::WsRemoteInterceptor::new(
+                pattern.clone(),
+                forward_tx.clone(),
+            );
+            if let Some(ms) = timeout_ms {
+                proxy = proxy.with_timeout(Duration::from_millis(ms));
+            }
+            let proxy = Arc::new(proxy);
+
+            let bus_id = bus
+                .intercept(
+                    &pattern,
+                    priority,
+                    Arc::clone(&proxy) as Arc<dyn crate::dispatch::Interceptor>,
+                    timeout_ms.map(Duration::from_millis),
+                )
+                .await?;
+
+            remote_interceptors.insert(
+                bus_id.clone(),
+                RegisteredRemoteInterceptor {
+                    pattern: pattern.clone(),
+                    bus_id: bus_id.clone(),
+                    proxy,
+                },
+            );
+
+            debug!(
+                "Registered remote interceptor on pattern {} (id={})",
+                pattern, bus_id
+            );
+
+            let response = ServerMessage::InterceptorRegistered {
+                id: bus_id,
+                correlation_id,
+            };
+            if let Ok(json) = serde_json::to_string(&response) {
+                ws_send(sender, json).await?;
+            }
+        }
+
+        ClientOperation::InterceptResult {
+            request_id,
+            action,
+            payload,
+        } => {
+            // Translate the wire-level action into the internal struct.
+            let parsed_action = match action.as_str() {
+                "pass" => Some(crate::dispatch::WsInterceptAction::Pass),
+                "drop" => Some(crate::dispatch::WsInterceptAction::Drop),
+                "modify" => match payload {
+                    Some(p) => {
+                        match base64::engine::general_purpose::STANDARD.decode(&p) {
+                            Ok(bytes) => Some(crate::dispatch::WsInterceptAction::Modify(bytes)),
+                            Err(e) => {
+                                warn!(
+                                    request_id = %request_id,
+                                    error = %e,
+                                    "intercept_result modify payload not valid base64; ignoring"
+                                );
+                                None
+                            }
+                        }
+                    }
+                    None => {
+                        warn!(
+                            request_id = %request_id,
+                            "intercept_result modify missing payload; ignoring"
+                        );
+                        None
+                    }
+                },
+                other => {
+                    warn!(
+                        request_id = %request_id,
+                        action = other,
+                        "intercept_result with unknown action; ignoring"
+                    );
+                    None
+                }
+            };
+
+            let parsed_action = match parsed_action {
+                Some(a) => a,
+                None => return Ok(()),
+            };
+
+            // Route the reply to whichever interceptor proxy is awaiting
+            // it. Only one proxy will own the request_id, so we move the
+            // action into the first match.
+            let mut reply_slot = Some(crate::dispatch::WsInterceptReply {
+                action: parsed_action,
+                error: None,
+            });
+            let mut signaled = false;
+            for entry in remote_interceptors.values() {
+                let mut pending = entry.proxy.pending_replies().lock_owned().await;
+                if let Some(tx) = pending.remove(&request_id) {
+                    if let Some(reply) = reply_slot.take() {
+                        let _ = tx.send(reply);
+                    }
+                    signaled = true;
+                    break;
+                }
+            }
+            if !signaled {
+                debug!(
+                    request_id = %request_id,
+                    "intercept_result had no matching pending intercept call"
+                );
             }
         }
     }

@@ -1,8 +1,9 @@
 use super::{
-    DeliveryRecord, DeliveryStatus, EventStatus, EventStore, RetryableDelivery, StorageResult,
-    StoredEvent,
+    DeliveryRecord, DeliveryStatus, EventStatus, EventStore, PersistedSubscription,
+    RetryableDelivery, StorageResult, StoredEvent,
 };
 use async_trait::async_trait;
+use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::{Duration, SystemTime};
 use tokio::sync::RwLock;
@@ -14,12 +15,15 @@ use tokio::sync::RwLock;
 pub struct InMemoryEventStore {
     /// Internal events storage. `pub(crate)` for test access to simulate time manipulation.
     pub(crate) events: Arc<RwLock<Vec<StoredEvent>>>,
+    /// Persisted subscriptions keyed by persisted_id.
+    subscriptions: Arc<RwLock<HashMap<String, PersistedSubscription>>>,
 }
 
 impl InMemoryEventStore {
     pub fn new() -> Self {
         Self {
             events: Arc::new(RwLock::new(Vec::new())),
+            subscriptions: Arc::new(RwLock::new(HashMap::new())),
         }
     }
 
@@ -212,6 +216,23 @@ impl EventStore for InMemoryEventStore {
         });
 
         Ok((original_len - events.len()) as u64)
+    }
+
+    async fn save_subscription(&self, sub: &PersistedSubscription) -> StorageResult<()> {
+        let mut subs = self.subscriptions.write().await;
+        subs.insert(sub.persisted_id.clone(), sub.clone());
+        Ok(())
+    }
+
+    async fn list_subscriptions(&self) -> StorageResult<Vec<PersistedSubscription>> {
+        let subs = self.subscriptions.read().await;
+        Ok(subs.values().cloned().collect())
+    }
+
+    async fn delete_subscription(&self, persisted_id: &str) -> StorageResult<()> {
+        let mut subs = self.subscriptions.write().await;
+        subs.remove(persisted_id);
+        Ok(())
     }
 }
 

@@ -99,6 +99,14 @@ pub struct AppState {
     pub webhook_channel: Arc<WebhookChannel>,
     pub authenticator: Arc<dyn HttpAuthenticator>,
     pub subscription_count: Arc<AtomicUsize>,
+    /// Storage backend for persisting webhook subscriptions across
+    /// restarts. `None` means subscription persistence is disabled
+    /// (current behaviour for `HttpServer::new` / `with_auth`); the
+    /// builder always provides a real store via `with_webhook_channel`.
+    pub store: Option<Arc<dyn crate::storage::EventStore>>,
+    /// Map of bus subscription id → persisted subscription id. Used by
+    /// `DELETE /subscribe/:id` to find the persisted entry to delete.
+    pub bus_to_persisted: Arc<tokio::sync::RwLock<std::collections::HashMap<String, String>>>,
 }
 
 /// Request to publish an event.
@@ -187,8 +195,8 @@ pub fn create_router(state: AppState) -> Router {
         .route("/publish", post(publish_event))
         .route("/request", post(make_request))
         .route("/subscribe", post(create_subscription))
-        .route("/subscribe/:id", delete(remove_subscription))
-        .route("/events/:seq", get(get_event))
+        .route("/subscribe/{id}", delete(remove_subscription))
+        .route("/events/{seq}", get(get_event))
         .layer(axum::middleware::from_fn_with_state(
             state.clone(),
             auth_middleware,
@@ -208,6 +216,10 @@ pub struct HttpServer {
     webhook_channel: Arc<WebhookChannel>,
     authenticator: Arc<dyn HttpAuthenticator>,
     shutdown_rx: watch::Receiver<bool>,
+    /// Optional storage backend for webhook subscription persistence.
+    /// When set, `POST /subscribe` saves the config and `start()` will
+    /// recreate all persisted subscriptions before serving requests.
+    store: Option<Arc<dyn crate::storage::EventStore>>,
 }
 
 impl HttpServer {
@@ -236,6 +248,7 @@ impl HttpServer {
             webhook_channel: WebhookChannel::new(),
             authenticator: Arc::new(NoHttpAuth),
             shutdown_rx,
+            store: None,
         }
     }
 
@@ -252,6 +265,7 @@ impl HttpServer {
             webhook_channel: WebhookChannel::new(),
             authenticator,
             shutdown_rx,
+            store: None,
         }
     }
 
@@ -270,19 +284,76 @@ impl HttpServer {
             webhook_channel,
             authenticator: Arc::new(NoHttpAuth),
             shutdown_rx,
+            store: None,
         }
+    }
+
+    /// Attach a storage backend for webhook subscription persistence.
+    /// Builder pattern — chain after `new` / `with_auth` / `with_webhook_channel`.
+    /// When set, `POST /subscribe` saves the config to storage and
+    /// `start()` recreates persisted subscriptions on startup.
+    pub fn with_store(mut self, store: Arc<dyn crate::storage::EventStore>) -> Self {
+        self.store = Some(store);
+        self
     }
 
     /// Start the HTTP server on the given address.
     ///
     /// Runs until the shutdown signal is received or an error occurs.
+    /// If a store was configured via `with_store()`, all persisted webhook
+    /// subscriptions are recreated against the bus before serving requests.
     pub async fn start(&self, addr: SocketAddr) -> crate::Result<()> {
+        let subscription_count = Arc::new(AtomicUsize::new(0));
+        let bus_to_persisted: Arc<
+            tokio::sync::RwLock<std::collections::HashMap<String, String>>,
+        > = Arc::new(tokio::sync::RwLock::new(std::collections::HashMap::new()));
+
+        // Recreate persisted subscriptions from the store. Each persisted
+        // entry becomes a fresh bus subscription with a new bus id; the
+        // mapping bus_id → persisted_id is recorded so DELETE can clean up
+        // both the bus subscription and the persisted entry.
+        if let Some(store) = &self.store {
+            let persisted = store.list_subscriptions().await.map_err(|e| {
+                crate::EventBusError::Internal(format!(
+                    "failed to list persisted subscriptions: {}",
+                    e
+                ))
+            })?;
+            if !persisted.is_empty() {
+                info!(
+                    "Recreating {} persisted webhook subscriptions",
+                    persisted.len()
+                );
+            }
+            for entry in persisted {
+                if let Err(e) = recreate_persisted_subscription(
+                    &self.bus,
+                    &self.webhook_channel,
+                    &subscription_count,
+                    &bus_to_persisted,
+                    &entry,
+                )
+                .await
+                {
+                    warn!(
+                        persisted_id = entry.persisted_id,
+                        pattern = entry.pattern,
+                        url = entry.url,
+                        error = %e,
+                        "failed to recreate persisted subscription"
+                    );
+                }
+            }
+        }
+
         let state = AppState {
             bus: Arc::clone(&self.bus),
             registry: Arc::clone(&self.registry),
             webhook_channel: Arc::clone(&self.webhook_channel),
             authenticator: Arc::clone(&self.authenticator),
-            subscription_count: Arc::new(AtomicUsize::new(0)),
+            subscription_count,
+            store: self.store.clone(),
+            bus_to_persisted,
         };
 
         let app = create_router(state);
@@ -382,10 +453,111 @@ async fn make_request(
     }))
 }
 
+/// Spawn the background delivery task that pulls events from a webhook
+/// subscription's receive channel and POSTs them to the configured URL.
+///
+/// The task exits when `rx.recv()` returns `None` — which happens when the
+/// bus subscription is dropped (via `unsubscribe`). On exit it decrements
+/// `task_count` so the slot becomes available again.
+fn spawn_webhook_delivery_task(
+    webhook: Arc<WebhookChannel>,
+    delivery_config: ChannelConfig,
+    mut rx: tokio::sync::mpsc::Receiver<crate::request_reply::DispatchedEvent>,
+    sub_id: String,
+    task_count: Arc<AtomicUsize>,
+) {
+    tokio::spawn(async move {
+        debug!("Webhook delivery task started for subscription {}", sub_id);
+        while let Some(event) = rx.recv().await {
+            if let Err(e) = webhook
+                .deliver(&event.payload, &event.subject, &delivery_config)
+                .await
+            {
+                warn!(
+                    subscription = sub_id,
+                    subject = event.subject,
+                    error = %e,
+                    "Webhook delivery failed"
+                );
+            }
+        }
+        // Decrement when the task exits. This happens when bus.unsubscribe()
+        // drops the sender (tx), causing rx.recv() to return None — so
+        // DELETE /subscribe/:id triggers cleanup via this path.
+        task_count.fetch_sub(1, Ordering::Relaxed);
+        debug!("Webhook delivery task ended for subscription {}", sub_id);
+    });
+}
+
+/// Recreate a persisted webhook subscription against the bus.
+///
+/// Called once per persisted entry when the HTTP server starts up. The
+/// recreated subscription gets a fresh runtime bus id (different from the
+/// previous run); the bus id → persisted id mapping is recorded so the
+/// DELETE handler can find and remove the persisted entry.
+///
+/// Counts toward `MAX_HTTP_SUBSCRIPTIONS`, so a corrupted store with more
+/// than the limit will simply skip the overflow entries (logged at warn).
+async fn recreate_persisted_subscription(
+    bus: &Arc<dyn EventBus>,
+    webhook_channel: &Arc<WebhookChannel>,
+    subscription_count: &Arc<AtomicUsize>,
+    bus_to_persisted: &Arc<tokio::sync::RwLock<HashMap<String, String>>>,
+    entry: &crate::storage::PersistedSubscription,
+) -> crate::Result<String> {
+    // Reserve a slot up front. If we exceed the limit, roll back and bail.
+    let prev = subscription_count.fetch_add(1, Ordering::Relaxed);
+    if prev >= MAX_HTTP_SUBSCRIPTIONS {
+        subscription_count.fetch_sub(1, Ordering::Relaxed);
+        return Err(crate::EventBusError::Internal(format!(
+            "subscription limit reached ({} max)",
+            MAX_HTTP_SUBSCRIPTIONS
+        )));
+    }
+
+    let channel = ChannelConfig::Webhook {
+        url: entry.url.clone(),
+        headers: entry.headers.clone(),
+    };
+    let opts = SubscribeOpts {
+        priority: entry.priority,
+        mode: SubscriptionMode::Async,
+        channel: channel.clone(),
+        timeout: Duration::from_secs(5),
+        filter: None,
+    };
+
+    let sub = match bus.subscribe(&entry.pattern, opts).await {
+        Ok(sub) => sub,
+        Err(e) => {
+            subscription_count.fetch_sub(1, Ordering::Relaxed);
+            return Err(e);
+        }
+    };
+    let bus_id = sub.id.clone();
+
+    // Record the mapping so DELETE can find the persisted entry by bus id.
+    bus_to_persisted
+        .write()
+        .await
+        .insert(bus_id.clone(), entry.persisted_id.clone());
+
+    spawn_webhook_delivery_task(
+        Arc::clone(webhook_channel),
+        channel,
+        sub.rx,
+        bus_id.clone(),
+        Arc::clone(subscription_count),
+    );
+
+    Ok(bus_id)
+}
+
 /// Create a webhook subscription.
 ///
 /// Spawns a background delivery task that reads events from the bus subscription
-/// and delivers them via HTTP POST to the webhook URL.
+/// and delivers them via HTTP POST to the webhook URL. If a store is
+/// configured, the subscription is also persisted so it survives restart.
 async fn create_subscription(
     State(state): State<AppState>,
     Json(req): Json<SubscribeRequest>,
@@ -435,41 +607,50 @@ async fn create_subscription(
 
     let sub_id = sub.id.clone();
 
-    // Spawn a delivery task that reads from the subscription receiver
-    // and delivers via the webhook channel.
-    let webhook = Arc::clone(&state.webhook_channel);
-    let delivery_config = channel;
-    let task_count = Arc::clone(&count);
-
-    let mut rx = sub.rx;
-    let sub_id_for_task = sub_id.clone();
-    tokio::spawn(async move {
-        debug!(
-            "Webhook delivery task started for subscription {}",
-            sub_id_for_task
-        );
-        while let Some(event) = rx.recv().await {
-            if let Err(e) = webhook
-                .deliver(&event.payload, &event.subject, &delivery_config)
-                .await
-            {
-                warn!(
-                    subscription = sub_id_for_task,
-                    subject = event.subject,
-                    error = %e,
-                    "Webhook delivery failed"
-                );
-            }
+    // Persist the subscription if a store is configured. We persist BEFORE
+    // spawning the delivery task so that if persistence fails the caller
+    // sees the error and the bus subscription is rolled back.
+    if let Some(store) = &state.store {
+        let persisted_id = format!("ws-{}", ulid::Ulid::new());
+        let now_ms = std::time::SystemTime::now()
+            .duration_since(std::time::SystemTime::UNIX_EPOCH)
+            .map(|d| d.as_millis() as u64)
+            .unwrap_or(0);
+        let entry = crate::storage::PersistedSubscription {
+            persisted_id: persisted_id.clone(),
+            pattern: req.pattern.clone(),
+            url: req.url.clone(),
+            headers: req.headers.clone(),
+            priority: req.priority,
+            created_at: now_ms,
+        };
+        if let Err(e) = store.save_subscription(&entry).await {
+            // Roll back the bus subscription before failing the request.
+            let _ = state.bus.unsubscribe(&sub_id).await;
+            count.fetch_sub(1, Ordering::Relaxed);
+            warn!(
+                "Failed to persist subscription for pattern {}: {}",
+                req.pattern, e
+            );
+            return Err(http_error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!("failed to persist subscription: {}", e),
+            ));
         }
-        // Decrement when the task exits. This happens when bus.unsubscribe()
-        // drops the sender (tx), causing rx.recv() to return None — so
-        // DELETE /subscribe/:id triggers cleanup via this path.
-        task_count.fetch_sub(1, Ordering::Relaxed);
-        debug!(
-            "Webhook delivery task ended for subscription {}",
-            sub_id_for_task
-        );
-    });
+        state
+            .bus_to_persisted
+            .write()
+            .await
+            .insert(sub_id.clone(), persisted_id);
+    }
+
+    spawn_webhook_delivery_task(
+        Arc::clone(&state.webhook_channel),
+        channel,
+        sub.rx,
+        sub_id.clone(),
+        Arc::clone(&count),
+    );
 
     debug!(
         "Created subscription {} for pattern {}",
@@ -480,6 +661,9 @@ async fn create_subscription(
 }
 
 /// Remove a subscription.
+///
+/// Unsubscribes from the bus and, if a store is configured, also deletes
+/// the persisted entry so it does not get recreated on next restart.
 async fn remove_subscription(
     State(state): State<AppState>,
     Path(id): Path<String>,
@@ -488,6 +672,24 @@ async fn remove_subscription(
         warn!("Unsubscribe failed for id {}: {}", id, e);
         http_error(StatusCode::INTERNAL_SERVER_ERROR, format!("{}", e))
     })?;
+
+    // If this was a persisted subscription, drop the persisted entry too.
+    if let Some(store) = &state.store {
+        let persisted_id = state.bus_to_persisted.write().await.remove(&id);
+        if let Some(pid) = persisted_id {
+            if let Err(e) = store.delete_subscription(&pid).await {
+                // Log but do not fail the request — the bus unsubscribe
+                // already succeeded; the orphaned persisted entry will be
+                // cleaned up on a future restart attempt or manually.
+                warn!(
+                    bus_id = id,
+                    persisted_id = pid,
+                    error = %e,
+                    "failed to delete persisted subscription"
+                );
+            }
+        }
+    }
 
     debug!("Removed subscription {}", id);
     Ok(StatusCode::NO_CONTENT)

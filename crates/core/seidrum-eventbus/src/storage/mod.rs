@@ -126,6 +126,34 @@ pub trait EventStore: Send + Sync + 'static {
     async fn query_dead_lettered(&self, limit: usize) -> StorageResult<Vec<StoredEvent>> {
         self.query_by_status(EventStatus::DeadLettered, limit).await
     }
+
+    // === Persisted subscriptions (Phase 4) ===
+    //
+    // Webhook subscriptions registered via the HTTP transport are persisted
+    // here so they survive restarts. In-process subscriptions are not
+    // persisted — only durable transports (webhook) need this. The default
+    // implementations panic with `unimplemented!` so existing custom store
+    // backends without persistence support fail loudly rather than silently
+    // discarding subscriptions.
+
+    /// Save a persisted subscription. Replaces any existing entry with the
+    /// same `persisted_id`.
+    async fn save_subscription(&self, sub: &PersistedSubscription) -> StorageResult<()> {
+        let _ = sub;
+        unimplemented!("save_subscription not implemented for this store")
+    }
+
+    /// List all persisted subscriptions. Used on HTTP server startup to
+    /// recreate webhook subscriptions after a restart.
+    async fn list_subscriptions(&self) -> StorageResult<Vec<PersistedSubscription>> {
+        unimplemented!("list_subscriptions not implemented for this store")
+    }
+
+    /// Delete a persisted subscription by its `persisted_id`.
+    async fn delete_subscription(&self, persisted_id: &str) -> StorageResult<()> {
+        let _ = persisted_id;
+        unimplemented!("delete_subscription not implemented for this store")
+    }
 }
 
 #[cfg(test)]

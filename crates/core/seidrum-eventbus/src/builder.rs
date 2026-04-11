@@ -386,10 +386,12 @@ impl EventBusBuilder {
             let bus_clone = Arc::clone(&bus);
             let registry_clone = Arc::clone(&registry);
             let webhook_clone = Arc::clone(&webhook_channel);
+            let store_clone = Arc::clone(&store);
             let rx = shutdown_rx.clone();
             Some(tokio::spawn(async move {
                 let http_server =
-                    HttpServer::with_webhook_channel(bus_clone, registry_clone, webhook_clone, rx);
+                    HttpServer::with_webhook_channel(bus_clone, registry_clone, webhook_clone, rx)
+                        .with_store(store_clone);
                 if let Err(e) = http_server.start(addr).await {
                     tracing::error!("HTTP server error: {}", e);
                 }

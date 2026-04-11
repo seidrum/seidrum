@@ -1,6 +1,6 @@
 use super::{
-    DeliveryRecord, DeliveryStatus, EventStatus, EventStore, RetryableDelivery, StorageError,
-    StorageResult, StoredEvent,
+    DeliveryRecord, DeliveryStatus, EventStatus, EventStore, PersistedSubscription,
+    RetryableDelivery, StorageError, StorageResult, StoredEvent,
 };
 use async_trait::async_trait;
 use redb::{Database, ReadableTable};
@@ -19,6 +19,10 @@ const STATUS_IDX_TABLE: redb::TableDefinition<(u8, u64), ()> =
 /// deliveries instead of full-scanning the events table.
 const FAILED_DELIVERIES_IDX_TABLE: redb::TableDefinition<u64, ()> =
     redb::TableDefinition::new("failed_deliveries_idx");
+/// Persisted webhook subscriptions, keyed by persisted_id (a ULID string).
+/// Used by the HTTP transport so subscriptions survive process restarts.
+const SUBSCRIPTIONS_TABLE: redb::TableDefinition<&str, &[u8]> =
+    redb::TableDefinition::new("subscriptions");
 
 /// A durable event store using redb as the backing storage engine.
 pub struct RedbEventStore {
@@ -54,6 +58,12 @@ impl RedbEventStore {
                             e
                         ))
                     })?;
+                let _t5 = write_txn.open_table(SUBSCRIPTIONS_TABLE).map_err(|e| {
+                    StorageError::DatabaseError(format!(
+                        "failed to open subscriptions table: {}",
+                        e
+                    ))
+                })?;
             }
             write_txn.commit().map_err(|e| {
                 StorageError::DatabaseError(format!("failed to commit transaction: {}", e))
@@ -728,6 +738,93 @@ impl EventStore for RedbEventStore {
         })
         .await
         .map_err(|e| StorageError::OperationFailed(format!("spawn_blocking error: {}", e)))?
+    }
+
+    async fn save_subscription(&self, sub: &PersistedSubscription) -> StorageResult<()> {
+        let db = Arc::clone(&self.db);
+        let sub = sub.clone();
+        tokio::task::spawn_blocking(move || {
+            let serialized = serde_json::to_vec(&sub).map_err(|e| {
+                StorageError::OperationFailed(format!("serialize subscription: {}", e))
+            })?;
+            let write_txn = db.begin_write().map_err(|e| {
+                StorageError::DatabaseError(format!("begin write: {}", e))
+            })?;
+            {
+                let mut t = write_txn.open_table(SUBSCRIPTIONS_TABLE).map_err(|e| {
+                    StorageError::DatabaseError(format!(
+                        "open subscriptions table: {}",
+                        e
+                    ))
+                })?;
+                t.insert(sub.persisted_id.as_str(), serialized.as_slice())
+                    .map_err(|e| {
+                        StorageError::DatabaseError(format!("insert subscription: {}", e))
+                    })?;
+            }
+            write_txn
+                .commit()
+                .map_err(|e| StorageError::DatabaseError(format!("commit: {}", e)))
+        })
+        .await
+        .map_err(|e| StorageError::OperationFailed(format!("spawn_blocking: {}", e)))?
+    }
+
+    async fn list_subscriptions(&self) -> StorageResult<Vec<PersistedSubscription>> {
+        let db = Arc::clone(&self.db);
+        tokio::task::spawn_blocking(move || {
+            let read_txn = db
+                .begin_read()
+                .map_err(|e| StorageError::DatabaseError(format!("begin read: {}", e)))?;
+            let table = read_txn.open_table(SUBSCRIPTIONS_TABLE).map_err(|e| {
+                StorageError::DatabaseError(format!("open subscriptions: {}", e))
+            })?;
+            let mut results = Vec::new();
+            let iter = table
+                .iter()
+                .map_err(|e| StorageError::DatabaseError(format!("iterate: {}", e)))?;
+            for item in iter {
+                let (_, value) = item.map_err(|e| {
+                    StorageError::DatabaseError(format!("iterate row: {}", e))
+                })?;
+                let bytes = value.value().to_vec();
+                let sub: PersistedSubscription =
+                    serde_json::from_slice(&bytes).map_err(|e| {
+                        StorageError::OperationFailed(format!(
+                            "deserialize subscription: {}",
+                            e
+                        ))
+                    })?;
+                results.push(sub);
+            }
+            Ok(results)
+        })
+        .await
+        .map_err(|e| StorageError::OperationFailed(format!("spawn_blocking: {}", e)))?
+    }
+
+    async fn delete_subscription(&self, persisted_id: &str) -> StorageResult<()> {
+        let db = Arc::clone(&self.db);
+        let persisted_id = persisted_id.to_string();
+        tokio::task::spawn_blocking(move || {
+            let write_txn = db
+                .begin_write()
+                .map_err(|e| StorageError::DatabaseError(format!("begin write: {}", e)))?;
+            {
+                let mut t = write_txn.open_table(SUBSCRIPTIONS_TABLE).map_err(|e| {
+                    StorageError::DatabaseError(format!(
+                        "open subscriptions table: {}",
+                        e
+                    ))
+                })?;
+                let _ = t.remove(persisted_id.as_str());
+            }
+            write_txn
+                .commit()
+                .map_err(|e| StorageError::DatabaseError(format!("commit: {}", e)))
+        })
+        .await
+        .map_err(|e| StorageError::OperationFailed(format!("spawn_blocking: {}", e)))?
     }
 }
 
