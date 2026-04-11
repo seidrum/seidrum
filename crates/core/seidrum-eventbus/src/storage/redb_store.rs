@@ -870,6 +870,55 @@ mod tests {
         assert_eq!(results[0].deliveries[0].subscriber_id, "sub1");
     }
 
+    /// Required by QUALITY.md L73: concurrent appends do not corrupt data.
+    /// 50 concurrent appends from 10 tasks must produce 50 distinct
+    /// monotonic sequence numbers and 50 readable events.
+    #[tokio::test]
+    async fn test_redb_concurrent_appends() {
+        let temp = TempDir::new().unwrap();
+        let store = Arc::new(RedbEventStore::open(temp.path().join("events.db")).unwrap());
+
+        let mut handles = vec![];
+        for task_id in 0..10 {
+            let store = Arc::clone(&store);
+            handles.push(tokio::spawn(async move {
+                let mut seqs = vec![];
+                for i in 0..5 {
+                    let event = StoredEvent {
+                        seq: 0,
+                        subject: format!("test.task.{}", task_id),
+                        payload: format!("event-{}-{}", task_id, i).into_bytes(),
+                        stored_at: 0,
+                        status: EventStatus::Pending,
+                        deliveries: vec![],
+                        reply_subject: None,
+                    };
+                    seqs.push(store.append(&event).await.unwrap());
+                }
+                seqs
+            }));
+        }
+
+        let mut all_seqs: Vec<u64> = Vec::new();
+        for handle in handles {
+            let seqs = handle.await.unwrap();
+            all_seqs.extend(seqs);
+        }
+
+        // 50 distinct, monotonic sequence numbers.
+        assert_eq!(all_seqs.len(), 50);
+        let mut sorted = all_seqs.clone();
+        sorted.sort();
+        sorted.dedup();
+        assert_eq!(sorted.len(), 50, "all sequence numbers must be unique");
+
+        // Every event is readable via get(seq).
+        for seq in &all_seqs {
+            let event = store.get(*seq).await.unwrap();
+            assert!(event.is_some(), "event seq={} should be readable", seq);
+        }
+    }
+
     /// Regression test: a Failed delivery must remain queryable via
     /// `query_retryable` even if the parent event's status was bumped to
     /// `Delivered` by an unrelated path (e.g., the dispatch engine's
