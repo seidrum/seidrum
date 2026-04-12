@@ -1,7 +1,7 @@
 //! Audit logging for API gateway events.
 
 use chrono::{DateTime, Utc};
-use seidrum_common::nats_utils::NatsClient;
+use seidrum_common::bus_client::BusClient;
 use serde::{Deserialize, Serialize};
 use std::collections::VecDeque;
 use std::sync::Arc;
@@ -29,7 +29,7 @@ pub struct AuditEntry {
 pub struct AuditLog {
     entries: Arc<RwLock<VecDeque<AuditEntry>>>,
     max_entries: usize,
-    nats: Option<NatsClient>,
+    nats: Option<BusClient>,
 }
 
 impl AuditLog {
@@ -42,7 +42,7 @@ impl AuditLog {
     }
 
     /// Create an audit log that also persists entries to ArangoDB via NATS.
-    pub fn with_nats(max_entries: usize, nats: NatsClient) -> Self {
+    pub fn with_nats(max_entries: usize, nats: BusClient) -> Self {
         Self {
             entries: Arc::new(RwLock::new(VecDeque::with_capacity(max_entries))),
             max_entries,

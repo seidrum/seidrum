@@ -4,8 +4,8 @@ use futures::StreamExt as _;
 
 use tracing::{error, info, warn};
 
+use seidrum_common::bus_client::BusClient;
 use seidrum_common::events::{ChannelOutbound, EventEnvelope, LlmResponse, PluginRegister};
-use seidrum_common::nats_utils::NatsClient;
 
 // ---------------------------------------------------------------------------
 // CLI args
@@ -129,7 +129,7 @@ async fn main() -> Result<()> {
     info!(nats_url = %cli.nats_url, "Starting seidrum-response-formatter plugin...");
 
     // Connect to NATS
-    let nats = NatsClient::connect(&cli.nats_url, "response-formatter").await?;
+    let nats = BusClient::connect(&cli.nats_url, "response-formatter").await?;
 
     // Publish plugin registration
     let register = PluginRegister {
@@ -171,7 +171,7 @@ async fn main() -> Result<()> {
 // Event handler
 // ---------------------------------------------------------------------------
 
-async fn handle_llm_response(payload: &[u8], nats: &NatsClient) -> Result<()> {
+async fn handle_llm_response(payload: &[u8], nats: &BusClient) -> Result<()> {
     // Parse the event envelope
     let envelope: EventEnvelope = serde_json::from_slice(payload)
         .map_err(|e| anyhow::anyhow!("Failed to parse EventEnvelope: {e}"))?;

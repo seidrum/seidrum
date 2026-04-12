@@ -126,7 +126,7 @@ async fn main() -> Result<()> {
     );
 
     // Connect to NATS
-    let client = async_nats::connect(&args.nats_url)
+    let client = seidrum_common::bus_client::BusClient::connect(&args.nats_url, "entity-extractor")
         .await
         .context("Failed to connect to NATS")?;
 
@@ -150,10 +150,7 @@ async fn main() -> Result<()> {
         EventEnvelope::new("plugin.register", PLUGIN_ID, None, None, &register)?;
 
     client
-        .publish(
-            "plugin.register",
-            serde_json::to_vec(&register_envelope)?.into(),
-        )
+        .publish_bytes("plugin.register", serde_json::to_vec(&register_envelope)?)
         .await
         .context("Failed to publish plugin.register")?;
 
@@ -215,7 +212,7 @@ async fn main() -> Result<()> {
 }
 
 async fn process_content(
-    nats: &async_nats::Client,
+    nats: &seidrum_common::bus_client::BusClient,
     http: &reqwest::Client,
     api_key: &str,
     model: &str,
@@ -266,14 +263,11 @@ async fn process_content(
     )?;
 
     let response = nats
-        .request(
-            "brain.query.request",
-            serde_json::to_vec(&query_envelope)?.into(),
-        )
+        .request_bytes("brain.query.request", serde_json::to_vec(&query_envelope)?)
         .await
         .context("brain.query.request timed out or failed")?;
 
-    let response_envelope: EventEnvelope = serde_json::from_slice(&response.payload)
+    let response_envelope: EventEnvelope = serde_json::from_slice(&response)
         .context("Failed to deserialize brain.query.response envelope")?;
 
     let query_response: seidrum_common::events::BrainQueryResponse =
@@ -329,12 +323,9 @@ async fn process_content(
             &upsert,
         )?;
 
-        nats.publish(
-            "brain.entity.upsert",
-            serde_json::to_vec(&upsert_envelope)?.into(),
-        )
-        .await
-        .context("Failed to publish brain.entity.upsert")?;
+        nats.publish_bytes("brain.entity.upsert", serde_json::to_vec(&upsert_envelope)?)
+            .await
+            .context("Failed to publish brain.entity.upsert")?;
 
         info!(
             name = %entity.name,

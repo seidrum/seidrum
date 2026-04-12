@@ -2,29 +2,24 @@
 
 use std::time::Duration;
 
-/// Connect to NATS using env vars or defaults.
-pub async fn connect_nats() -> async_nats::Client {
+/// Connect to the bus using env vars or defaults.
+pub async fn connect_nats() -> seidrum_common::bus_client::BusClient {
     let url = std::env::var("TEST_NATS_URL").unwrap_or_else(|_| "nats://localhost:4222".into());
-    async_nats::connect(&url)
+    seidrum_common::bus_client::BusClient::connect(&url, "e2e-test")
         .await
-        .expect("Failed to connect to NATS. Is it running?")
+        .expect("Failed to connect to bus. Is it running?")
 }
 
-/// NATS request/reply helper with timeout.
+/// Bus request/reply helper with timeout.
 pub async fn nats_request<T: serde::Serialize, R: serde::de::DeserializeOwned>(
-    nats: &async_nats::Client,
+    nats: &seidrum_common::bus_client::BusClient,
     subject: &str,
     payload: &T,
 ) -> R {
-    let bytes = serde_json::to_vec(payload).unwrap();
-    let response = tokio::time::timeout(
-        Duration::from_secs(5),
-        nats.request(subject.to_string(), bytes.into()),
-    )
-    .await
-    .expect("NATS request timed out (5s)")
-    .expect("NATS request failed");
-    serde_json::from_slice(&response.payload).expect("Failed to parse NATS response")
+    tokio::time::timeout(Duration::from_secs(5), nats.request(subject, payload))
+        .await
+        .expect("bus request timed out (5s)")
+        .expect("bus request failed")
 }
 
 /// Generate a unique test ID to avoid collisions between test runs.

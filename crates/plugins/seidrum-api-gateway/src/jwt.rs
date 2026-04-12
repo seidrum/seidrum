@@ -3,10 +3,10 @@
 
 use anyhow::Result;
 use jsonwebtoken::{decode, encode, Algorithm, DecodingKey, EncodingKey, Header, Validation};
+use seidrum_common::bus_client::BusClient;
 use seidrum_common::events::{
     StorageGetRequest, StorageGetResponse, StorageSetRequest, StorageSetResponse,
 };
-use seidrum_common::nats_utils::NatsClient;
 use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
 use std::sync::Arc;
@@ -115,7 +115,7 @@ impl JwtService {
     }
 
     /// Save revocation list to plugin storage via NATS for persistence across restarts.
-    pub async fn save_revocations(&self, nats: &NatsClient) {
+    pub async fn save_revocations(&self, nats: &BusClient) {
         let revoked = self.revoked.read().await;
         let jti_list: Vec<String> = revoked.iter().cloned().collect();
         drop(revoked);
@@ -140,7 +140,7 @@ impl JwtService {
     }
 
     /// Restore revocation list from plugin storage via NATS.
-    pub async fn restore_revocations(&self, nats: &NatsClient) {
+    pub async fn restore_revocations(&self, nats: &BusClient) {
         let req = StorageGetRequest {
             plugin_id: "api-gateway".to_string(),
             namespace: "jwt_revocations".to_string(),

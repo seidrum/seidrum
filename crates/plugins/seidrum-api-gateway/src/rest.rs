@@ -105,11 +105,7 @@ pub async fn deregister_plugin(
         id: plugin_id.clone(),
     };
     if let Ok(bytes) = serde_json::to_vec(&dereg) {
-        let _ = state
-            .nats
-            .inner()
-            .publish("plugin.deregister".to_string(), bytes.into())
-            .await;
+        let _ = state.nats.publish_bytes("plugin.deregister", bytes).await;
     }
 
     StatusCode::NO_CONTENT

@@ -56,19 +56,19 @@ The kernel is a single binary that owns all shared state. Services run as concur
 
 Every plugin follows the same pattern (see any `crates/plugins/*/src/main.rs`):
 
-1. Connect to NATS via `NatsClient::connect()`
+1. Connect to the bus via `BusClient::connect()`
 2. Build `PluginRegister` with id, name, consumes/produces lists, health_subject
 3. Publish to `plugin.register`
 4. Subscribe to consumed subjects
 5. Process events in loop
 
-Plugins never access ArangoDB directly — all brain operations go through NATS request/reply to kernel.
+Plugins never access ArangoDB directly — all brain operations go through bus request/reply to kernel.
 
 ### Common Library (crates/core/seidrum-common)
 
 - `events.rs`: All event structs (`EventEnvelope`, `ChannelInbound`, `LlmRequest`, `ContentStoreRequest`, etc.)
 - `config.rs`: Config loading (platform.yaml, agents, workflows)
-- `nats_utils.rs`: `NatsClient` with `publish_envelope()`, `request()`, `subscribe()`
+- `bus_client.rs`: `BusClient` with `publish_envelope()`, `request()`, `subscribe()`, `publish_bytes()`, `request_bytes()`, `reply_to()`
 
 ### Configuration Files
 

@@ -56,7 +56,7 @@ async fn main() -> Result<()> {
     info!(plugin = PLUGIN_ID, "Starting code executor plugin");
 
     // Connect to NATS
-    let client = async_nats::connect(&args.nats_url)
+    let client = seidrum_common::bus_client::BusClient::connect(&args.nats_url, "code-executor")
         .await
         .context("Failed to connect to NATS")?;
 
@@ -80,10 +80,7 @@ async fn main() -> Result<()> {
         EventEnvelope::new("plugin.register", PLUGIN_ID, None, None, &register)?;
 
     client
-        .publish(
-            "plugin.register",
-            serde_json::to_vec(&register_envelope)?.into(),
-        )
+        .publish_bytes("plugin.register", serde_json::to_vec(&register_envelope)?)
         .await
         .context("Failed to publish plugin.register")?;
 
@@ -120,10 +117,7 @@ async fn main() -> Result<()> {
     });
 
     client
-        .publish(
-            "capability.register",
-            serde_json::to_vec(&tool_register)?.into(),
-        )
+        .publish_bytes("capability.register", serde_json::to_vec(&tool_register)?)
         .await
         .context("Failed to publish capability.register")?;
 
@@ -157,7 +151,7 @@ async fn main() -> Result<()> {
                     is_error: true,
                 };
                 if let Err(e) = client
-                    .publish(reply, serde_json::to_vec(&error_response)?.into())
+                    .publish_bytes(reply, serde_json::to_vec(&error_response)?)
                     .await
                 {
                     error!(%e, "Failed to publish error reply");
@@ -209,7 +203,7 @@ async fn main() -> Result<()> {
         };
 
         if let Err(err) = client
-            .publish(reply, serde_json::to_vec(&tool_response)?.into())
+            .publish_bytes(reply, serde_json::to_vec(&tool_response)?)
             .await
         {
             error!(%err, "Failed to publish tool call reply");

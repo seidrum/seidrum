@@ -4,11 +4,11 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Duration;
 
+use seidrum_common::bus_client::BusClient;
 use seidrum_common::events::{
     RateLimiterBucket, RateLimiterState, StorageGetRequest, StorageGetResponse, StorageSetRequest,
     StorageSetResponse,
 };
-use seidrum_common::nats_utils::NatsClient;
 use tokio::sync::RwLock;
 use tracing::{debug, info, warn};
 
@@ -140,7 +140,7 @@ impl RateLimiter {
     }
 
     /// Save rate limiter state to plugin storage via NATS for persistence across restarts.
-    pub async fn save_state(&self, nats: &NatsClient) {
+    pub async fn save_state(&self, nats: &BusClient) {
         let buckets = self.buckets.read().await;
         let state = RateLimiterState {
             buckets: buckets
@@ -188,7 +188,7 @@ impl RateLimiter {
     }
 
     /// Restore rate limiter state from plugin storage via NATS.
-    pub async fn restore_state(&self, nats: &NatsClient) {
+    pub async fn restore_state(&self, nats: &BusClient) {
         let req = StorageGetRequest {
             plugin_id: STORAGE_PLUGIN_ID.to_string(),
             namespace: STORAGE_NAMESPACE.to_string(),

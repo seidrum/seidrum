@@ -150,7 +150,7 @@ async fn main() -> Result<()> {
     );
 
     // Connect to NATS
-    let nats = async_nats::connect(&cli.nats_url).await?;
+    let nats = seidrum_common::bus_client::BusClient::connect(&cli.nats_url, "llm-router").await?;
     info!("Connected to NATS");
 
     // Publish plugin registration
@@ -163,7 +163,7 @@ async fn main() -> Result<()> {
         "produces": ["llm.response"],
         "health_subject": "plugin.llm-router.health",
     });
-    nats.publish("plugin.register", serde_json::to_vec(&register)?.into())
+    nats.publish_bytes("plugin.register", serde_json::to_vec(&register)?)
         .await?;
     info!("Published plugin.register");
 
@@ -254,7 +254,9 @@ async fn main() -> Result<()> {
 }
 
 /// Pull the next message from an async-nats subscriber.
-async fn futures_next(sub: &mut async_nats::Subscriber) -> Option<async_nats::Message> {
+async fn futures_next(
+    sub: &mut seidrum_common::bus_client::Subscription,
+) -> Option<seidrum_common::bus_client::Message> {
     use futures::StreamExt as _;
     sub.next().await
 }
@@ -271,7 +273,7 @@ async fn handle_message(
     max_dynamic_tools: u32,
     provider_timeout: u64,
     prompt_template: &str,
-    nats: &async_nats::Client,
+    nats: &seidrum_common::bus_client::BusClient,
     routing_config: &routing::RoutingStrategy,
 ) -> Result<()> {
     info!(subject = %subject, "Received event");
@@ -449,14 +451,14 @@ async fn handle_message(
 
         let provider_response = tokio::time::timeout(
             std::time::Duration::from_secs(provider_timeout),
-            nats.request(subject.clone(), request_bytes.clone().into()),
+            nats.request_bytes(subject.clone(), request_bytes.clone()),
         )
         .await;
 
         let duration_ms = start.elapsed().as_millis() as u64;
 
         match provider_response {
-            Ok(Ok(resp_msg)) => match serde_json::from_slice::<LlmResponse>(&resp_msg.payload) {
+            Ok(Ok(resp_msg)) => match serde_json::from_slice::<LlmResponse>(&resp_msg) {
                 Ok(resp) => {
                     info!(
                         provider = %provider.name(),
@@ -533,7 +535,7 @@ async fn handle_message(
     };
 
     let envelope_bytes = serde_json::to_vec(&out_envelope)?;
-    nats.publish("llm.response", envelope_bytes.into()).await?;
+    nats.publish_bytes("llm.response", envelope_bytes).await?;
 
     info!(event_id = %out_envelope.id, "Published llm.response");
 

@@ -189,7 +189,7 @@ All existing functionality continues to work.
 **Deliverables:**
 
 1. Adapter layer in `seidrum-common`
-   - Replace `NatsClient` implementation with `EventBus` calls
+   - Replace `BusClient` internals with `EventBus` calls
    - `publish_envelope()` → serialize EventEnvelope → `bus.publish()`
    - `request()` → `bus.request()`
    - `subscribe()` → `bus.subscribe()` with Async mode
@@ -200,7 +200,7 @@ All existing functionality continues to work.
    - Kernel services register as in-process subscribers
 
 3. Plugin bootstrap migration
-   - Rust plugins: swap `NatsClient` for `EventBus` handle
+   - Rust plugins: `BusClient` already wraps the bus — no source change
    - API gateway: adapt WebSocket protocol to new bus protocol
    - External plugins: WebSocket protocol is similar, adapt framing
 

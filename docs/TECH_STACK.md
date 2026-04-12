@@ -125,7 +125,7 @@ seidrum/
 │   │   └── src/
 │   │       ├── lib.rs
 │   │       ├── events.rs         # All event type definitions
-│   │       ├── nats_utils.rs     # Connection, publish, subscribe helpers
+│   │       ├── bus_client.rs     # BusClient — connection, publish, subscribe helpers
 │   │       └── config.rs         # Shared config types
 │   ├── seidrum-kernel/           # The kernel binary
 │   │   ├── Cargo.toml

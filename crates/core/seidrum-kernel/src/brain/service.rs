@@ -35,7 +35,7 @@ use crate::scope::service::ScopeService;
 /// Long-lived service that handles brain NATS subjects.
 pub struct BrainService {
     arango: ArangoClient,
-    nats: async_nats::Client,
+    nats: seidrum_common::bus_client::BusClient,
     scope_service: ScopeService,
     embedding: EmbeddingService,
 }
@@ -44,7 +44,7 @@ impl BrainService {
     /// Create a new brain service.
     pub fn new(
         arango: ArangoClient,
-        nats: async_nats::Client,
+        nats: seidrum_common::bus_client::BusClient,
         embedding: EmbeddingService,
     ) -> Self {
         let scope_service = ScopeService::new(arango.clone());
@@ -485,7 +485,7 @@ impl BrainService {
 
 /// Parse the incoming message as an EventEnvelope, then deserialize the payload.
 fn parse_envelope<T: serde::de::DeserializeOwned>(
-    msg: &async_nats::Message,
+    msg: &seidrum_common::bus_client::Message,
 ) -> Result<(EventEnvelope, T)> {
     let envelope: EventEnvelope =
         serde_json::from_slice(&msg.payload).context("failed to parse EventEnvelope")?;
@@ -496,7 +496,7 @@ fn parse_envelope<T: serde::de::DeserializeOwned>(
 
 /// Build a response envelope and publish it.
 async fn publish_response<T: serde::Serialize>(
-    nats: &async_nats::Client,
+    nats: &seidrum_common::bus_client::BusClient,
     subject: &str,
     correlation_id: Option<String>,
     scope: Option<String>,
@@ -505,7 +505,7 @@ async fn publish_response<T: serde::Serialize>(
     let envelope = EventEnvelope::new(subject, "kernel", correlation_id, scope, payload)
         .context("failed to build response envelope")?;
     let bytes = serde_json::to_vec(&envelope).context("failed to serialize response")?;
-    nats.publish(subject.to_string(), bytes.into())
+    nats.publish_bytes(subject.to_string(), bytes)
         .await
         .with_context(|| format!("failed to publish to {}", subject))?;
     debug!(subject, "published response event");
@@ -514,7 +514,7 @@ async fn publish_response<T: serde::Serialize>(
 
 /// Reply to a NATS request/reply message.
 async fn reply_with<T: serde::Serialize>(
-    nats: &async_nats::Client,
+    nats: &seidrum_common::bus_client::BusClient,
     reply_subject: &str,
     correlation_id: Option<String>,
     scope: Option<String>,
@@ -529,7 +529,7 @@ async fn reply_with<T: serde::Serialize>(
     )
     .context("failed to build reply envelope")?;
     let bytes = serde_json::to_vec(&envelope).context("failed to serialize reply")?;
-    nats.publish(reply_subject.to_string(), bytes.into())
+    nats.publish_bytes(reply_subject.to_string(), bytes)
         .await
         .with_context(|| format!("failed to reply to {}", reply_subject))?;
     debug!(reply_subject, "sent reply");
@@ -572,9 +572,9 @@ fn generate_task_key() -> String {
 /// Handle `brain.content.store` — store content in ArangoDB.
 async fn handle_content_store(
     arango: &ArangoClient,
-    nats: &async_nats::Client,
+    nats: &seidrum_common::bus_client::BusClient,
     embedding: &EmbeddingService,
-    msg: async_nats::Message,
+    msg: seidrum_common::bus_client::Message,
 ) -> Result<()> {
     let (envelope, req): (EventEnvelope, ContentStoreRequest) = parse_envelope(&msg)?;
     debug!(
@@ -662,9 +662,9 @@ async fn handle_content_store(
 /// Handle `brain.entity.upsert` — create or update an entity.
 async fn handle_entity_upsert(
     arango: &ArangoClient,
-    nats: &async_nats::Client,
+    nats: &seidrum_common::bus_client::BusClient,
     embedding: &EmbeddingService,
-    msg: async_nats::Message,
+    msg: seidrum_common::bus_client::Message,
 ) -> Result<()> {
     let (envelope, req): (EventEnvelope, EntityUpsertRequest) = parse_envelope(&msg)?;
     debug!(name = %req.name, entity_type = %req.entity_type, "handling brain.entity.upsert");
@@ -777,8 +777,8 @@ async fn handle_entity_upsert(
 /// Handle `brain.fact.upsert` — create or update a fact.
 async fn handle_fact_upsert(
     arango: &ArangoClient,
-    nats: &async_nats::Client,
-    msg: async_nats::Message,
+    nats: &seidrum_common::bus_client::BusClient,
+    msg: seidrum_common::bus_client::Message,
 ) -> Result<()> {
     let (envelope, req): (EventEnvelope, FactUpsertRequest) = parse_envelope(&msg)?;
     debug!(
@@ -986,8 +986,8 @@ async fn handle_fact_upsert(
 /// Handle `brain.scope.assign` — create a scoped_to edge.
 async fn handle_scope_assign(
     arango: &ArangoClient,
-    nats: &async_nats::Client,
-    msg: async_nats::Message,
+    nats: &seidrum_common::bus_client::BusClient,
+    msg: seidrum_common::bus_client::Message,
 ) -> Result<()> {
     let (envelope, req): (EventEnvelope, ScopeAssignRequest) = parse_envelope(&msg)?;
     debug!(
@@ -1059,8 +1059,8 @@ async fn detect_collection_id(arango: &ArangoClient, key: &str) -> Result<String
 /// Optional: task_key (for update), assigned_agent, due_date, etc.
 async fn handle_task_upsert(
     arango: &ArangoClient,
-    nats: &async_nats::Client,
-    msg: async_nats::Message,
+    nats: &seidrum_common::bus_client::BusClient,
+    msg: seidrum_common::bus_client::Message,
 ) -> Result<()> {
     let (envelope, payload): (EventEnvelope, Value) = parse_envelope(&msg)?;
     debug!("handling brain.task.upsert");
@@ -1146,10 +1146,10 @@ async fn handle_task_upsert(
 /// subject (if present), otherwise published to `brain.query.response`.
 async fn handle_query_request(
     arango: &ArangoClient,
-    nats: &async_nats::Client,
+    nats: &seidrum_common::bus_client::BusClient,
     scope_svc: &ScopeService,
     embedding: &EmbeddingService,
-    msg: async_nats::Message,
+    msg: seidrum_common::bus_client::Message,
 ) -> Result<()> {
     let (envelope, req): (EventEnvelope, BrainQueryRequest) = parse_envelope(&msg)?;
     debug!(query_type = %req.query_type, "handling brain.query.request");
@@ -1715,8 +1715,8 @@ async fn handle_get_context(
 /// Create a new conversation document.
 async fn handle_conversation_create(
     arango: &ArangoClient,
-    nats: &async_nats::Client,
-    msg: async_nats::Message,
+    nats: &seidrum_common::bus_client::BusClient,
+    msg: seidrum_common::bus_client::Message,
 ) -> Result<()> {
     let req: ConversationCreateRequest =
         serde_json::from_slice(&msg.payload).context("parse conversation.create")?;
@@ -1763,7 +1763,7 @@ async fn handle_conversation_create(
         let resp = ConversationCreateResponse {
             conversation_id: conv_id,
         };
-        if let Err(e) = nats.publish(reply, serde_json::to_vec(&resp)?.into()).await {
+        if let Err(e) = nats.publish_bytes(reply, serde_json::to_vec(&resp)?).await {
             warn!(error = %e, "Failed to publish reply");
         }
     }
@@ -1774,8 +1774,8 @@ async fn handle_conversation_create(
 /// Append a message to an existing conversation.
 async fn handle_conversation_append(
     arango: &ArangoClient,
-    nats: &async_nats::Client,
-    msg: async_nats::Message,
+    nats: &seidrum_common::bus_client::BusClient,
+    msg: seidrum_common::bus_client::Message,
 ) -> Result<()> {
     let req: ConversationAppendRequest =
         serde_json::from_slice(&msg.payload).context("parse conversation.append")?;
@@ -1813,7 +1813,7 @@ async fn handle_conversation_append(
             success: count > 0,
             message_count: count,
         };
-        if let Err(e) = nats.publish(reply, serde_json::to_vec(&resp)?.into()).await {
+        if let Err(e) = nats.publish_bytes(reply, serde_json::to_vec(&resp)?).await {
             warn!(error = %e, "Failed to publish reply");
         }
     }
@@ -1824,8 +1824,8 @@ async fn handle_conversation_append(
 /// Get a conversation by ID.
 async fn handle_conversation_get(
     arango: &ArangoClient,
-    nats: &async_nats::Client,
-    msg: async_nats::Message,
+    nats: &seidrum_common::bus_client::BusClient,
+    msg: seidrum_common::bus_client::Message,
 ) -> Result<()> {
     let req: ConversationGetRequest =
         serde_json::from_slice(&msg.payload).context("parse conversation.get")?;
@@ -1885,7 +1885,7 @@ async fn handle_conversation_get(
             }
             None => serde_json::json!(null),
         };
-        if let Err(e) = nats.publish(reply, serde_json::to_vec(&resp)?.into()).await {
+        if let Err(e) = nats.publish_bytes(reply, serde_json::to_vec(&resp)?).await {
             warn!(error = %e, "Failed to publish reply");
         }
     }
@@ -1896,8 +1896,8 @@ async fn handle_conversation_get(
 /// Find a conversation by platform metadata, with optional user isolation.
 async fn handle_conversation_find(
     arango: &ArangoClient,
-    nats: &async_nats::Client,
-    msg: async_nats::Message,
+    nats: &seidrum_common::bus_client::BusClient,
+    msg: seidrum_common::bus_client::Message,
 ) -> Result<()> {
     let req: ConversationFindRequest =
         serde_json::from_slice(&msg.payload).context("parse conversation.find")?;
@@ -1954,7 +1954,7 @@ async fn handle_conversation_find(
 
     if let Some(reply) = msg.reply {
         if let Err(e) = nats
-            .publish(reply, serde_json::to_vec(&result)?.into())
+            .publish_bytes(reply, serde_json::to_vec(&result)?)
             .await
         {
             warn!(error = %e, "Failed to publish reply");
@@ -1967,8 +1967,8 @@ async fn handle_conversation_find(
 /// List conversations for an agent, with optional user isolation.
 async fn handle_conversation_list(
     arango: &ArangoClient,
-    nats: &async_nats::Client,
-    msg: async_nats::Message,
+    nats: &seidrum_common::bus_client::BusClient,
+    msg: seidrum_common::bus_client::Message,
 ) -> Result<()> {
     let req: ConversationListRequest =
         serde_json::from_slice(&msg.payload).context("parse conversation.list")?;
@@ -2035,7 +2035,7 @@ async fn handle_conversation_list(
     if let Some(reply) = msg.reply {
         let list_resp = ConversationListResponse { conversations };
         let _ = nats
-            .publish(reply, serde_json::to_vec(&list_resp)?.into())
+            .publish_bytes(reply, serde_json::to_vec(&list_resp)?)
             .await;
     }
 
@@ -2049,8 +2049,8 @@ async fn handle_conversation_list(
 /// Search skills by semantic similarity (brute-force cosine for now).
 async fn handle_skill_search(
     arango: &ArangoClient,
-    nats: &async_nats::Client,
-    msg: async_nats::Message,
+    nats: &seidrum_common::bus_client::BusClient,
+    msg: seidrum_common::bus_client::Message,
 ) -> Result<()> {
     let req: SkillSearchRequest =
         serde_json::from_slice(&msg.payload).context("parse skill.search")?;
@@ -2124,7 +2124,7 @@ async fn handle_skill_search(
     if let Some(reply) = msg.reply {
         let search_resp = SkillSearchResponse { skills };
         let _ = nats
-            .publish(reply, serde_json::to_vec(&search_resp)?.into())
+            .publish_bytes(reply, serde_json::to_vec(&search_resp)?)
             .await;
     }
 
@@ -2134,8 +2134,8 @@ async fn handle_skill_search(
 /// Save a skill (upsert by ID).
 async fn handle_skill_save(
     arango: &ArangoClient,
-    nats: &async_nats::Client,
-    msg: async_nats::Message,
+    nats: &seidrum_common::bus_client::BusClient,
+    msg: seidrum_common::bus_client::Message,
 ) -> Result<()> {
     let req: SkillSaveRequest = serde_json::from_slice(&msg.payload).context("parse skill.save")?;
 
@@ -2143,7 +2143,7 @@ async fn handle_skill_save(
     if req.description.trim().is_empty() || req.snippet.trim().is_empty() {
         if let Some(reply) = msg.reply {
             let resp = serde_json::json!({"error": "description and snippet are required"});
-            if let Err(e) = nats.publish(reply, serde_json::to_vec(&resp)?.into()).await {
+            if let Err(e) = nats.publish_bytes(reply, serde_json::to_vec(&resp)?).await {
                 warn!(error = %e, "Failed to publish reply");
             }
         }
@@ -2161,7 +2161,7 @@ async fn handle_skill_save(
     {
         if let Some(reply) = msg.reply {
             let resp = serde_json::json!({"error": "Invalid skill ID: must be 1-254 alphanumeric, dash, or underscore"});
-            if let Err(e) = nats.publish(reply, serde_json::to_vec(&resp)?.into()).await {
+            if let Err(e) = nats.publish_bytes(reply, serde_json::to_vec(&resp)?).await {
                 warn!(error = %e, "Failed to publish reply");
             }
         }
@@ -2208,7 +2208,7 @@ async fn handle_skill_save(
 
     if let Some(reply) = msg.reply {
         let resp = SkillSaveResponse { skill_id, is_new };
-        if let Err(e) = nats.publish(reply, serde_json::to_vec(&resp)?.into()).await {
+        if let Err(e) = nats.publish_bytes(reply, serde_json::to_vec(&resp)?).await {
             warn!(error = %e, "Failed to publish reply");
         }
     }
@@ -2219,8 +2219,8 @@ async fn handle_skill_save(
 /// Get a skill by ID.
 async fn handle_skill_get(
     arango: &ArangoClient,
-    nats: &async_nats::Client,
-    msg: async_nats::Message,
+    nats: &seidrum_common::bus_client::BusClient,
+    msg: seidrum_common::bus_client::Message,
 ) -> Result<()> {
     let req: SkillGetRequest = serde_json::from_slice(&msg.payload).context("parse skill.get")?;
 
@@ -2228,7 +2228,7 @@ async fn handle_skill_get(
 
     if let Some(reply) = msg.reply {
         let resp = doc.unwrap_or(serde_json::json!(null));
-        if let Err(e) = nats.publish(reply, serde_json::to_vec(&resp)?.into()).await {
+        if let Err(e) = nats.publish_bytes(reply, serde_json::to_vec(&resp)?).await {
             warn!(error = %e, "Failed to publish reply");
         }
     }
@@ -2239,8 +2239,8 @@ async fn handle_skill_get(
 /// List skills with optional source filter.
 async fn handle_skill_list(
     arango: &ArangoClient,
-    nats: &async_nats::Client,
-    msg: async_nats::Message,
+    nats: &seidrum_common::bus_client::BusClient,
+    msg: seidrum_common::bus_client::Message,
 ) -> Result<()> {
     let req: SkillListRequest = serde_json::from_slice(&msg.payload).context("parse skill.list")?;
 
@@ -2297,7 +2297,7 @@ async fn handle_skill_list(
     if let Some(reply) = msg.reply {
         let list_resp = SkillListResponse { skills };
         let _ = nats
-            .publish(reply, serde_json::to_vec(&list_resp)?.into())
+            .publish_bytes(reply, serde_json::to_vec(&list_resp)?)
             .await;
     }
 
@@ -2307,8 +2307,8 @@ async fn handle_skill_list(
 /// Delete a skill by ID.
 async fn handle_skill_delete(
     arango: &ArangoClient,
-    nats: &async_nats::Client,
-    msg: async_nats::Message,
+    nats: &seidrum_common::bus_client::BusClient,
+    msg: seidrum_common::bus_client::Message,
 ) -> Result<()> {
     let req: SkillGetRequest =
         serde_json::from_slice(&msg.payload).context("parse skill.delete")?;
@@ -2328,7 +2328,7 @@ async fn handle_skill_delete(
                 serde_json::json!({ "success": false, "error": e.to_string() })
             }
         };
-        if let Err(e) = nats.publish(reply, serde_json::to_vec(&resp)?.into()).await {
+        if let Err(e) = nats.publish_bytes(reply, serde_json::to_vec(&resp)?).await {
             warn!(error = %e, "Failed to publish reply");
         }
     }
@@ -2347,8 +2347,8 @@ async fn handle_skill_delete(
 /// as `PreferencesQueryResponse` via NATS request/reply.
 async fn handle_preferences_query(
     arango: &ArangoClient,
-    nats: &async_nats::Client,
-    msg: async_nats::Message,
+    nats: &seidrum_common::bus_client::BusClient,
+    msg: seidrum_common::bus_client::Message,
 ) -> Result<()> {
     // Parse the inner payload from the EventEnvelope
     let envelope: serde_json::Value =
@@ -2446,7 +2446,7 @@ async fn handle_preferences_query(
 
     if let Some(reply) = msg.reply {
         let resp_bytes = serde_json::to_vec(&response)?;
-        if let Err(e) = nats.publish(reply, resp_bytes.into()).await {
+        if let Err(e) = nats.publish_bytes(reply, resp_bytes).await {
             warn!(error = %e, "Failed to publish reply");
         }
     }
@@ -2461,8 +2461,8 @@ async fn handle_preferences_query(
 /// Handle `brain.user.create` — create a new user.
 async fn handle_user_create(
     arango: &ArangoClient,
-    nats: &async_nats::Client,
-    msg: async_nats::Message,
+    nats: &seidrum_common::bus_client::BusClient,
+    msg: seidrum_common::bus_client::Message,
 ) -> Result<()> {
     let req: UserCreateRequest =
         serde_json::from_slice(&msg.payload).context("failed to parse UserCreateRequest")?;
@@ -2505,7 +2505,7 @@ async fn handle_user_create(
         };
         if let Some(reply) = msg.reply {
             let resp_bytes = serde_json::to_vec(&response)?;
-            if let Err(e) = nats.publish(reply, resp_bytes.into()).await {
+            if let Err(e) = nats.publish_bytes(reply, resp_bytes).await {
                 warn!(error = %e, "Failed to publish reply");
             }
         }
@@ -2554,7 +2554,7 @@ async fn handle_user_create(
         };
         if let Some(reply) = msg.reply {
             let resp_bytes = serde_json::to_vec(&response)?;
-            if let Err(e) = nats.publish(reply, resp_bytes.into()).await {
+            if let Err(e) = nats.publish_bytes(reply, resp_bytes).await {
                 warn!(error = %e, "Failed to publish reply");
             }
         }
@@ -2571,7 +2571,7 @@ async fn handle_user_create(
 
     if let Some(reply) = msg.reply {
         let resp_bytes = serde_json::to_vec(&response)?;
-        if let Err(e) = nats.publish(reply, resp_bytes.into()).await {
+        if let Err(e) = nats.publish_bytes(reply, resp_bytes).await {
             warn!(error = %e, "Failed to publish reply");
         }
     }
@@ -2583,8 +2583,8 @@ async fn handle_user_create(
 /// Handle `brain.user.get` — get user by ID or username.
 async fn handle_user_get(
     arango: &ArangoClient,
-    nats: &async_nats::Client,
-    msg: async_nats::Message,
+    nats: &seidrum_common::bus_client::BusClient,
+    msg: seidrum_common::bus_client::Message,
 ) -> Result<()> {
     let req: UserGetRequest =
         serde_json::from_slice(&msg.payload).context("failed to parse UserGetRequest")?;
@@ -2629,7 +2629,7 @@ async fn handle_user_get(
 
     if let Some(reply) = msg.reply {
         let resp_bytes = serde_json::to_vec(&response)?;
-        if let Err(e) = nats.publish(reply, resp_bytes.into()).await {
+        if let Err(e) = nats.publish_bytes(reply, resp_bytes).await {
             warn!(error = %e, "Failed to publish reply");
         }
     }
@@ -2640,8 +2640,8 @@ async fn handle_user_get(
 /// Handle `brain.user.list` — list users (admin endpoint).
 async fn handle_user_list(
     arango: &ArangoClient,
-    nats: &async_nats::Client,
-    msg: async_nats::Message,
+    nats: &seidrum_common::bus_client::BusClient,
+    msg: seidrum_common::bus_client::Message,
 ) -> Result<()> {
     let req: UserListRequest =
         serde_json::from_slice(&msg.payload).context("failed to parse UserListRequest")?;
@@ -2699,7 +2699,7 @@ async fn handle_user_list(
 
     if let Some(reply) = msg.reply {
         let resp_bytes = serde_json::to_vec(&response)?;
-        if let Err(e) = nats.publish(reply, resp_bytes.into()).await {
+        if let Err(e) = nats.publish_bytes(reply, resp_bytes).await {
             warn!(error = %e, "Failed to publish reply");
         }
     }
@@ -2710,8 +2710,8 @@ async fn handle_user_list(
 /// Handle `brain.user.update` — update user fields.
 async fn handle_user_update(
     arango: &ArangoClient,
-    nats: &async_nats::Client,
-    msg: async_nats::Message,
+    nats: &seidrum_common::bus_client::BusClient,
+    msg: seidrum_common::bus_client::Message,
 ) -> Result<()> {
     let req: UserUpdateRequest =
         serde_json::from_slice(&msg.payload).context("failed to parse UserUpdateRequest")?;
@@ -2771,7 +2771,7 @@ async fn handle_user_update(
 
     if let Some(reply) = msg.reply {
         let resp_bytes = serde_json::to_vec(&response)?;
-        if let Err(e) = nats.publish(reply, resp_bytes.into()).await {
+        if let Err(e) = nats.publish_bytes(reply, resp_bytes).await {
             warn!(error = %e, "Failed to publish reply");
         }
     }
@@ -2782,8 +2782,8 @@ async fn handle_user_update(
 /// Handle `brain.user.delete` — delete a user.
 async fn handle_user_delete(
     arango: &ArangoClient,
-    nats: &async_nats::Client,
-    msg: async_nats::Message,
+    nats: &seidrum_common::bus_client::BusClient,
+    msg: seidrum_common::bus_client::Message,
 ) -> Result<()> {
     let req: UserDeleteRequest =
         serde_json::from_slice(&msg.payload).context("failed to parse UserDeleteRequest")?;
@@ -2820,7 +2820,7 @@ async fn handle_user_delete(
 
     if let Some(reply) = msg.reply {
         let resp_bytes = serde_json::to_vec(&response)?;
-        if let Err(e) = nats.publish(reply, resp_bytes.into()).await {
+        if let Err(e) = nats.publish_bytes(reply, resp_bytes).await {
             warn!(error = %e, "Failed to publish reply");
         }
     }
@@ -2889,7 +2889,10 @@ fn parse_user_record(doc: &Value) -> UserRecord {
 // ---------------------------------------------------------------------------
 
 /// Handle `brain.audit.store` — persist an audit entry to ArangoDB (fire-and-forget).
-async fn handle_audit_store(arango: &ArangoClient, msg: async_nats::Message) -> Result<()> {
+async fn handle_audit_store(
+    arango: &ArangoClient,
+    msg: seidrum_common::bus_client::Message,
+) -> Result<()> {
     let req: AuditStoreRequest =
         serde_json::from_slice(&msg.payload).context("failed to parse AuditStoreRequest")?;
 
@@ -2922,8 +2925,8 @@ async fn handle_audit_store(arango: &ArangoClient, msg: async_nats::Message) -> 
 /// Handle `brain.audit.query` — query audit logs from ArangoDB (request/reply).
 async fn handle_audit_query(
     arango: &ArangoClient,
-    nats: &async_nats::Client,
-    msg: async_nats::Message,
+    nats: &seidrum_common::bus_client::BusClient,
+    msg: seidrum_common::bus_client::Message,
 ) -> Result<()> {
     let req: AuditQueryRequest =
         serde_json::from_slice(&msg.payload).context("failed to parse AuditQueryRequest")?;
@@ -2990,7 +2993,7 @@ async fn handle_audit_query(
 
     if let Some(reply) = msg.reply {
         let resp_bytes = serde_json::to_vec(&response)?;
-        if let Err(e) = nats.publish(reply, resp_bytes.into()).await {
+        if let Err(e) = nats.publish_bytes(reply, resp_bytes).await {
             warn!(error = %e, "Failed to publish reply");
         }
     }
@@ -3005,8 +3008,8 @@ async fn handle_audit_query(
 /// Handle `brain.apikey.create` — create a user-scoped API key.
 async fn handle_apikey_create(
     arango: &ArangoClient,
-    nats: &async_nats::Client,
-    msg: async_nats::Message,
+    nats: &seidrum_common::bus_client::BusClient,
+    msg: seidrum_common::bus_client::Message,
 ) -> Result<()> {
     let req: ApiKeyCreateRequest =
         serde_json::from_slice(&msg.payload).context("failed to parse ApiKeyCreateRequest")?;
@@ -3046,7 +3049,7 @@ async fn handle_apikey_create(
 
     if let Some(reply) = msg.reply {
         let resp_bytes = serde_json::to_vec(&response)?;
-        if let Err(e) = nats.publish(reply, resp_bytes.into()).await {
+        if let Err(e) = nats.publish_bytes(reply, resp_bytes).await {
             warn!(error = %e, "Failed to publish reply");
         }
     }
@@ -3057,8 +3060,8 @@ async fn handle_apikey_create(
 /// Handle `brain.apikey.list` — list API keys for a user.
 async fn handle_apikey_list(
     arango: &ArangoClient,
-    nats: &async_nats::Client,
-    msg: async_nats::Message,
+    nats: &seidrum_common::bus_client::BusClient,
+    msg: seidrum_common::bus_client::Message,
 ) -> Result<()> {
     let req: ApiKeyListRequest =
         serde_json::from_slice(&msg.payload).context("failed to parse ApiKeyListRequest")?;
@@ -3083,7 +3086,7 @@ async fn handle_apikey_list(
 
     if let Some(reply) = msg.reply {
         let resp_bytes = serde_json::to_vec(&response)?;
-        if let Err(e) = nats.publish(reply, resp_bytes.into()).await {
+        if let Err(e) = nats.publish_bytes(reply, resp_bytes).await {
             warn!(error = %e, "Failed to publish reply");
         }
     }
@@ -3094,8 +3097,8 @@ async fn handle_apikey_list(
 /// Handle `brain.apikey.revoke` — revoke an API key.
 async fn handle_apikey_revoke(
     arango: &ArangoClient,
-    nats: &async_nats::Client,
-    msg: async_nats::Message,
+    nats: &seidrum_common::bus_client::BusClient,
+    msg: seidrum_common::bus_client::Message,
 ) -> Result<()> {
     let req: ApiKeyRevokeRequest =
         serde_json::from_slice(&msg.payload).context("failed to parse ApiKeyRevokeRequest")?;
@@ -3126,7 +3129,7 @@ async fn handle_apikey_revoke(
 
     if let Some(reply) = msg.reply {
         let resp_bytes = serde_json::to_vec(&response)?;
-        if let Err(e) = nats.publish(reply, resp_bytes.into()).await {
+        if let Err(e) = nats.publish_bytes(reply, resp_bytes).await {
             warn!(error = %e, "Failed to publish reply");
         }
     }
@@ -3137,8 +3140,8 @@ async fn handle_apikey_revoke(
 /// Handle `brain.apikey.validate` — validate an API key by hash.
 async fn handle_apikey_validate(
     arango: &ArangoClient,
-    nats: &async_nats::Client,
-    msg: async_nats::Message,
+    nats: &seidrum_common::bus_client::BusClient,
+    msg: seidrum_common::bus_client::Message,
 ) -> Result<()> {
     let req: ApiKeyValidateRequest =
         serde_json::from_slice(&msg.payload).context("failed to parse ApiKeyValidateRequest")?;
@@ -3188,7 +3191,7 @@ async fn handle_apikey_validate(
 
     if let Some(reply) = msg.reply {
         let resp_bytes = serde_json::to_vec(&response)?;
-        if let Err(e) = nats.publish(reply, resp_bytes.into()).await {
+        if let Err(e) = nats.publish_bytes(reply, resp_bytes).await {
             warn!(error = %e, "Failed to publish reply");
         }
     }

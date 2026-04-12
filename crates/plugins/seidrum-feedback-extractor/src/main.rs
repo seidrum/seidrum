@@ -176,7 +176,8 @@ async fn main() -> Result<()> {
     );
 
     // Connect to NATS
-    let nats = async_nats::connect(&cli.nats_url).await?;
+    let nats =
+        seidrum_common::bus_client::BusClient::connect(&cli.nats_url, "feedback-extractor").await?;
     info!("Connected to NATS");
 
     // Initialize response buffer (LRU cache)
@@ -216,11 +217,8 @@ async fn main() -> Result<()> {
         None,
         &register,
     )?;
-    nats.publish(
-        "plugin.register",
-        serde_json::to_vec(&register_envelope)?.into(),
-    )
-    .await?;
+    nats.publish_bytes("plugin.register", serde_json::to_vec(&register_envelope)?)
+        .await?;
     info!("Published plugin.register");
 
     // Subscribe to channel inbound messages (from all platforms)
@@ -302,7 +300,7 @@ async fn main() -> Result<()> {
                                 };
 
                                 if let Err(e) = nats_clone
-                                    .publish("agent.feedback", payload_bytes.into())
+                                    .publish_bytes("agent.feedback", payload_bytes)
                                     .await
                                 {
                                     error!(error = %e, "Failed to publish agent.feedback event");
@@ -384,7 +382,7 @@ async fn main() -> Result<()> {
                 };
 
                 if let Ok(response_bytes) = serde_json::to_vec(&health_response) {
-                    if let Err(e) = nats.publish(reply_subject, response_bytes.into()).await {
+                    if let Err(e) = nats.publish_bytes(reply_subject, response_bytes).await {
                         error!(error = %e, "Failed to publish health response");
                     }
                 }

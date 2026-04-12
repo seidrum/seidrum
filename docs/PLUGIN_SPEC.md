@@ -51,15 +51,16 @@ plugin:
 All Seidrum plugins share a common startup pattern via `seidrum-common`:
 
 ```rust
-use seidrum_common::{PluginConfig, NatsClient, EventEnvelope};
+use seidrum_common::{PluginConfig, EventEnvelope};
+use seidrum_common::bus_client::BusClient;
 
 #[tokio::main]
 async fn main() -> Result<()> {
     // 1. Load config
     let config = PluginConfig::from_env()?;
 
-    // 2. Connect to NATS
-    let nats = NatsClient::connect(&config.nats_url).await?;
+    // 2. Connect to the bus
+    let nats = BusClient::connect(&config.nats_url, "telegram").await?;
 
     // 3. Register with kernel
     nats.publish("plugin.register", PluginRegister {

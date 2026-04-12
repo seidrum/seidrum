@@ -30,7 +30,7 @@ use super::guardrails::{self, GuardrailState};
 
 /// The consciousness service manages agent event streams and built-in capabilities.
 pub struct ConsciousnessService {
-    nats: async_nats::Client,
+    nats: seidrum_common::bus_client::BusClient,
     agents: Arc<RwLock<HashMap<String, AgentDefinition>>>,
     system_prompt: String,
     runtime_subs: Arc<RwLock<HashMap<String, Vec<RuntimeSubscription>>>>,
@@ -42,7 +42,7 @@ pub struct ConsciousnessService {
 
 impl ConsciousnessService {
     /// Create a new consciousness service by loading agents and the system prompt.
-    pub fn new(nats: async_nats::Client, agents_dir: &str) -> Result<Self> {
+    pub fn new(nats: seidrum_common::bus_client::BusClient, agents_dir: &str) -> Result<Self> {
         let agents = load_agents(agents_dir)?;
         let system_prompt = load_system_prompt()?;
 
@@ -145,7 +145,7 @@ impl ConsciousnessService {
 
                         let subject = format!("agent.{}.consciousness", agent_id);
                         if let Ok(bytes) = serde_json::to_vec(&event) {
-                            let _ = nats.publish(subject, bytes.into()).await;
+                            let _ = nats.publish_bytes(subject, bytes).await;
                         }
                     }
                 });
@@ -340,7 +340,7 @@ impl ConsciousnessService {
                         let response = handle_builtin_call(&nats, &request, &runtime_subs).await;
 
                         if let Ok(bytes) = serde_json::to_vec(&response) {
-                            let _ = nats.publish(reply, bytes.into()).await;
+                            let _ = nats.publish_bytes(reply, bytes).await;
                         }
                     }
                 }
@@ -402,7 +402,7 @@ impl ConsciousnessService {
                 // E2: Log capability registration failures instead of silently ignoring
                 if let Err(e) = self
                     .nats
-                    .publish("capability.register".to_string(), bytes.into())
+                    .publish_bytes("capability.register".to_string(), bytes)
                     .await
                 {
                     warn!(
@@ -433,7 +433,7 @@ fn parse_args<T: serde::de::DeserializeOwned>(
 
 /// Handle a built-in capability call by routing to the appropriate handler.
 async fn handle_builtin_call(
-    nats: &async_nats::Client,
+    nats: &seidrum_common::bus_client::BusClient,
     request: &ToolCallRequest,
     runtime_subs: &Arc<RwLock<HashMap<String, Vec<RuntimeSubscription>>>>,
 ) -> ToolCallResponse {
@@ -675,7 +675,7 @@ async fn handle_builtin_call(
 ///   8. If response has origin, publish to outbound channel
 ///   9. Track guardrails
 async fn process_consciousness_event(
-    nats: &async_nats::Client,
+    nats: &seidrum_common::bus_client::BusClient,
     agent_id: &str,
     agent_def: &AgentDefinition,
     system_prompt: &str,
@@ -879,7 +879,7 @@ fn extract_user_text(event: &ConsciousnessEvent) -> String {
 
 /// Find an existing conversation or create a new one.
 async fn find_or_create_conversation(
-    nats: &async_nats::Client,
+    nats: &seidrum_common::bus_client::BusClient,
     agent_id: &str,
     agent_def: &AgentDefinition,
     event: &ConsciousnessEvent,
@@ -993,7 +993,7 @@ async fn find_or_create_conversation(
 
 /// Load recent conversation history (last 20 messages).
 async fn load_conversation_history(
-    nats: &async_nats::Client,
+    nats: &seidrum_common::bus_client::BusClient,
     conversation_id: &str,
 ) -> Vec<ConversationMessage> {
     let get_req = ConversationGetRequest {
@@ -1017,7 +1017,7 @@ async fn load_conversation_history(
 
 /// Search for relevant skills based on the event text.
 async fn search_relevant_skills(
-    nats: &async_nats::Client,
+    nats: &seidrum_common::bus_client::BusClient,
     query: &str,
     scope: &str,
 ) -> Vec<String> {
@@ -1150,7 +1150,7 @@ fn build_full_system_prompt_with_preferences(
 
 /// Query user preferences for an agent via NATS request/reply (Phase 2.3).
 async fn query_user_preferences(
-    nats: &async_nats::Client,
+    nats: &seidrum_common::bus_client::BusClient,
     agent_id: &str,
     _conversation_id: &str,
 ) -> Vec<UserPreference> {
@@ -1184,11 +1184,11 @@ async fn query_user_preferences(
 
     match tokio::time::timeout(
         Duration::from_secs(5),
-        nats.request("agent.preferences.query", prefs_bytes.into()),
+        nats.request_bytes("agent.preferences.query", prefs_bytes),
     )
     .await
     {
-        Ok(Ok(resp)) => match serde_json::from_slice::<PreferencesQueryResponse>(&resp.payload) {
+        Ok(Ok(resp)) => match serde_json::from_slice::<PreferencesQueryResponse>(&resp) {
             Ok(r) => {
                 debug!(
                     agent_id = %agent_id,
@@ -1216,7 +1216,7 @@ async fn query_user_preferences(
 /// Store a user preference as a fact in the knowledge graph (Phase 2.3).
 /// Retries up to 2 times on transient failures.
 async fn store_preference_fact(
-    nats: &async_nats::Client,
+    nats: &seidrum_common::bus_client::BusClient,
     agent_id: &str,
     preference_key: &str,
     preference_value: &str,
@@ -1262,7 +1262,7 @@ async fn store_preference_fact(
 
         match tokio::time::timeout(
             Duration::from_secs(5),
-            nats.request("brain.fact.upsert", fact_bytes.clone().into()),
+            nats.request_bytes("brain.fact.upsert", fact_bytes.clone()),
         )
         .await
         {
@@ -1381,7 +1381,7 @@ fn build_guardrail_config(agent_def: &AgentDefinition) -> seidrum_common::events
 
 /// Append a message to a conversation.
 async fn append_to_conversation(
-    nats: &async_nats::Client,
+    nats: &seidrum_common::bus_client::BusClient,
     conversation_id: &str,
     role: &str,
     content: &str,
@@ -1433,7 +1433,11 @@ async fn append_to_conversation(
 }
 
 /// Publish a response to the originating channel.
-async fn publish_outbound(nats: &async_nats::Client, origin: &EventOrigin, text: &str) {
+async fn publish_outbound(
+    nats: &seidrum_common::bus_client::BusClient,
+    origin: &EventOrigin,
+    text: &str,
+) {
     let outbound = ChannelOutbound {
         platform: origin.platform.clone(),
         chat_id: origin.chat_id.clone(),
@@ -1454,7 +1458,7 @@ async fn publish_outbound(nats: &async_nats::Client, origin: &EventOrigin, text:
 
     match serde_json::to_vec(&envelope) {
         Ok(bytes) => {
-            if let Err(e) = nats.publish(subject.clone(), bytes.into()).await {
+            if let Err(e) = nats.publish_bytes(subject.clone(), bytes).await {
                 error!(subject = %subject, error = %e, "Failed to publish outbound");
             } else {
                 debug!(
