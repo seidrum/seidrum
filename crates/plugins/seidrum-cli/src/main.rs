@@ -2,7 +2,6 @@ use std::collections::HashMap;
 
 use anyhow::Result;
 use clap::Parser;
-use futures::StreamExt;
 use seidrum_common::bus_client::BusClient;
 use seidrum_common::events::{ChannelInbound, ChannelOutbound, EventEnvelope, PluginRegister};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};

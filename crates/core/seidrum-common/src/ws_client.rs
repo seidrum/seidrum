@@ -50,7 +50,9 @@ pub struct WsMessage {
 /// server, though the current implementation does not auto-unsubscribe
 /// on drop — call [`WsClient::unsubscribe`] explicitly).
 pub struct WsSubscription {
-    rx: mpsc::Receiver<WsMessage>,
+    /// Channel for receiving messages. `pub(crate)` so `BusClient` can
+    /// construct a `WsSubscription` from the NATS bridge task.
+    pub(crate) rx: mpsc::Receiver<WsMessage>,
     /// The bus-assigned subscription id (used for unsubscribe).
     pub id: String,
 }

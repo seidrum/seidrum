@@ -1,6 +1,5 @@
 use anyhow::{Context, Result};
 use clap::Parser;
-use futures::StreamExt;
 use seidrum_common::events::{
     AgentWake, EventEnvelope, FactUpsertRequest, LlmResponse, PluginRegister,
 };

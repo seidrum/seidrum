@@ -12,7 +12,6 @@ use std::time::Duration;
 
 use anyhow::{Context, Result};
 use chrono::Utc;
-use futures::StreamExt;
 use seidrum_common::config::{load_agent_definition, AgentDefinition};
 use seidrum_common::events::{
     AgentFeedback, ChannelOutbound, ConsciousnessEvent, Conversation, ConversationAppendRequest,

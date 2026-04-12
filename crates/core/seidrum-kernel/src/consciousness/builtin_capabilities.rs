@@ -10,7 +10,6 @@ use std::time::Duration;
 
 // anyhow::Result available if needed
 use chrono::Utc;
-use futures::StreamExt;
 use seidrum_common::events::{
     ChannelOutbound, ConsciousnessEvent, ConversationAppendRequest, ConversationAppendResponse,
     ConversationCreateRequest, ConversationCreateResponse, ConversationGetRequest,

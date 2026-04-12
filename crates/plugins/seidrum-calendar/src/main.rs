@@ -3,7 +3,6 @@ use std::sync::Arc;
 
 use anyhow::Result;
 use clap::Parser;
-use futures::StreamExt;
 use seidrum_common::events::{
     ChannelInbound, EventEnvelope, PluginRegister, ToolCallRequest, ToolCallResponse,
 };

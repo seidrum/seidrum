@@ -1,6 +1,5 @@
 use anyhow::{Context, Result};
 use clap::Parser;
-use futures::StreamExt;
 use seidrum_common::events::{
     BrainQueryRequest, ContentStored, EventEnvelope, PluginRegister, ScopeAssignRequest,
 };

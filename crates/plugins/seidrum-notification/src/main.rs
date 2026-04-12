@@ -1,6 +1,5 @@
 use anyhow::{Context, Result};
 use clap::Parser;
-use futures::StreamExt;
 use seidrum_common::events::{
     ChannelOutbound, EventEnvelope, PluginRegister, SystemHealth, TaskCompleted, TaskCreated,
     ToolCallRequest, ToolCallResponse,

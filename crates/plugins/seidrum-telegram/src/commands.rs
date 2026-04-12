@@ -2,7 +2,6 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::Result;
-use futures::StreamExt;
 use seidrum_common::bus_client::BusClient;
 use seidrum_common::events::{
     PluginRegister, StorageDeleteRequest, StorageDeleteResponse, StorageGetRequest,

@@ -5,7 +5,6 @@ use std::time::Instant;
 use anyhow::Result;
 use chrono::Utc;
 use clap::Parser;
-use futures::StreamExt as _;
 use lru::LruCache;
 use tokio::sync::Mutex;
 use tracing::{error, info, warn};

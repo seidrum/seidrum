@@ -257,7 +257,6 @@ async fn main() -> Result<()> {
 async fn futures_next(
     sub: &mut seidrum_common::bus_client::Subscription,
 ) -> Option<seidrum_common::bus_client::Message> {
-    use futures::StreamExt as _;
     sub.next().await
 }
 

@@ -5,7 +5,6 @@
 //! `plugin_storage` ArangoDB collection.
 
 use anyhow::{Context, Result};
-use futures::StreamExt;
 use seidrum_common::events::{
     StorageDeleteRequest, StorageDeleteResponse, StorageGetRequest, StorageGetResponse,
     StorageListRequest, StorageListResponse, StorageSetRequest, StorageSetResponse,

@@ -1,5 +1,4 @@
 use anyhow::Result;
-use futures::StreamExt;
 use seidrum_common::bus_client::BusClient;
 use seidrum_common::events::{ChannelOutbound, EventEnvelope};
 use teloxide::prelude::*;
