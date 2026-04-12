@@ -1,23 +1,31 @@
 # Phase 5 Migration Plan: NATS → seidrum-eventbus
 
-**Status:** Research complete, implementation pending.
+**Status:** Research complete. Abstraction layer cleaned up (PR #30). Implementation pending.
 **Reference:** PLAN.md L184-225, CLAUDE.md, ARCHITECTURE.md
 **Strategy:** Option B (replace-and-fix, no feature flag) per user direction.
-**Research Date:** 2026-04-11
+**Research Date:** 2026-04-11 (updated 2026-04-12 post-rename PR #30)
 **Eventbus Base Commit:** 8b095a1 (PR #29 merged)
+**Abstraction Cleanup:** PR #30 renamed `NatsClient` → `BusClient`, migrated all
+20 leaky plugins, removed `inner()` escape hatch, dropped `async-nats` from 25
+Cargo.tomls. After PR #30, `seidrum-common` is the only crate with an `async-nats`
+dependency and **zero** plugin/kernel source files reference `async_nats::*` directly.
 
 ---
 
 ## Summary
 
-This document describes the complete migration path from async-nats (core + JetStream) to seidrum-eventbus across the Seidrum kernel and all plugins. The eventbus is production-ready and fully tested; this is a plumbing exercise, not a design exercise. The critical hidden cost is **writing a `WsClient` adapter** so that remote plugins can connect to the eventbus via WebSocket using a NatsClient-compatible API. Without this adapter, plugins running in separate processes will have no way to communicate. The migration affects 24 crates and 216+ NatsClient/async_nats references. Estimated total complexity: **Large** (6–8 weeks full-time for one engineer). Risk is low if the WsClient adapter is built carefully and tested against real plugin traffic.
+This document describes the complete migration path from async-nats (core + JetStream) to seidrum-eventbus across the Seidrum kernel and all plugins. The eventbus is production-ready and fully tested; this is a plumbing exercise, not a design exercise.
+
+**Post-PR #30 update:** The `BusClient` abstraction layer is now the sole interface between consumers and the bus backend. All 20 leaky plugins have been migrated, the `inner()` escape hatch is removed, and `async-nats` is declared only in `seidrum-common/Cargo.toml`. The remaining critical hidden cost is **writing a `WsClient` adapter** so that remote plugins can connect to the eventbus via WebSocket using a `BusClient`-compatible API. Without this adapter, plugins running in separate processes will have no way to communicate.
+
+**Revised scope:** The migration now affects only `seidrum-common/src/bus_client.rs` (backend swap) + infra files (docker-compose, .env, platform.yaml). Plugin and kernel source code does NOT change. Estimated total complexity: **Medium** (~10-13 engineer-days, down from the original 28-38 estimate).
 
 ---
 
-## 1. NatsClient API Surface
+## 1. BusClient API Surface
 
 ### Location
-- **File:** `crates/core/seidrum-common/src/nats_utils.rs`
+- **File:** `crates/core/seidrum-common/src/bus_client.rs`
 - **Lines:** 1–91
 
 ### Public Methods & NATS Feature Mapping
@@ -29,7 +37,7 @@ This document describes the complete migration path from async-nats (core + JetS
 | `publish_envelope()` | `async fn<T>(&self, subject: &str, correlation_id, scope, payload: &T)` | Core Pub/Sub + wrapping | `EventBus::publish()` + wrapper at call site | No—eventbus payload is bytes |
 | `request()` | `async fn<T, R>(&self, subject, payload: &T) -> Result<R>` | NATS request/reply (blocking) | `EventBus::request(&str, &[u8], timeout)` | No—identical semantics |
 | `subscribe()` | `async fn(&self, subject: &str) -> Result<Subscriber>` | Async Pub/Sub | `EventBus::subscribe(&str, opts)` | Yes—subscriber model differs |
-| `inner()` | `fn(&self) -> &async_nats::Client` | Escape hatch for raw NATS | None | **Yes—must remove** |
+| ~~`inner()`~~ | ~~`fn(&self) -> &async_nats::Client`~~ | ~~Escape hatch for raw NATS~~ | N/A | ~~**Removed in PR #30**~~ |
 
 ### Detailed Analysis
 
@@ -37,13 +45,13 @@ This document describes the complete migration path from async-nats (core + JetS
 
 **`publish(subject, payload)`**: Direct mapping. Caller must serialize to bytes first: `serde_json::to_vec(payload)?`. The eventbus returns sequence number on success.
 
-**`publish_envelope(subject, correlation_id, scope, payload)`**: This is a seidrum convenience method that wraps the payload in `EventEnvelope` and publishes. The eventbus does NOT know about `EventEnvelope`—it stores raw bytes. Adapters must continue to wrap in `EventEnvelope` at the Seidrum layer (in `nats_utils.rs` replacement or at call sites).
+**`publish_envelope(subject, correlation_id, scope, payload)`**: This is a seidrum convenience method that wraps the payload in `EventEnvelope` and publishes. The eventbus does NOT know about `EventEnvelope`—it stores raw bytes. Adapters must continue to wrap in `EventEnvelope` at the Seidrum layer (in `bus_client.rs` replacement or at call sites).
 
 **`request(subject, payload)`**: Identical semantics: serialize payload, publish with generated reply subject, wait for response with timeout. The eventbus implements this identically to NATS. Key difference: NATS `request()` uses a default 5-second timeout; eventbus callers must pass `Duration` explicitly.
 
 **`subscribe(subject)`**: NATS returns an `async_nats::Subscriber` that implements `StreamExt`. The eventbus returns a `Subscription` with `id: String` and `rx: tokio::sync::mpsc::Receiver<DispatchedEvent>`. Subscribers must change from `.next().await` to `rx.recv().await`. This is the largest API surface change.
 
-**`inner()`**: Escape hatch for raw NATS access (used by consciousness.rs, orchestrator, etc.). Eventbus has no escape hatch. All direct NATS calls must be rewritten to use public eventbus methods. Search for `.inner()` calls across the codebase (see § 2).
+**`inner()`**: ~~Escape hatch for raw NATS access.~~ **Removed in PR #30.** All consumers now use `BusClient` methods. No `.inner()` calls remain in the codebase.
 
 ### NATS Features Actually Used
 
@@ -65,13 +73,13 @@ This document describes the complete migration path from async-nats (core + JetS
 
 | Crate | Reference Count | Key Uses | Adapter Strategy |
 |-------|-----------------|----------|------------------|
-| seidrum-common | 1 | `NatsClient` struct definition | Define replacement in same file |
+| seidrum-common | 1 | `BusClient` struct definition | Define replacement in same file |
 | seidrum-kernel | 30+ | Direct async_nats in consciousness, orchestrator, brain, etc. | Migrate to in-process `Arc<dyn EventBus>` |
-| seidrum-api-gateway | 27 | `NatsClient` in main, ws.rs, event_stream.rs | Keep same; swap underlying transport |
-| seidrum-telegram | 17 | `NatsClient::connect`, `publish_envelope`, `subscribe` | Swap for `WsClient` (new adapter) |
-| seidrum-cli | 2 | `NatsClient::connect`, `publish_envelope`, `subscribe` | Swap for `WsClient` |
-| seidrum-tool-dispatcher | 5 | `NatsClient` (likely request/reply) | Swap for `WsClient` |
-| seidrum-response-formatter | 3 | `NatsClient` (likely publish/subscribe) | Swap for `WsClient` |
+| seidrum-api-gateway | 27 | `BusClient` in main, ws.rs, event_stream.rs | Keep same; swap underlying transport |
+| seidrum-telegram | 17 | `BusClient::connect`, `publish_envelope`, `subscribe` | Swap for `WsClient` (new adapter) |
+| seidrum-cli | 2 | `BusClient::connect`, `publish_envelope`, `subscribe` | Swap for `WsClient` |
+| seidrum-tool-dispatcher | 5 | `BusClient` (likely request/reply) | Swap for `WsClient` |
+| seidrum-response-formatter | 3 | `BusClient` (likely publish/subscribe) | Swap for `WsClient` |
 | 17 other plugins | ~90 | Standard plugin bootstrap pattern | All swap for `WsClient` |
 
 ### Kernel Services Using async_nats Directly
@@ -133,7 +141,7 @@ This document describes the complete migration path from async-nats (core + JetS
 
 ```rust
 // 1. Connect to NATS
-let nats = NatsClient::connect(&cli.nats_url, "plugin-id").await?;
+let nats = BusClient::connect(&cli.nats_url, "plugin-id").await?;
 
 // 2. Register plugin
 let register = PluginRegister { ... };
@@ -254,7 +262,7 @@ async fn main() -> Result<()> {
     let cli = Cli::parse();
     
     // 1. Connect to NATS
-    let nats = NatsClient::connect(&cli.nats_url, "cli").await?;
+    let nats = BusClient::connect(&cli.nats_url, "cli").await?;
     
     // 2. Register
     let registration = PluginRegister { /* ... */ };
@@ -302,7 +310,7 @@ async fn main() -> Result<()> {
 ### Changes Required Per Plugin
 
 **Mechanical changes:**
-1. Replace `NatsClient` import with `WsClient` (or make `NatsClient` a type alias for `WsClient` for minimal diff)
+1. Replace `BusClient` import with `WsClient` (or make `BusClient` a type alias for `WsClient` for minimal diff)
 2. Replace `nats_url` arg with `eventbus_url` (or keep both names, just connect to eventbus)
 3. Replace `.subscribe()` return handling: from `let mut sub = nats.subscribe(...)` to `let mut sub = bus.subscribe(...); let mut sub = sub.rx;` OR update loop to `sub.rx.recv().await`
 4. Update Dockerfile NATS_URL → EVENTBUS_URL
@@ -537,7 +545,7 @@ eventbus_url: ws://localhost:8080  # or http://localhost:8081 for HTTP transport
 
 ### Step 1: Write WsClient Adapter in seidrum-common
 
-**Objective:** Provide a drop-in replacement for `NatsClient` that connects to the eventbus via WebSocket.
+**Objective:** Provide a drop-in replacement for `BusClient` that connects to the eventbus via WebSocket.
 
 **Complexity:** **Large** (4–5 days, one engineer)
 
@@ -546,7 +554,7 @@ eventbus_url: ws://localhost:8080  # or http://localhost:8081 for HTTP transport
 1.1 **Define WsClient struct and traits** (1 day)
    - File: `crates/core/seidrum-common/src/ws_client.rs` (new)
    - Struct: `pub struct WsClient { ... }`
-   - Mirror `NatsClient` API: `connect()`, `publish()`, `publish_envelope()`, `request()`, `subscribe()`, `clone()`
+   - Mirror `BusClient` API: `connect()`, `publish()`, `publish_envelope()`, `request()`, `subscribe()`, `clone()`
    - Use `tokio-tungstenite` for WebSocket client
    - Serialize/deserialize events as JSON per eventbus protocol
    - Lines of code: ~300–400
@@ -593,25 +601,25 @@ eventbus_url: ws://localhost:8080  # or http://localhost:8081 for HTTP transport
 
 ---
 
-### Step 2: Adapt NatsClient to Wrap WsClient + EventBus
+### Step 2: Adapt BusClient to Wrap WsClient + EventBus
 
-**Objective:** Make `NatsClient` work with both in-process eventbus (kernel) and remote WsClient (plugins).
+**Objective:** Make `BusClient` work with both in-process eventbus (kernel) and remote WsClient (plugins).
 
 **Complexity:** **Medium** (2–3 days)
 
 **Subtasks:**
 
-2.1 **Refactor NatsClient to trait-based design** (1 day)
-   - File: `crates/core/seidrum-common/src/nats_utils.rs`
+2.1 **Refactor BusClient to trait-based design** (1 day)
+   - File: `crates/core/seidrum-common/src/bus_client.rs`
    - Create `pub trait EventBusClient: Send + Sync`: abstract pub/sub/request/reply
-   - Make `NatsClient` implement `EventBusClient`
+   - Make `BusClient` implement `EventBusClient`
    - Add `WsClientAdapter` struct that wraps `WsClient` and implements `EventBusClient`
    - Lines of code: ~150–200 (refactor + trait defs)
 
-2.2 **Update NatsClient::connect() to support both transports** (0.5 days)
+2.2 **Update BusClient::connect() to support both transports** (0.5 days)
    - Add feature flag: `#[cfg(feature = "use-ws-client")]` vs `#[cfg(not(...))]`
    - OR: Check URL scheme: `nats://` → direct NATS (for backward compat with old code), `ws://` → WsClient
-   - OR: Add a `new_ws()` constructor: `NatsClient::new_ws(url)`
+   - OR: Add a `new_ws()` constructor: `BusClient::new_ws(url)`
    - Decision: Use scheme detection (simplest, no feature flags)
    - Lines of code: ~50–100
 
@@ -628,18 +636,18 @@ eventbus_url: ws://localhost:8080  # or http://localhost:8081 for HTTP transport
    - Keep async-nats in Cargo.toml for now (will remove in Step 7)
    - Lines of code: ~20–30
 
-2.5 **Unit tests for NatsClient trait compatibility** (0.5 days)
-   - Test that NatsClient and WsClientAdapter produce identical behavior
+2.5 **Unit tests for BusClient trait compatibility** (0.5 days)
+   - Test that BusClient and WsClientAdapter produce identical behavior
    - Mock eventbus server
    - Test pub/sub, request/reply, error handling
    - Lines of code: ~300–400 (tests)
 
 **Entry Criteria:**
 - Step 1 (WsClient) is complete and tested
-- NatsClient code is isolated in `nats_utils.rs`
+- BusClient code is isolated in `bus_client.rs`
 
 **Exit Criteria:**
-- NatsClient trait is defined and both implementations work
+- BusClient trait is defined and both implementations work
 - All tests pass
 - No calls to removed API (e.g., `.inner()`) remain
 
@@ -735,7 +743,7 @@ eventbus_url: ws://localhost:8080  # or http://localhost:8081 for HTTP transport
    - Lines of code: ~500–800 (tests)
 
 **Entry Criteria:**
-- Step 2 (NatsClient refactor) is complete
+- Step 2 (BusClient refactor) is complete
 - EventBusBuilder is stable and tested
 
 **Exit Criteria:**
@@ -763,7 +771,7 @@ eventbus_url: ws://localhost:8080  # or http://localhost:8081 for HTTP transport
 
 4.2 **Migrate cli plugin code** (0.5 days)
    - File: `crates/plugins/seidrum-cli/src/main.rs`
-   - Replace `NatsClient::connect()` with `WsClient::connect()`
+   - Replace `BusClient::connect()` with `WsClient::connect()`
    - Change CLI arg: `--nats-url` → `--eventbus-url` (or detect scheme)
    - Change `subscribe()` call: update receiver handling
    - Update Dockerfile: remove NATS_URL, add EVENTBUS_URL
@@ -814,7 +822,7 @@ eventbus_url: ws://localhost:8080  # or http://localhost:8081 for HTTP transport
 5.2 **Migrate Group A plugins in parallel** (2–3 days, up to 3 engineers)
    - Plugins: telegram, tool-dispatcher, response-formatter, content-ingester, entity-extractor, fact-extractor, llm-router, llm-openai, llm-anthropic, llm-google, llm-ollama, graph-context-loader, scope-classifier, notification, event-emitter, task-detector, code-executor, feedback-extractor, llm-openai-backup (if exists), email, calendar
    - Pattern per plugin:
-     - Replace `NatsClient::connect()` with `WsClient::connect()` (or make NatsClient smart)
+     - Replace `BusClient::connect()` with `WsClient::connect()` (or make BusClient smart)
      - Update arg: NATS_URL → EVENTBUS_URL
      - Update subscribe receiver handling
      - Update Dockerfile
@@ -1030,12 +1038,12 @@ eventbus_url: ws://localhost:8080  # or http://localhost:8081 for HTTP transport
    - Add section: "Transport: WebSocket + HTTP"
    - Add section: "Remote Plugins: WsClient adapter"
    - Update Layer 1: Events section to clarify that EventEnvelope is still used
-   - Update Layer 2: Plugins section to show WsClient instead of NatsClient
+   - Update Layer 2: Plugins section to show WsClient instead of BusClient
    - Update any references to NATS-specific features (JetStream, subjects, etc.)
 
 9.2 **Update PLUGIN_SPEC.md** (4 hours)
    - File: `docs/PLUGIN_SPEC.md`
-   - Update bootstrap pattern: replace NatsClient with WsClient
+   - Update bootstrap pattern: replace BusClient with WsClient
    - Update example code: use WsClient::connect()
    - Update event subscription: change from `.next().await` to `.rx.recv().await`
    - Clarify reconnect behavior (manual reconnect required)
@@ -1070,7 +1078,7 @@ eventbus_url: ws://localhost:8080  # or http://localhost:8081 for HTTP transport
 **Exit Criteria:**
 - All docs are updated
 - No references to NATS remain in user-facing docs
-- Examples show WsClient instead of NatsClient
+- Examples show WsClient instead of BusClient
 - Migration guide is clear and complete
 
 **Estimated Effort:** 1–2 days
@@ -1084,7 +1092,7 @@ eventbus_url: ws://localhost:8080  # or http://localhost:8081 for HTTP transport
 | Step | Task | Complexity | Days | Owner(s) |
 |------|------|------------|------|---------|
 | 1 | WsClient adapter | Large | 4–5 | 1 eng |
-| 2 | Refactor NatsClient | Medium | 2–3 | 1–2 eng |
+| 2 | Refactor BusClient | Medium | 2–3 | 1–2 eng |
 | 3 | Kernel services | Large | 5–7 | 2 eng |
 | 4 | Proof-of-concept (CLI) | Small | 1–2 | 1 eng |
 | 5 | All 23 plugins | Large | 5–7 | 2–3 eng (parallelize) |
@@ -1114,7 +1122,7 @@ eventbus_url: ws://localhost:8080  # or http://localhost:8081 for HTTP transport
 
 7. **Disaster recovery:** If eventbus storage file is corrupted, what is the recovery procedure? Current design: redb handles corruption detection; if unrecoverable, wipe and restart. Document this.
 
-8. **External plugins (non-Rust):** Node.js/Python plugins currently use the NatsClient library. After migration, they use `WsClient` (custom WebSocket library). Do we provide SDK libraries for other languages? (Phase 6 future work.)
+8. **External plugins (non-Rust):** Node.js/Python plugins currently use the BusClient library. After migration, they use `WsClient` (custom WebSocket library). Do we provide SDK libraries for other languages? (Phase 6 future work.)
 
 ---
 
@@ -1139,7 +1147,7 @@ crates/core/seidrum-kernel/Dockerfile (trivial: update NATS_URL env var name)
 ### Common Library Files
 
 ```
-crates/core/seidrum-common/src/nats_utils.rs (refactor to support both transports)
+crates/core/seidrum-common/src/bus_client.rs (refactor to support both transports)
 crates/core/seidrum-common/src/ws_client.rs (NEW)
 crates/core/seidrum-common/src/lib.rs (add pub mod ws_client)
 crates/core/seidrum-common/Cargo.toml (remove async-nats, add seidrum-eventbus)
@@ -1148,7 +1156,7 @@ crates/core/seidrum-common/Cargo.toml (remove async-nats, add seidrum-eventbus)
 ### Plugin Files (All 24)
 
 ```
-crates/plugins/{*}/src/main.rs (change NatsClient → WsClient)
+crates/plugins/{*}/src/main.rs (change BusClient → WsClient)
 crates/plugins/{*}/Cargo.toml (remove async-nats)
 crates/plugins/{*}/Dockerfile (change NATS_URL → EVENTBUS_URL)
 ```
