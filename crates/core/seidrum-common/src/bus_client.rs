@@ -38,12 +38,6 @@ pub type Subscription = WsSubscription;
 /// passed to `reply_to`.
 pub type Subject = WsSubject;
 
-/// The active backend.
-enum Backend {
-    Nats(async_nats::Client),
-    Ws(WsClient),
-}
-
 /// Backend-agnostic client for talking to the Seidrum bus.
 ///
 /// Created via [`BusClient::connect`]. Dispatches on URL scheme:

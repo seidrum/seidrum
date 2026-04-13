@@ -130,6 +130,45 @@ enum ServerMsg {
         message: String,
         correlation_id: Option<String>,
     },
+    // --- Variants the client doesn't use but the server may send ---
+    // Listed so `serde_json::from_str` doesn't fail on them. The reader
+    // silently ignores these. If any carry a `correlation_id`, we don't
+    // route them — the pending entry will eventually be cleaned up by
+    // the caller's timeout or drop.
+    #[serde(rename = "channel_registered")]
+    ChannelRegistered {
+        #[allow(dead_code)]
+        channel_type: String,
+        #[allow(dead_code)]
+        correlation_id: Option<String>,
+    },
+    #[serde(rename = "interceptor_registered")]
+    InterceptorRegistered {
+        #[allow(dead_code)]
+        id: String,
+        #[allow(dead_code)]
+        correlation_id: Option<String>,
+    },
+    #[serde(rename = "deliver")]
+    Deliver {
+        #[allow(dead_code)]
+        request_id: String,
+        #[allow(dead_code)]
+        channel_type: String,
+        #[allow(dead_code)]
+        subject: String,
+        #[allow(dead_code)]
+        payload: String,
+    },
+    #[serde(rename = "intercept")]
+    Intercept {
+        #[allow(dead_code)]
+        request_id: String,
+        #[allow(dead_code)]
+        subject: String,
+        #[allow(dead_code)]
+        payload: String,
+    },
 }
 
 /// Internal reply type for pending operations.
@@ -285,6 +324,13 @@ impl WsClient {
                             let _ = tx.send(msg).await;
                         }
                     }
+                    // Variants the client doesn't actively use but the
+                    // server may send. Silently ignored so the reader
+                    // doesn't crash on unexpected frames.
+                    ServerMsg::ChannelRegistered { .. }
+                    | ServerMsg::InterceptorRegistered { .. }
+                    | ServerMsg::Deliver { .. }
+                    | ServerMsg::Intercept { .. } => {}
                 }
             }
             connected_r.store(false, Ordering::SeqCst);
@@ -312,10 +358,11 @@ impl WsClient {
         }
 
         let frame = serde_json::to_string(op).context("failed to serialize WS operation")?;
-        self.writer_tx
-            .send(frame)
-            .await
-            .map_err(|_| anyhow::anyhow!("WsClient connection closed"))?;
+        if let Err(e) = self.writer_tx.send(frame).await {
+            // Clean up the pending entry so it doesn't leak.
+            self.pending.lock().await.remove(cid);
+            return Err(anyhow::anyhow!("WsClient connection closed: {}", e));
+        }
 
         let reply = rx
             .await
