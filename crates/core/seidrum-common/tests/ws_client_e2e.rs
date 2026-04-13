@@ -206,3 +206,121 @@ async fn test_ws_client_multiple_subscriptions() {
 
     handles.shutdown_and_join().await;
 }
+
+/// After calling `unsubscribe(id)`, subsequent publishes to the
+/// matching subject must NOT be delivered to the subscription.
+#[tokio::test]
+async fn test_ws_client_unsubscribe_stops_delivery() {
+    let (handles, ws_addr) = start_bus_with_ws().await;
+    let url = format!("ws://{}", ws_addr);
+    let client = WsClient::connect(&url, "unsub-test").await.unwrap();
+
+    let mut sub = client.subscribe("unsub.subject").await.unwrap();
+    let sub_id = sub.id.clone();
+
+    // Verify delivery works before unsubscribe.
+    client
+        .publish_bytes("unsub.subject", b"before")
+        .await
+        .unwrap();
+    let msg = tokio::time::timeout(Duration::from_secs(2), sub.next())
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(msg.payload.as_ref(), b"before");
+
+    // Unsubscribe.
+    client.unsubscribe(&sub_id).await.unwrap();
+
+    // Give the server a beat to process the unsubscribe.
+    tokio::time::sleep(Duration::from_millis(50)).await;
+
+    // Publish again — the subscription should NOT receive it.
+    client
+        .publish_bytes("unsub.subject", b"after")
+        .await
+        .unwrap();
+    let result = tokio::time::timeout(Duration::from_millis(300), sub.next()).await;
+    assert!(
+        result.is_err() || result.unwrap().is_none(),
+        "subscription should not receive events after unsubscribe"
+    );
+
+    handles.shutdown_and_join().await;
+}
+
+/// Connecting to a non-existent server fails with a clean error.
+#[tokio::test]
+async fn test_ws_client_connect_refused() {
+    // Port 1 is almost certainly not running a WS server.
+    let result = WsClient::connect("ws://127.0.0.1:1", "test").await;
+    assert!(result.is_err(), "connect to closed port should fail");
+    let err = format!("{}", result.err().unwrap());
+    assert!(
+        err.contains("failed to connect"),
+        "error should mention connection failure, got: {}",
+        err
+    );
+}
+
+/// After the server shuts down, operations must either succeed (TCP
+/// buffer still draining) or fail with a clean error — they must
+/// never hang. The WS server does not close existing connections on
+/// graceful shutdown (spawned `serve_connection` tasks are detached),
+/// so `is_connected()` may stay true for a while. This test verifies
+/// the "no hang" property by wrapping operations in timeouts.
+#[tokio::test]
+async fn test_ws_client_operations_after_server_shutdown_do_not_hang() {
+    let (handles, ws_addr) = start_bus_with_ws().await;
+    let url = format!("ws://{}", ws_addr);
+    let client = WsClient::connect(&url, "disconnect-test").await.unwrap();
+    assert!(client.is_connected());
+
+    // Verify it works before shutdown.
+    client
+        .publish_bytes("alive.subject", b"hello")
+        .await
+        .unwrap();
+
+    // Shut down the server's accept loop (existing connections linger).
+    handles.shutdown_and_join().await;
+
+    // Try a subscribe (which requires a server response). With the
+    // server's dispatch engine gone, the subscribe should either fail
+    // or succeed from buffered state — but must not hang.
+    let result =
+        tokio::time::timeout(Duration::from_secs(3), client.subscribe("after.shutdown")).await;
+    // We don't assert success or failure — either is fine. We only
+    // assert it completed within the timeout (no hang).
+    assert!(
+        result.is_ok(),
+        "subscribe after server shutdown should complete within 3s (not hang)"
+    );
+}
+
+/// Configurable request timeout via `with_request_timeout`.
+#[tokio::test]
+async fn test_ws_client_request_timeout_configurable() {
+    let (handles, ws_addr) = start_bus_with_ws().await;
+    let url = format!("ws://{}", ws_addr);
+    let client = WsClient::connect(&url, "timeout-test")
+        .await
+        .unwrap()
+        .with_request_timeout(200); // 200ms — very short
+
+    // No handler registered for this subject, so the request will time
+    // out. With the default 5000ms this test would be slow; with 200ms
+    // it should fail quickly.
+    let start = tokio::time::Instant::now();
+    let result = client.request_bytes("no.handler", b"ping").await;
+    let elapsed = start.elapsed();
+
+    assert!(result.is_err(), "request with no handler should time out");
+    assert!(
+        elapsed < Duration::from_secs(2),
+        "should time out in ~200ms, not wait 5s (elapsed: {:?})",
+        elapsed
+    );
+
+    handles.shutdown_and_join().await;
+}

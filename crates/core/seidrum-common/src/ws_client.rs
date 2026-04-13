@@ -183,6 +183,10 @@ enum PendingReply {
 ///
 /// Created via [`WsClient::connect`]. All methods are `&self` — the
 /// client is `Clone`-safe (internally Arc'd).
+/// Default request timeout in milliseconds. Used by `request_bytes`
+/// and `request` unless overridden via `with_request_timeout`.
+const DEFAULT_REQUEST_TIMEOUT_MS: u64 = 5000;
+
 #[derive(Clone)]
 pub struct WsClient {
     writer_tx: mpsc::Sender<String>,
@@ -190,6 +194,9 @@ pub struct WsClient {
     subscribers: Arc<Mutex<HashMap<String, mpsc::Sender<WsMessage>>>>,
     connected: Arc<AtomicBool>,
     pub source: String,
+    /// Per-request timeout in milliseconds. Sent to the server in the
+    /// `Request` operation. Configurable via [`Self::with_request_timeout`].
+    request_timeout_ms: u64,
 }
 
 impl WsClient {
@@ -343,7 +350,16 @@ impl WsClient {
             subscribers,
             connected,
             source: source.to_string(),
+            request_timeout_ms: DEFAULT_REQUEST_TIMEOUT_MS,
         })
+    }
+
+    /// Override the per-request timeout (default 5000ms). This value
+    /// is sent to the server in every `Request` operation; the server
+    /// enforces it server-side.
+    pub fn with_request_timeout(mut self, timeout_ms: u64) -> Self {
+        self.request_timeout_ms = timeout_ms;
+        self
     }
 
     fn next_correlation_id() -> String {
@@ -466,7 +482,7 @@ impl WsClient {
         let op = ClientOp::Request {
             subject: subject.as_ref().to_string(),
             payload: payload_b64,
-            timeout_ms: 5000,
+            timeout_ms: self.request_timeout_ms,
             correlation_id: Some(cid.clone()),
         };
         let reply = self.send_and_wait(&op, &cid).await?;
