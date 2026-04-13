@@ -5,7 +5,6 @@ use std::time::Instant;
 
 use anyhow::Result;
 use clap::Parser;
-use futures::StreamExt as _;
 use tracing::{error, info, warn};
 
 use seidrum_common::events::{

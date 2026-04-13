@@ -1,6 +1,5 @@
 use anyhow::{Context, Result};
 use clap::Parser;
-use futures::StreamExt;
 use seidrum_common::events::{EventEnvelope, PluginRegister, ToolCallRequest, ToolCallResponse};
 use serde::{Deserialize, Serialize};
 use std::time::Duration;

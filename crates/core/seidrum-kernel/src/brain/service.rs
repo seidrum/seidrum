@@ -8,7 +8,6 @@ use std::time::Instant;
 
 use anyhow::{Context, Result};
 use chrono::Utc;
-use futures::StreamExt;
 use seidrum_common::events::{
     ApiKeyCreateRequest, ApiKeyCreateResponse, ApiKeyListRequest, ApiKeyListResponse, ApiKeyRecord,
     ApiKeyRevokeRequest, ApiKeyRevokeResponse, ApiKeyValidateRequest, ApiKeyValidateResponse,

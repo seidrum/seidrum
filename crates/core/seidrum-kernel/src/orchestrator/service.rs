@@ -10,7 +10,6 @@ use std::path::Path;
 use std::sync::Arc;
 
 use anyhow::{Context, Result};
-use futures::StreamExt;
 use tokio::sync::RwLock;
 use tracing::{error, info, warn};
 

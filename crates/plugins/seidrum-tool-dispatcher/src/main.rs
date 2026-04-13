@@ -4,7 +4,6 @@ use std::time::Duration;
 
 use anyhow::Result;
 use clap::Parser;
-use futures::StreamExt as _;
 use tokio::sync::RwLock;
 use tracing::{error, info, warn};
 

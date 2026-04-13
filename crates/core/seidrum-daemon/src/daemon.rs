@@ -9,7 +9,6 @@ use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result};
 use chrono::Utc;
-use futures::StreamExt;
 use serde::{Deserialize, Serialize};
 use tokio::process::Command;
 use tracing::{error, info, warn};

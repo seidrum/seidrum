@@ -2,7 +2,6 @@ use std::collections::HashMap;
 
 use anyhow::{Context, Result};
 use clap::Parser;
-use futures::StreamExt;
 use seidrum_common::events::{ChannelInbound, ContentStoreRequest, EventEnvelope, PluginRegister};
 use serde::{Deserialize, Serialize};
 use tracing::{error, info, warn};
