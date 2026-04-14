@@ -46,12 +46,6 @@ pub async fn run(paths: &SeidrumPaths, use_defaults: bool) -> Result<()> {
     println!();
 
     // 2. Download NATS binary
-    let nats_config = NatsConfig {
-        mode: NatsMode::Native,
-        version: crate::infra::NATS_VERSION.to_string(),
-        port: 4222,
-        http_port: 8222,
-    };
 
     // 3. Prompt for ArangoDB password only
     let arango_password = if use_defaults {
@@ -75,7 +69,12 @@ pub async fn run(paths: &SeidrumPaths, use_defaults: bool) -> Result<()> {
     };
 
     let infra_config = InfraConfig {
-        nats: nats_config,
+        nats: NatsConfig {
+            mode: NatsMode::Native,
+            version: "2.10.24".to_string(),
+            port: 4222,
+            http_port: 8222,
+        },
         arango: arango_config,
         container_runtime: runtime,
     };
@@ -86,7 +85,7 @@ pub async fn run(paths: &SeidrumPaths, use_defaults: bool) -> Result<()> {
     );
 
     // 5. Download NATS
-    infra.download_nats().await?;
+    // No NATS to download (eventbus is built into the kernel)
 
     // 6. Pull ArangoDB image
     println!("Pulling ArangoDB Docker image...");
@@ -111,7 +110,7 @@ pub async fn run(paths: &SeidrumPaths, use_defaults: bool) -> Result<()> {
 
     // 8. Start infrastructure temporarily for DB init
     println!("Starting infrastructure for database initialization...");
-    infra.start_nats()?;
+    // No NATS to start
     infra.start_arango()?;
     infra.wait_for_healthy().await?;
 
@@ -127,7 +126,7 @@ pub async fn run(paths: &SeidrumPaths, use_defaults: bool) -> Result<()> {
     // No auto-enable logic — the user is in control.
 
     // 11. Stop infrastructure (user will use `seidrum start`)
-    infra.stop_nats()?;
+    // No NATS to stop
     infra.stop_arango()?;
 
     // 12. Save infra config

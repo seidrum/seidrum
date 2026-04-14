@@ -14,9 +14,9 @@ use tracing::{error, info, warn};
 #[derive(Parser)]
 #[command(name = "seidrum-email", about = "Seidrum Email channel plugin")]
 struct Cli {
-    /// NATS server URL
-    #[arg(long, env = "NATS_URL", default_value = "nats://localhost:4222")]
-    nats_url: String,
+    /// Bus server URL
+    #[arg(long, env = "BUS_URL", default_value = "ws://127.0.0.1:9000")]
+    bus_url: String,
 
     /// IMAP server hostname
     #[arg(long, env = "IMAP_HOST")]
@@ -281,7 +281,7 @@ async fn main() -> Result<()> {
     let cli = Cli::parse();
 
     info!(
-        nats_url = %cli.nats_url,
+        bus_url = %cli.bus_url,
         imap_host = %cli.imap_host,
         smtp_host = %cli.smtp_host,
         poll_interval = cli.poll_interval,
@@ -289,8 +289,8 @@ async fn main() -> Result<()> {
     );
 
     // Connect to NATS
-    let nats = seidrum_common::bus_client::BusClient::connect(&cli.nats_url, "email").await?;
-    info!("Connected to NATS at {}", cli.nats_url);
+    let nats = seidrum_common::bus_client::BusClient::connect(&cli.bus_url, "email").await?;
+    info!("Connected to bus at {}", cli.bus_url);
 
     // Register plugin
     let register = PluginRegister {
@@ -363,7 +363,7 @@ async fn main() -> Result<()> {
     // Spawn IMAP polling task
     let imap_handle = tokio::spawn(async move {
         let poll_cli = Cli {
-            nats_url: String::new(),
+            bus_url: String::new(),
             imap_host,
             imap_port,
             imap_user,
@@ -393,7 +393,7 @@ async fn main() -> Result<()> {
 
     let outbound_handle = tokio::spawn(async move {
         let send_cli = Cli {
-            nats_url: String::new(),
+            bus_url: String::new(),
             imap_host: String::new(),
             imap_port: 0,
             imap_user: String::new(),

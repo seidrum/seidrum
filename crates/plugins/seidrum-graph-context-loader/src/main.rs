@@ -19,9 +19,9 @@ use tracing::{error, info, warn};
     about = "Seidrum graph context loader plugin"
 )]
 struct Cli {
-    /// NATS server URL
-    #[arg(long, env = "NATS_URL", default_value = "nats://localhost:4222")]
-    nats_url: String,
+    /// Bus server URL
+    #[arg(long, env = "BUS_URL", default_value = "ws://127.0.0.1:9000")]
+    bus_url: String,
 
     /// Graph traversal depth (hops)
     #[arg(long, env = "GRAPH_DEPTH", default_value = "3")]
@@ -403,7 +403,7 @@ async fn main() -> Result<()> {
     }
 
     info!(
-        nats_url = %cli.nats_url,
+        bus_url = %cli.bus_url,
         graph_depth = cli.graph_depth,
         max_facts = cli.max_facts,
         min_confidence = cli.min_confidence,
@@ -413,11 +413,10 @@ async fn main() -> Result<()> {
     );
 
     // Connect to NATS
-    let nats =
-        seidrum_common::bus_client::BusClient::connect(&cli.nats_url, "graph-context-loader")
-            .await
-            .context("failed to connect to NATS")?;
-    info!("Connected to NATS");
+    let nats = seidrum_common::bus_client::BusClient::connect(&cli.bus_url, "graph-context-loader")
+        .await
+        .context("failed to connect to NATS")?;
+    info!("Connected to bus");
 
     // Register with kernel
     let register = PluginRegister {

@@ -67,17 +67,12 @@ async fn main() -> anyhow::Result<()> {
     Ok(())
 }
 
-/// Start the kernel daemon: connect to NATS, spawn registry service (and
-/// future brain / orchestrator services), then wait for shutdown.
+/// Start the kernel daemon: build the eventbus, start transports for
+/// remote plugins, spawn kernel services, then wait for shutdown.
 async fn run_serve() -> anyhow::Result<()> {
-    // 1. Resolve NATS URL from config or env.
+    // 1. Load platform config (optional — env vars override).
     let config_path = Path::new("config/platform.yaml");
     let platform_config = load_platform_config(config_path).ok();
-
-    let nats_url = std::env::var("NATS_URL")
-        .ok()
-        .or_else(|| platform_config.as_ref().map(|c| c.nats_url.clone()))
-        .unwrap_or_else(|| "nats://localhost:4222".to_string());
 
     if platform_config.is_none() {
         warn!(
@@ -86,13 +81,38 @@ async fn run_serve() -> anyhow::Result<()> {
         );
     }
 
-    info!("NATS URL: {}", nats_url);
+    // 2. Build the eventbus with WS transport for remote plugins.
+    let ws_addr_str =
+        std::env::var("EVENTBUS_WS_ADDR").unwrap_or_else(|_| "0.0.0.0:9000".to_string());
+    let ws_addr: std::net::SocketAddr = ws_addr_str
+        .parse()
+        .map_err(|e| anyhow::anyhow!("invalid EVENTBUS_WS_ADDR '{}': {}", ws_addr_str, e))?;
 
-    // 2. Connect to the bus.
-    let nats_client = seidrum_common::bus_client::BusClient::connect(&nats_url, "kernel")
+    let data_dir = std::env::var("EVENTBUS_DATA_DIR").unwrap_or_else(|_| "data".to_string());
+    std::fs::create_dir_all(&data_dir)?;
+    let db_path = format!("{}/eventbus.redb", data_dir);
+
+    let store = std::sync::Arc::new(
+        seidrum_eventbus::storage::redb_store::RedbEventStore::open(&db_path)
+            .map_err(|e| anyhow::anyhow!("failed to open eventbus store at {}: {}", db_path, e))?,
+    );
+
+    let bus_handles = seidrum_eventbus::EventBusBuilder::new()
+        .storage(store)
+        .with_websocket(ws_addr)
+        .with_retry(seidrum_eventbus::delivery::RetryConfig::default())
+        .unsafe_allow_ws_dev_mode()
+        .build_with_handles()
         .await
-        .map_err(|e| anyhow::anyhow!("failed to connect to bus at {}: {}", nats_url, e))?;
-    info!("connected to bus");
+        .map_err(|e| anyhow::anyhow!("failed to build eventbus: {}", e))?;
+
+    info!("eventbus started (WS transport on {})", ws_addr);
+
+    // 3. Create in-process BusClient for kernel services. Variable
+    //    name `nats_client` kept temporarily to minimise diff.
+    let nats_client =
+        seidrum_common::bus_client::BusClient::from_bus(bus_handles.bus.clone(), "kernel");
+    info!("kernel BusClient ready (in-process backend)");
 
     // 3. Spawn the registry service.
     let registry = RegistryService::new();

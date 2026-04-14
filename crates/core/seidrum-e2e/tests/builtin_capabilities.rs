@@ -1,6 +1,6 @@
 //! E2E tests for consciousness built-in capabilities.
 //!
-//! Requires: NATS + kernel running with consciousness service.
+//! Requires: kernel running with consciousness service.
 
 mod common;
 
@@ -18,16 +18,16 @@ async fn call_builtin(
         arguments,
         correlation_id: None,
     };
-    common::nats_request(nats, "capability.call.consciousness", &req).await
+    common::bus_request(nats, "capability.call.consciousness", &req).await
 }
 
 #[tokio::test]
 #[ignore]
 async fn test_builtin_search_skills() {
-    let nats = common::connect_nats().await;
+    let bus = common::connect_bus().await;
 
     let resp = call_builtin(
-        &nats,
+        &bus,
         "search-skills",
         serde_json::json!({"query": "code review", "limit": 5}),
     )
@@ -46,12 +46,12 @@ async fn test_builtin_search_skills() {
 #[tokio::test]
 #[ignore]
 async fn test_builtin_save_and_load_skill() {
-    let nats = common::connect_nats().await;
+    let bus = common::connect_bus().await;
     let skill_desc = format!("E2E test skill {}", ulid::Ulid::new());
 
     // Save
     let save_resp = call_builtin(
-        &nats,
+        &bus,
         "save-skill",
         serde_json::json!({
             "description": skill_desc,
@@ -69,7 +69,7 @@ async fn test_builtin_save_and_load_skill() {
 
     // Load
     let load_resp = call_builtin(
-        &nats,
+        &bus,
         "load-skill",
         serde_json::json!({"skill_id": skill_id}),
     )
@@ -89,7 +89,7 @@ async fn test_builtin_save_and_load_skill() {
 
     // Load nonexistent
     let bad_resp = call_builtin(
-        &nats,
+        &bus,
         "load-skill",
         serde_json::json!({"skill_id": "nonexistent-skill-xyz"}),
     )
@@ -100,11 +100,11 @@ async fn test_builtin_save_and_load_skill() {
 #[tokio::test]
 #[ignore]
 async fn test_builtin_subscribe_events_denied_subjects() {
-    let nats = common::connect_nats().await;
+    let bus = common::connect_bus().await;
 
     // Try subscribing to internal subject — should be denied
     let resp = call_builtin(
-        &nats,
+        &bus,
         "subscribe-events",
         serde_json::json!({"subjects": ["brain.query.request"]}),
     )
@@ -125,11 +125,11 @@ async fn test_builtin_subscribe_events_denied_subjects() {
 #[tokio::test]
 #[ignore]
 async fn test_builtin_schedule_wake_bounds() {
-    let nats = common::connect_nats().await;
+    let bus = common::connect_bus().await;
 
     // Valid wake
     let resp = call_builtin(
-        &nats,
+        &bus,
         "schedule-wake",
         serde_json::json!({
             "delay_seconds": 60,
@@ -146,7 +146,7 @@ async fn test_builtin_schedule_wake_bounds() {
 
     // Invalid: 0 seconds
     let resp_zero = call_builtin(
-        &nats,
+        &bus,
         "schedule-wake",
         serde_json::json!({
             "delay_seconds": 0,
@@ -158,7 +158,7 @@ async fn test_builtin_schedule_wake_bounds() {
 
     // Invalid: too large
     let resp_huge = call_builtin(
-        &nats,
+        &bus,
         "schedule-wake",
         serde_json::json!({
             "delay_seconds": 999999999,
@@ -172,9 +172,9 @@ async fn test_builtin_schedule_wake_bounds() {
 #[tokio::test]
 #[ignore]
 async fn test_builtin_list_conversations() {
-    let nats = common::connect_nats().await;
+    let bus = common::connect_bus().await;
 
-    let resp = call_builtin(&nats, "list-conversations", serde_json::json!({"limit": 5})).await;
+    let resp = call_builtin(&bus, "list-conversations", serde_json::json!({"limit": 5})).await;
     assert!(
         !resp.is_error,
         "list-conversations should not error: {:?}",
@@ -185,11 +185,11 @@ async fn test_builtin_list_conversations() {
 #[tokio::test]
 #[ignore]
 async fn test_builtin_invalid_arguments() {
-    let nats = common::connect_nats().await;
+    let bus = common::connect_bus().await;
 
     // save-skill with empty description
     let resp = call_builtin(
-        &nats,
+        &bus,
         "save-skill",
         serde_json::json!({"description": "", "snippet": ""}),
     )
@@ -197,18 +197,18 @@ async fn test_builtin_invalid_arguments() {
     assert!(resp.is_error, "Empty description should be rejected");
 
     // load-skill with empty skill_id
-    let resp2 = call_builtin(&nats, "load-skill", serde_json::json!({"skill_id": ""})).await;
+    let resp2 = call_builtin(&bus, "load-skill", serde_json::json!({"skill_id": ""})).await;
     assert!(resp2.is_error, "Empty skill_id should be rejected");
 }
 
 #[tokio::test]
 #[ignore]
 async fn test_builtin_delegate_task_depth_limit() {
-    let nats = common::connect_nats().await;
+    let bus = common::connect_bus().await;
 
     // Delegation at depth 5 should be rejected
     let resp = call_builtin(
-        &nats,
+        &bus,
         "delegate-task",
         serde_json::json!({
             "to_agent_id": "research-agent",
@@ -228,7 +228,7 @@ async fn test_builtin_delegate_task_depth_limit() {
 
     // Delegation at depth 0 should succeed (creates conversation)
     let resp2 = call_builtin(
-        &nats,
+        &bus,
         "delegate-task",
         serde_json::json!({
             "to_agent_id": "research-agent",

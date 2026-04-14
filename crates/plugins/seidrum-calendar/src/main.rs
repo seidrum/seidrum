@@ -12,9 +12,9 @@ use tracing::{error, info, warn};
 #[derive(Parser)]
 #[command(name = "seidrum-calendar", about = "Seidrum Google Calendar plugin")]
 struct Cli {
-    /// NATS server URL
-    #[arg(long, env = "NATS_URL", default_value = "nats://localhost:4222")]
-    nats_url: String,
+    /// Bus server URL
+    #[arg(long, env = "BUS_URL", default_value = "ws://127.0.0.1:9000")]
+    bus_url: String,
 
     /// Google API key (falls back to OpenClaw auth-profiles.json)
     #[arg(long, env = "GOOGLE_API_KEY", default_value = "")]
@@ -338,7 +338,7 @@ async fn main() -> Result<()> {
     let cli = Cli::parse();
 
     info!(
-        nats_url = %cli.nats_url,
+        bus_url = %cli.bus_url,
         calendar_id = %cli.calendar_id,
         poll_interval = cli.poll_interval,
         "Starting seidrum-calendar plugin..."
@@ -347,8 +347,8 @@ async fn main() -> Result<()> {
     let api_key = resolve_google_api_key(&cli.google_api_key)?;
 
     // Connect to NATS
-    let nats = seidrum_common::bus_client::BusClient::connect(&cli.nats_url, "calendar").await?;
-    info!("Connected to NATS at {}", cli.nats_url);
+    let nats = seidrum_common::bus_client::BusClient::connect(&cli.bus_url, "calendar").await?;
+    info!("Connected to bus at {}", cli.bus_url);
 
     // Register plugin
     let register = PluginRegister {

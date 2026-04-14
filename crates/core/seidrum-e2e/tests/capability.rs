@@ -1,6 +1,6 @@
 //! E2E tests for capability registration and search.
 //!
-//! Requires: NATS + kernel running with tool registry service.
+//! Requires: kernel running with tool registry service.
 
 mod common;
 
@@ -12,7 +12,7 @@ use std::time::Duration;
 #[tokio::test]
 #[ignore]
 async fn test_capability_register_and_search() {
-    let nats = common::connect_nats().await;
+    let bus = common::connect_bus().await;
     let tool_id = common::test_id("e2e-tool");
     let plugin_id = common::test_id("e2e-plugin");
 
@@ -34,7 +34,7 @@ async fn test_capability_register_and_search() {
     };
 
     let bytes = serde_json::to_vec(&register).unwrap();
-    nats.publish_bytes("capability.register", bytes)
+    bus.publish_bytes("capability.register", bytes)
         .await
         .unwrap();
 
@@ -47,7 +47,7 @@ async fn test_capability_register_and_search() {
         kind_filter: None,
     };
     let search_resp: ToolSearchResponse =
-        common::nats_request(&nats, "capability.search", &search_req).await;
+        common::bus_request(&bus, "capability.search", &search_req).await;
     assert!(
         search_resp.tools.iter().any(|t| t.tool_id == tool_id),
         "Tool {} should appear in search results",
@@ -59,7 +59,7 @@ async fn test_capability_register_and_search() {
         tool_id: tool_id.clone(),
     };
     let describe_resp: ToolDescribeResponse =
-        common::nats_request(&nats, "capability.describe", &describe_req).await;
+        common::bus_request(&bus, "capability.describe", &describe_req).await;
     assert_eq!(describe_resp.tool_id, tool_id);
     assert_eq!(describe_resp.plugin_id, plugin_id);
     assert_eq!(describe_resp.name, "E2E Test Tool");
@@ -68,7 +68,7 @@ async fn test_capability_register_and_search() {
 #[tokio::test]
 #[ignore]
 async fn test_capability_kind_filter() {
-    let nats = common::connect_nats().await;
+    let bus = common::connect_bus().await;
     let tool_id = common::test_id("e2e-cmd");
 
     // Register a command-type capability
@@ -84,7 +84,7 @@ async fn test_capability_kind_filter() {
     };
 
     let bytes = serde_json::to_vec(&register).unwrap();
-    nats.publish_bytes("capability.register", bytes)
+    bus.publish_bytes("capability.register", bytes)
         .await
         .unwrap();
 
@@ -97,7 +97,7 @@ async fn test_capability_kind_filter() {
         kind_filter: Some("command".into()),
     };
     let search_resp: ToolSearchResponse =
-        common::nats_request(&nats, "capability.search", &search_req).await;
+        common::bus_request(&bus, "capability.search", &search_req).await;
     assert!(
         search_resp.tools.iter().any(|t| t.tool_id == tool_id),
         "Command tool should appear with kind_filter=command"
@@ -110,7 +110,7 @@ async fn test_capability_kind_filter() {
         kind_filter: Some("tool".into()),
     };
     let search_resp2: ToolSearchResponse =
-        common::nats_request(&nats, "capability.search", &search_req2).await;
+        common::bus_request(&bus, "capability.search", &search_req2).await;
     assert!(
         !search_resp2.tools.iter().any(|t| t.tool_id == tool_id),
         "Command tool should NOT appear with kind_filter=tool"

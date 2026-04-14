@@ -13,7 +13,7 @@ use std::collections::HashMap;
 #[tokio::test]
 #[ignore]
 async fn test_conversation_lifecycle() {
-    let nats = common::connect_nats().await;
+    let bus = common::connect_bus().await;
     let test_id = common::test_id("e2e-conv");
 
     // Create
@@ -26,7 +26,7 @@ async fn test_conversation_lifecycle() {
         user_id: None,
     };
     let create_resp: ConversationCreateResponse =
-        common::nats_request(&nats, "brain.conversation.create", &create_req).await;
+        common::bus_request(&bus, "brain.conversation.create", &create_req).await;
     let conv_id = create_resp.conversation_id;
     assert!(!conv_id.is_empty());
 
@@ -44,7 +44,7 @@ async fn test_conversation_lifecycle() {
         },
     };
     let append_resp: ConversationAppendResponse =
-        common::nats_request(&nats, "brain.conversation.append", &append_req).await;
+        common::bus_request(&bus, "brain.conversation.append", &append_req).await;
     assert!(append_resp.success);
     assert_eq!(append_resp.message_count, 1);
 
@@ -62,7 +62,7 @@ async fn test_conversation_lifecycle() {
         },
     };
     let append_resp2: ConversationAppendResponse =
-        common::nats_request(&nats, "brain.conversation.append", &append_req2).await;
+        common::bus_request(&bus, "brain.conversation.append", &append_req2).await;
     assert!(append_resp2.success);
     assert_eq!(append_resp2.message_count, 2);
 
@@ -73,7 +73,7 @@ async fn test_conversation_lifecycle() {
         user_id: None,
     };
     let get_resp: serde_json::Value =
-        common::nats_request(&nats, "brain.conversation.get", &get_req).await;
+        common::bus_request(&bus, "brain.conversation.get", &get_req).await;
     assert!(!get_resp.is_null());
     let messages = get_resp.get("messages").unwrap().as_array().unwrap();
     assert_eq!(messages.len(), 2);
@@ -91,7 +91,7 @@ async fn test_conversation_lifecycle() {
         user_id: None,
     };
     let list_resp: ConversationListResponse =
-        common::nats_request(&nats, "brain.conversation.list", &list_req).await;
+        common::bus_request(&bus, "brain.conversation.list", &list_req).await;
     assert!(list_resp.conversations.iter().any(|c| c.id == conv_id));
 
     // Find by metadata
@@ -103,7 +103,7 @@ async fn test_conversation_lifecycle() {
         user_id: None,
     };
     let find_resp: serde_json::Value =
-        common::nats_request(&nats, "brain.conversation.find", &find_req).await;
+        common::bus_request(&bus, "brain.conversation.find", &find_req).await;
     assert!(!find_resp.is_null());
     assert_eq!(find_resp.get("id").unwrap().as_str().unwrap(), conv_id);
 }
@@ -111,7 +111,7 @@ async fn test_conversation_lifecycle() {
 #[tokio::test]
 #[ignore]
 async fn test_conversation_get_with_max_messages() {
-    let nats = common::connect_nats().await;
+    let bus = common::connect_bus().await;
 
     // Create
     let create_req = ConversationCreateRequest {
@@ -123,7 +123,7 @@ async fn test_conversation_get_with_max_messages() {
         user_id: None,
     };
     let create_resp: ConversationCreateResponse =
-        common::nats_request(&nats, "brain.conversation.create", &create_req).await;
+        common::bus_request(&bus, "brain.conversation.create", &create_req).await;
     let conv_id = create_resp.conversation_id;
 
     // Append 5 messages
@@ -141,7 +141,7 @@ async fn test_conversation_get_with_max_messages() {
             },
         };
         let _: ConversationAppendResponse =
-            common::nats_request(&nats, "brain.conversation.append", &req).await;
+            common::bus_request(&bus, "brain.conversation.append", &req).await;
     }
 
     // Get with max_messages=2
@@ -151,7 +151,7 @@ async fn test_conversation_get_with_max_messages() {
         user_id: None,
     };
     let get_resp: serde_json::Value =
-        common::nats_request(&nats, "brain.conversation.get", &get_req).await;
+        common::bus_request(&bus, "brain.conversation.get", &get_req).await;
     let messages = get_resp.get("messages").unwrap().as_array().unwrap();
     assert_eq!(messages.len(), 2);
     // Should be the last 2 messages

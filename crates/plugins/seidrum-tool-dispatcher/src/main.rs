@@ -23,9 +23,9 @@ use seidrum_common::events::{
     about = "Seidrum capability dispatcher plugin — routes capability.call requests to owning plugins"
 )]
 struct Cli {
-    /// NATS server URL
-    #[arg(long, env = "NATS_URL", default_value = "nats://localhost:4222")]
-    nats_url: String,
+    /// Bus server URL
+    #[arg(long, env = "BUS_URL", default_value = "ws://127.0.0.1:9000")]
+    bus_url: String,
 
     /// Timeout for tool calls in seconds
     #[arg(long, env = "TOOL_CALL_TIMEOUT", default_value = "30")]
@@ -62,13 +62,13 @@ async fn main() -> Result<()> {
     let timeout = Duration::from_secs(cli.tool_call_timeout);
 
     info!(
-        nats_url = %cli.nats_url,
+        bus_url = %cli.bus_url,
         timeout_secs = cli.tool_call_timeout,
         "Starting seidrum-tool-dispatcher plugin..."
     );
 
     // Connect to NATS
-    let nats = BusClient::connect(&cli.nats_url, "tool-dispatcher").await?;
+    let nats = BusClient::connect(&cli.bus_url, "tool-dispatcher").await?;
 
     // Publish plugin registration
     let register = PluginRegister {

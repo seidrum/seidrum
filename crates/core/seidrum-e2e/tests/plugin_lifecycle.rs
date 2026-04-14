@@ -1,6 +1,6 @@
 //! E2E tests for plugin registration and deregistration.
 //!
-//! Requires: NATS + kernel running with registry service.
+//! Requires: kernel running with registry service.
 
 mod common;
 
@@ -28,7 +28,7 @@ struct RegistryQueryResponse {
 #[tokio::test]
 #[ignore]
 async fn test_plugin_register_and_query() {
-    let nats = common::connect_nats().await;
+    let bus = common::connect_bus().await;
     let plugin_id = common::test_id("e2e-plugin");
 
     // Register (raw payload — kernel accepts both raw and envelope-wrapped)
@@ -46,7 +46,7 @@ async fn test_plugin_register_and_query() {
     };
 
     let bytes = serde_json::to_vec(&register).unwrap();
-    nats.publish_bytes("plugin.register", bytes).await.unwrap();
+    bus.publish_bytes("plugin.register", bytes).await.unwrap();
 
     // Give registry time to process
     tokio::time::sleep(Duration::from_millis(500)).await;
@@ -55,7 +55,7 @@ async fn test_plugin_register_and_query() {
     let query = RegistryQuery::GetPlugin {
         plugin_id: plugin_id.clone(),
     };
-    let resp: RegistryQueryResponse = common::nats_request(&nats, "registry.query", &query).await;
+    let resp: RegistryQueryResponse = common::bus_request(&bus, "registry.query", &query).await;
     assert!(resp.success, "Plugin should be found in registry");
     assert!(resp.plugin.is_some());
     let plugin = resp.plugin.unwrap();
@@ -68,7 +68,7 @@ async fn test_plugin_register_and_query() {
     // Query - list all plugins (should include ours)
     let list_query = RegistryQuery::ListPlugins;
     let list_resp: RegistryQueryResponse =
-        common::nats_request(&nats, "registry.query", &list_query).await;
+        common::bus_request(&bus, "registry.query", &list_query).await;
     assert!(list_resp.success);
     let plugins = list_resp.plugins.unwrap();
     assert!(
@@ -83,7 +83,7 @@ async fn test_plugin_register_and_query() {
         id: plugin_id.clone(),
     };
     let dereg_bytes = serde_json::to_vec(&dereg).unwrap();
-    nats.publish_bytes("plugin.deregister", dereg_bytes)
+    bus.publish_bytes("plugin.deregister", dereg_bytes)
         .await
         .unwrap();
 
@@ -93,7 +93,7 @@ async fn test_plugin_register_and_query() {
     let query2 = RegistryQuery::GetPlugin {
         plugin_id: plugin_id.clone(),
     };
-    let resp2: RegistryQueryResponse = common::nats_request(&nats, "registry.query", &query2).await;
+    let resp2: RegistryQueryResponse = common::bus_request(&bus, "registry.query", &query2).await;
     assert!(!resp2.success, "Plugin should no longer be in registry");
     assert!(resp2.plugin.is_none());
 }

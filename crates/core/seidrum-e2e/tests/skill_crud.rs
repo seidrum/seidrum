@@ -1,6 +1,6 @@
 //! E2E tests for skill CRUD (brain.skill.save/search/get/list/delete).
 //!
-//! Requires: NATS + kernel running with brain service.
+//! Requires: kernel running with brain service.
 
 mod common;
 
@@ -12,7 +12,7 @@ use seidrum_common::events::{
 #[tokio::test]
 #[ignore]
 async fn test_skill_save_and_get() {
-    let nats = common::connect_nats().await;
+    let bus = common::connect_bus().await;
     let skill_id = common::test_id("e2e-skill");
 
     // Save
@@ -27,7 +27,7 @@ async fn test_skill_save_and_get() {
         embedding: vec![],
     };
     let save_resp: SkillSaveResponse =
-        common::nats_request(&nats, "brain.skill.save", &save_req).await;
+        common::bus_request(&bus, "brain.skill.save", &save_req).await;
     assert_eq!(save_resp.skill_id, skill_id);
     assert!(save_resp.is_new);
 
@@ -35,8 +35,7 @@ async fn test_skill_save_and_get() {
     let get_req = SkillGetRequest {
         skill_id: skill_id.clone(),
     };
-    let get_resp: serde_json::Value =
-        common::nats_request(&nats, "brain.skill.get", &get_req).await;
+    let get_resp: serde_json::Value = common::bus_request(&bus, "brain.skill.get", &get_req).await;
     assert!(!get_resp.is_null());
     assert_eq!(get_resp.get("id").unwrap().as_str().unwrap(), skill_id);
     assert!(get_resp
@@ -47,13 +46,13 @@ async fn test_skill_save_and_get() {
         .contains("security issues"));
 
     // Cleanup
-    let _: serde_json::Value = common::nats_request(&nats, "brain.skill.delete", &get_req).await;
+    let _: serde_json::Value = common::bus_request(&bus, "brain.skill.delete", &get_req).await;
 }
 
 #[tokio::test]
 #[ignore]
 async fn test_skill_search() {
-    let nats = common::connect_nats().await;
+    let bus = common::connect_bus().await;
     let skill_id = common::test_id("e2e-search");
 
     // Save a skill
@@ -67,7 +66,7 @@ async fn test_skill_search() {
         learned_from: None,
         embedding: vec![],
     };
-    let _: SkillSaveResponse = common::nats_request(&nats, "brain.skill.save", &save_req).await;
+    let _: SkillSaveResponse = common::bus_request(&bus, "brain.skill.save", &save_req).await;
 
     // Search
     let search_req = SkillSearchRequest {
@@ -76,7 +75,7 @@ async fn test_skill_search() {
         scope: None,
     };
     let search_resp: SkillSearchResponse =
-        common::nats_request(&nats, "brain.skill.search", &search_req).await;
+        common::bus_request(&bus, "brain.skill.search", &search_req).await;
     assert!(
         search_resp.skills.iter().any(|s| s.id == skill_id),
         "Expected to find skill {} in search results",
@@ -85,20 +84,20 @@ async fn test_skill_search() {
 
     // Cleanup
     let get_req = SkillGetRequest { skill_id };
-    let _: serde_json::Value = common::nats_request(&nats, "brain.skill.delete", &get_req).await;
+    let _: serde_json::Value = common::bus_request(&bus, "brain.skill.delete", &get_req).await;
 }
 
 #[tokio::test]
 #[ignore]
 async fn test_skill_list() {
-    let nats = common::connect_nats().await;
+    let bus = common::connect_bus().await;
 
     let list_req = SkillListRequest {
         source_filter: None,
         limit: Some(100),
     };
     let list_resp: SkillListResponse =
-        common::nats_request(&nats, "brain.skill.list", &list_req).await;
+        common::bus_request(&bus, "brain.skill.list", &list_req).await;
 
     // Verify the response deserializes correctly — the list may be empty on a clean test DB
     let _ = list_resp.skills.len();

@@ -9,11 +9,10 @@ path = "src/main.rs"
 
 [dependencies]
 seidrum-common = { path = "../seidrum-common" }
+seidrum-eventbus = { path = "../seidrum-eventbus" }
 
 # Async runtime
 tokio = { version = "1", features = ["full"] }
-
-# NATS client
 
 # HTTP client for ArangoDB
 reqwest = { version = "0.12", features = ["json", "rustls-tls"] }

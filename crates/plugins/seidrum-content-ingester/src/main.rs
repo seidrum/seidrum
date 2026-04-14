@@ -12,9 +12,9 @@ use tracing::{error, info, warn};
     about = "Seidrum content ingester plugin"
 )]
 struct Cli {
-    /// NATS server URL
-    #[arg(long, env = "NATS_URL", default_value = "nats://localhost:4222")]
-    nats_url: String,
+    /// Bus server URL
+    #[arg(long, env = "BUS_URL", default_value = "ws://127.0.0.1:9000")]
+    bus_url: String,
 
     /// Embedding provider
     #[arg(long, env = "EMBEDDING_PROVIDER", default_value = "openai")]
@@ -106,17 +106,17 @@ async fn main() -> Result<()> {
     }
 
     info!(
-        nats_url = %cli.nats_url,
+        bus_url = %cli.bus_url,
         embedding_provider = %cli.embedding_provider,
         has_api_key,
         "Starting seidrum-content-ingester plugin..."
     );
 
     // Connect to NATS
-    let nats = seidrum_common::bus_client::BusClient::connect(&cli.nats_url, "content-ingester")
+    let nats = seidrum_common::bus_client::BusClient::connect(&cli.bus_url, "content-ingester")
         .await
         .context("failed to connect to NATS")?;
-    info!("Connected to NATS");
+    info!("Connected to bus");
 
     // Register with kernel
     let register = PluginRegister {

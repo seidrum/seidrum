@@ -21,9 +21,9 @@ use crate::inbound::InboundConfig;
 #[derive(Parser)]
 #[command(name = "seidrum-telegram", about = "Seidrum Telegram channel plugin")]
 struct Cli {
-    /// NATS server URL
-    #[arg(long, env = "NATS_URL", default_value = "nats://localhost:4222")]
-    nats_url: String,
+    /// Bus server URL
+    #[arg(long, env = "BUS_URL", default_value = "ws://127.0.0.1:9000")]
+    bus_url: String,
 
     /// Telegram Bot API token
     #[arg(long, env = "TELEGRAM_TOKEN")]
@@ -59,14 +59,14 @@ async fn main() -> Result<()> {
     let allowed_users = parse_allowed_users(&cli.allowed_users);
 
     info!(
-        nats_url = %cli.nats_url,
+        bus_url = %cli.bus_url,
         allowed_users_count = allowed_users.len(),
         "Starting seidrum-telegram plugin..."
     );
 
     // Connect to NATS
-    let nats = BusClient::connect(&cli.nats_url, "telegram").await?;
-    info!("Connected to NATS at {}", cli.nats_url);
+    let nats = BusClient::connect(&cli.bus_url, "telegram").await?;
+    info!("Connected to bus at {}", cli.bus_url);
 
     // Register plugin
     let register = PluginRegister {

@@ -1,6 +1,6 @@
 //! E2E tests for plugin storage (storage.get/set/delete/list).
 //!
-//! Requires: NATS + kernel running with plugin_storage service.
+//! Requires: kernel running with plugin_storage service.
 //! Run: cargo test -p seidrum-e2e -- --ignored
 
 mod common;
@@ -11,9 +11,9 @@ use seidrum_common::events::{
 };
 
 #[tokio::test]
-#[ignore] // Requires NATS + kernel running
+#[ignore] // Requires kernel + kernel running
 async fn test_storage_set_and_get() {
-    let nats = common::connect_nats().await;
+    let bus = common::connect_bus().await;
     let key = common::test_id("e2e-storage");
 
     // Set
@@ -23,7 +23,7 @@ async fn test_storage_set_and_get() {
         key: key.clone(),
         value: serde_json::json!({"hello": "world"}),
     };
-    let set_resp: StorageSetResponse = common::nats_request(&nats, "storage.set", &set_req).await;
+    let set_resp: StorageSetResponse = common::bus_request(&bus, "storage.set", &set_req).await;
     assert!(set_resp.success);
 
     // Get
@@ -32,7 +32,7 @@ async fn test_storage_set_and_get() {
         namespace: "test".into(),
         key: key.clone(),
     };
-    let get_resp: StorageGetResponse = common::nats_request(&nats, "storage.get", &get_req).await;
+    let get_resp: StorageGetResponse = common::bus_request(&bus, "storage.get", &get_req).await;
     assert!(get_resp.found);
     assert_eq!(
         get_resp
@@ -52,19 +52,19 @@ async fn test_storage_set_and_get() {
         key: key.clone(),
     };
     let del_resp: StorageDeleteResponse =
-        common::nats_request(&nats, "storage.delete", &del_req).await;
+        common::bus_request(&bus, "storage.delete", &del_req).await;
     assert!(del_resp.success);
     assert!(del_resp.existed);
 
     // Verify deleted
-    let get_resp2: StorageGetResponse = common::nats_request(&nats, "storage.get", &get_req).await;
+    let get_resp2: StorageGetResponse = common::bus_request(&bus, "storage.get", &get_req).await;
     assert!(!get_resp2.found);
 }
 
 #[tokio::test]
 #[ignore]
 async fn test_storage_list_keys() {
-    let nats = common::connect_nats().await;
+    let bus = common::connect_bus().await;
     let key1 = common::test_id("e2e-list");
     let key2 = common::test_id("e2e-list");
 
@@ -76,7 +76,7 @@ async fn test_storage_list_keys() {
             key: key.clone(),
             value: serde_json::json!(1),
         };
-        let resp: StorageSetResponse = common::nats_request(&nats, "storage.set", &req).await;
+        let resp: StorageSetResponse = common::bus_request(&bus, "storage.set", &req).await;
         assert!(resp.success);
     }
 
@@ -85,8 +85,7 @@ async fn test_storage_list_keys() {
         plugin_id: "e2e-list-test".into(),
         namespace: "test".into(),
     };
-    let list_resp: StorageListResponse =
-        common::nats_request(&nats, "storage.list", &list_req).await;
+    let list_resp: StorageListResponse = common::bus_request(&bus, "storage.list", &list_req).await;
     assert!(list_resp.keys.contains(&key1));
     assert!(list_resp.keys.contains(&key2));
 
@@ -97,6 +96,6 @@ async fn test_storage_list_keys() {
             namespace: "test".into(),
             key: key.clone(),
         };
-        let _: StorageDeleteResponse = common::nats_request(&nats, "storage.delete", &req).await;
+        let _: StorageDeleteResponse = common::bus_request(&bus, "storage.delete", &req).await;
     }
 }

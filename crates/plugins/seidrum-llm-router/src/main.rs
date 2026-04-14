@@ -24,9 +24,9 @@ use context_assembly::{assemble_context, ContextConfig};
 #[derive(Parser)]
 #[command(name = "seidrum-llm-router", about = "Seidrum LLM router plugin")]
 struct Cli {
-    /// NATS server URL
-    #[arg(long, env = "NATS_URL", default_value = "nats://localhost:4222")]
-    nats_url: String,
+    /// Bus server URL
+    #[arg(long, env = "BUS_URL", default_value = "ws://127.0.0.1:9000")]
+    bus_url: String,
 
     /// Default LLM provider to use
     #[arg(long, env = "LLM_PROVIDER", default_value = "google")]
@@ -144,14 +144,14 @@ async fn main() -> Result<()> {
     let cli = Cli::parse();
 
     info!(
-        nats_url = %cli.nats_url,
+        bus_url = %cli.bus_url,
         provider = %cli.provider,
         "Starting seidrum-llm-router plugin..."
     );
 
     // Connect to NATS
-    let nats = seidrum_common::bus_client::BusClient::connect(&cli.nats_url, "llm-router").await?;
-    info!("Connected to NATS");
+    let nats = seidrum_common::bus_client::BusClient::connect(&cli.bus_url, "llm-router").await?;
+    info!("Connected to bus");
 
     // Publish plugin registration
     let register = serde_json::json!({
@@ -253,7 +253,7 @@ async fn main() -> Result<()> {
     Ok(())
 }
 
-/// Pull the next message from an async-nats subscriber.
+/// Pull the next message from a bus subscription.
 async fn futures_next(
     sub: &mut seidrum_common::bus_client::Subscription,
 ) -> Option<seidrum_common::bus_client::Message> {

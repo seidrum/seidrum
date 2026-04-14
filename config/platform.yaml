@@ -1,6 +1,6 @@
 # Seidrum platform configuration
 
-nats_url: nats://localhost:4222
+eventbus_url: ws://localhost:9000
 arango_url: http://localhost:8529
 arango_database: seidrum
 agents_dir: agents/

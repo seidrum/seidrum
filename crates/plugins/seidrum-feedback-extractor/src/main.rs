@@ -24,9 +24,9 @@ use seidrum_common::events::{
     about = "Seidrum feedback extraction and analysis plugin"
 )]
 struct Cli {
-    /// NATS server URL
-    #[arg(long, env = "NATS_URL", default_value = "nats://localhost:4222")]
-    nats_url: String,
+    /// Bus server URL
+    #[arg(long, env = "BUS_URL", default_value = "ws://127.0.0.1:9000")]
+    bus_url: String,
 
     /// Optional LLM provider for ambiguous feedback classification
     /// E.g., "google", "anthropic"
@@ -167,7 +167,7 @@ async fn main() -> Result<()> {
     let cli = Cli::parse();
 
     info!(
-        nats_url = %cli.nats_url,
+        bus_url = %cli.bus_url,
         llm_provider = ?cli.llm_provider,
         response_buffer_size = cli.response_buffer_size,
         heuristic_threshold = cli.heuristic_threshold,
@@ -176,8 +176,8 @@ async fn main() -> Result<()> {
 
     // Connect to NATS
     let nats =
-        seidrum_common::bus_client::BusClient::connect(&cli.nats_url, "feedback-extractor").await?;
-    info!("Connected to NATS");
+        seidrum_common::bus_client::BusClient::connect(&cli.bus_url, "feedback-extractor").await?;
+    info!("Connected to bus");
 
     // Initialize response buffer (LRU cache)
     let response_buffer: Arc<Mutex<LruCache<String, ResponseContext>>> = Arc::new(Mutex::new(

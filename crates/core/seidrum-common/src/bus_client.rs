@@ -1,86 +1,122 @@
 //! Backend-agnostic bus client used by every Seidrum plugin and kernel
 //! service.
 //!
-//! `BusClient` dispatches on the URL scheme at connect time:
-//! - `nats://` → wraps `async_nats::Client` (current production backend)
-//! - `ws://` or `wss://` → wraps [`crate::ws_client::WsClient`]
-//!   (eventbus WebSocket transport — Phase 5 migration target)
-//!
-//! All consumer-facing types ([`Subscription`], [`Message`], [`Subject`])
-//! are the same regardless of backend, so plugin source code does not
-//! change when the kernel switches from NATS to the eventbus.
-//!
-//! **Do not** add an `inner()` escape hatch. That kind of leak is
-//! exactly the technical debt the PR #30 rename was created to remove.
+//! `BusClient` supports two backends:
+//! - **In-process** (`BusClient::from_bus`) — wraps `Arc<dyn EventBus>`
+//!   directly. Used by the kernel so services talk to the bus without
+//!   a network round-trip.
+//! - **WebSocket** (`BusClient::connect("ws://...")`) — wraps
+//!   [`crate::ws_client::WsClient`]. Used by plugins running as
+//!   separate processes that connect to the kernel's WS transport.
 
 use anyhow::{Context, Result};
 use serde::{de::DeserializeOwned, Serialize};
+use std::sync::Arc;
+use std::time::Duration;
 use tracing::{debug, info};
 
 use crate::events::EventEnvelope;
 use crate::ws_client::{WsClient, WsMessage, WsSubject, WsSubscription};
 
 // === Consumer-facing type aliases ===
-//
-// These are now concrete types from ws_client, not async_nats aliases.
-// Both backends produce these same types — the NATS backend converts
-// internally. Phase 5 Step 3 will remove the NATS backend entirely;
-// until then both work side by side.
 
-/// A message received from the bus. Access `.subject`, `.payload`,
-/// `.reply` exactly like the old `async_nats::Message`.
+/// A message received from the bus.
 pub type Message = WsMessage;
 
 /// A subscription handle. Call `.next().await` to receive [`Message`]s.
 pub type Subscription = WsSubscription;
 
-/// A subject string. Just a `String` — can be cloned, displayed, and
-/// passed to `reply_to`.
+/// A subject string.
 pub type Subject = WsSubject;
-
-/// Backend-agnostic client for talking to the Seidrum bus.
-///
-/// Created via [`BusClient::connect`]. Dispatches on URL scheme:
-/// `nats://` uses the NATS backend, `ws://`/`wss://` uses the
-/// eventbus WS transport.
-#[derive(Clone)]
-pub struct BusClient {
-    backend: BackendHandle,
-    /// Default source identifier used when wrapping payloads in
-    /// envelopes via [`Self::publish_envelope`]. Set at connect time.
-    pub source: String,
-}
 
 /// Arc-wrapped backend so `BusClient` is `Clone`.
 #[derive(Clone)]
 enum BackendHandle {
-    Nats(async_nats::Client),
     Ws(WsClient),
+    InProcess(Arc<dyn seidrum_eventbus::EventBus>),
+}
+
+/// Backend-agnostic client for talking to the Seidrum bus.
+#[derive(Clone)]
+pub struct BusClient {
+    backend: BackendHandle,
+    /// Default source identifier stamped onto envelopes.
+    pub source: String,
 }
 
 impl BusClient {
-    /// Connect to the bus. Dispatches on URL scheme:
-    /// - `nats://` → NATS backend (current production)
-    /// - `ws://` or `wss://` → eventbus WS transport (Phase 5)
-    ///
-    /// `source` is the plugin/service id stamped onto envelopes.
-    pub async fn connect(url: &str, source: &str) -> Result<Self> {
-        let backend = if url.starts_with("ws://") || url.starts_with("wss://") {
-            let ws = WsClient::connect(url, source).await?;
-            BackendHandle::Ws(ws)
-        } else {
-            // Default to NATS for nats:// and any other scheme.
-            let client = async_nats::connect(url)
-                .await
-                .with_context(|| format!("failed to connect to bus at {url}"))?;
-            info!(url, source, "connected to bus (NATS backend)");
-            BackendHandle::Nats(client)
-        };
+    /// Maximum number of connection attempts before giving up.
+    const CONNECT_MAX_ATTEMPTS: u32 = 20;
+    /// Initial retry delay (doubles each attempt, capped at 5s).
+    const CONNECT_INITIAL_BACKOFF_MS: u64 = 250;
+    /// Maximum retry delay.
+    const CONNECT_MAX_BACKOFF_MS: u64 = 5000;
 
-        Ok(Self {
-            backend,
+    /// Connect to the bus via WebSocket, retrying with exponential
+    /// backoff if the server isn't up yet.
+    ///
+    /// This handles the common startup-ordering scenario where a
+    /// plugin process starts before the kernel has finished binding
+    /// its WS port. With the default 20 attempts × 250ms→5s backoff,
+    /// the plugin will wait up to ~30s for the kernel to appear.
+    ///
+    /// `url` must be `ws://` or `wss://`.
+    pub async fn connect(url: &str, source: &str) -> Result<Self> {
+        if !url.starts_with("ws://") && !url.starts_with("wss://") {
+            return Err(anyhow::anyhow!(
+                "unsupported bus URL scheme: {url} (expected ws:// or wss://)"
+            ));
+        }
+
+        let mut attempt = 0u32;
+        let mut backoff_ms = Self::CONNECT_INITIAL_BACKOFF_MS;
+
+        loop {
+            attempt += 1;
+            match WsClient::connect(url, source).await {
+                Ok(ws) => {
+                    if attempt > 1 {
+                        info!(
+                            url,
+                            source,
+                            attempts = attempt,
+                            "connected to bus after retries"
+                        );
+                    }
+                    return Ok(Self {
+                        backend: BackendHandle::Ws(ws),
+                        source: source.to_string(),
+                    });
+                }
+                Err(e) => {
+                    if attempt >= Self::CONNECT_MAX_ATTEMPTS {
+                        return Err(e.context(format!(
+                            "failed to connect to bus at {} after {} attempts",
+                            url, attempt
+                        )));
+                    }
+                    debug!(
+                        url,
+                        source,
+                        attempt,
+                        backoff_ms,
+                        error = %e,
+                        "bus not ready, retrying..."
+                    );
+                    tokio::time::sleep(std::time::Duration::from_millis(backoff_ms)).await;
+                    backoff_ms = (backoff_ms * 2).min(Self::CONNECT_MAX_BACKOFF_MS);
+                }
+            }
+        }
+    }
+
+    /// Create a `BusClient` backed by an in-process `EventBus`.
+    pub fn from_bus(bus: Arc<dyn seidrum_eventbus::EventBus>, source: &str) -> Self {
+        info!(source, "BusClient created (in-process backend)");
+        Self {
+            backend: BackendHandle::InProcess(bus),
             source: source.to_string(),
-        })
+        }
     }
 
     /// Publish a serializable payload to a subject.
@@ -95,18 +131,17 @@ impl BusClient {
         subject: impl AsRef<str>,
         payload: impl Into<bytes::Bytes>,
     ) -> Result<()> {
+        let subject_str = subject.as_ref();
+        let bytes: bytes::Bytes = payload.into();
         match &self.backend {
-            BackendHandle::Nats(client) => {
-                let subject = subject.as_ref();
-                client
-                    .publish(subject.to_string(), payload.into())
-                    .await
-                    .with_context(|| format!("failed to publish to {subject}"))?;
-                debug!(subject, "published message");
-            }
             BackendHandle::Ws(ws) => {
-                let bytes: bytes::Bytes = payload.into();
-                ws.publish_bytes(subject, bytes.as_ref()).await?;
+                ws.publish_bytes(subject_str, bytes.as_ref()).await?;
+            }
+            BackendHandle::InProcess(bus) => {
+                bus.publish(subject_str, &bytes)
+                    .await
+                    .map_err(|e| anyhow::anyhow!("publish failed: {}", e))?;
+                debug!(subject = subject_str, "published message (in-process)");
             }
         }
         Ok(())
@@ -145,49 +180,50 @@ impl BusClient {
         subject: impl AsRef<str>,
         payload: impl Into<bytes::Bytes>,
     ) -> Result<Vec<u8>> {
+        let subject_str = subject.as_ref();
+        let bytes: bytes::Bytes = payload.into();
         match &self.backend {
-            BackendHandle::Nats(client) => {
-                let subject = subject.as_ref();
-                let response = client
-                    .request(subject.to_string(), payload.into())
+            BackendHandle::Ws(ws) => ws.request_bytes(subject_str, bytes.as_ref()).await,
+            BackendHandle::InProcess(bus) => {
+                let reply = bus
+                    .request(subject_str, &bytes, Duration::from_secs(5))
                     .await
-                    .with_context(|| format!("bus request to {subject} failed"))?;
-                debug!(subject, "received response");
-                Ok(response.payload.to_vec())
-            }
-            BackendHandle::Ws(ws) => {
-                let bytes: bytes::Bytes = payload.into();
-                ws.request_bytes(subject, bytes.as_ref()).await
+                    .map_err(|e| anyhow::anyhow!("request failed: {}", e))?;
+                Ok(reply)
             }
         }
     }
 
-    /// Subscribe to a subject pattern. Returns a [`Subscription`]
-    /// that yields [`Message`]s via `.next().await`.
+    /// Subscribe to a subject pattern.
     pub async fn subscribe(&self, subject: impl AsRef<str>) -> Result<Subscription> {
+        let subject_str = subject.as_ref();
         match &self.backend {
-            BackendHandle::Nats(client) => {
-                let subject = subject.as_ref();
-                let mut nats_sub = client
-                    .subscribe(subject.to_string())
+            BackendHandle::Ws(ws) => ws.subscribe(subject_str).await,
+            BackendHandle::InProcess(bus) => {
+                let opts = seidrum_eventbus::SubscribeOpts {
+                    priority: 10,
+                    mode: seidrum_eventbus::SubscriptionMode::Async,
+                    channel: seidrum_eventbus::ChannelConfig::InProcess,
+                    timeout: Duration::from_secs(5),
+                    filter: None,
+                };
+                let sub = bus
+                    .subscribe(subject_str, opts)
                     .await
-                    .with_context(|| format!("failed to subscribe to {subject}"))?;
-                info!(subject, "subscribed");
+                    .map_err(|e| anyhow::anyhow!("subscribe failed: {}", e))?;
+                let sub_id = sub.id.clone();
 
-                // Bridge: convert async_nats::Message → WsMessage on
-                // a background task, feeding into an mpsc that the
-                // returned WsSubscription reads from.
+                // Bridge: DispatchedEvent → WsMessage
                 let (tx, rx) = tokio::sync::mpsc::channel::<WsMessage>(256);
-                let sub_id = ulid::Ulid::new().to_string();
+                let mut event_rx = sub.rx;
                 tokio::spawn(async move {
-                    use futures_util::StreamExt;
-                    while let Some(msg) = nats_sub.next().await {
-                        let ws_msg = WsMessage {
-                            subject: msg.subject.to_string(),
-                            payload: msg.payload.clone(),
-                            reply: msg.reply.map(|r| r.to_string()),
+                    while let Some(event) = event_rx.recv().await {
+                        let msg = WsMessage {
+                            subject: event.subject,
+                            payload: bytes::Bytes::from(event.payload),
+                            reply: event.reply_subject,
                         };
-                        if tx.send(ws_msg).await.is_err() {
+                        if tx.send(msg).await.is_err() {
                             break;
                         }
                     }
@@ -195,11 +231,10 @@ impl BusClient {
 
                 Ok(WsSubscription { rx, id: sub_id })
             }
-            BackendHandle::Ws(ws) => ws.subscribe(subject).await,
         }
     }
 
-    /// Reply directly to a captured reply subject.
+    /// Reply to a captured reply subject.
     pub async fn reply_to(
         &self,
         reply_subject: &Subject,
@@ -208,13 +243,11 @@ impl BusClient {
         self.publish_bytes(reply_subject.as_str(), payload).await
     }
 
-    /// Returns `true` if the underlying bus connection is healthy.
+    /// Returns `true` if the bus connection is healthy.
     pub fn is_connected(&self) -> bool {
         match &self.backend {
-            BackendHandle::Nats(client) => {
-                client.connection_state() == async_nats::connection::State::Connected
-            }
             BackendHandle::Ws(ws) => ws.is_connected(),
+            BackendHandle::InProcess(_) => true,
         }
     }
 }

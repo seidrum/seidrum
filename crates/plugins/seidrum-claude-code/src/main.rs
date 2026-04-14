@@ -14,9 +14,9 @@ const PLUGIN_VERSION: &str = "0.1.0";
 #[command(name = "seidrum-claude-code")]
 #[command(about = "Claude Code CLI as an LLM tool and Telegram command")]
 struct Args {
-    /// NATS server URL
-    #[arg(long, env = "NATS_URL", default_value = "nats://127.0.0.1:4222")]
-    nats_url: String,
+    /// Bus server URL
+    #[arg(long, env = "BUS_URL", default_value = "ws://127.0.0.1:9000")]
+    bus_url: String,
 
     /// Default working directory for Claude Code
     #[arg(long, env = "CLAUDE_WORKING_DIR", default_value = ".")]
@@ -84,11 +84,11 @@ async fn main() -> Result<()> {
     info!(plugin = PLUGIN_ID, "Starting Claude Code plugin");
 
     // Connect to NATS
-    let client = seidrum_common::bus_client::BusClient::connect(&args.nats_url, "claude-code")
+    let client = seidrum_common::bus_client::BusClient::connect(&args.bus_url, "claude-code")
         .await
         .context("Failed to connect to NATS")?;
 
-    info!(url = %args.nats_url, "Connected to NATS");
+    info!(url = %args.bus_url, "Connected to bus");
 
     // Register plugin
     let register = PluginRegister {

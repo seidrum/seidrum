@@ -27,9 +27,9 @@ use translator::{
     about = "Seidrum OpenAI LLM provider plugin"
 )]
 struct Cli {
-    /// NATS server URL
-    #[arg(long, env = "NATS_URL", default_value = "nats://localhost:4222")]
-    nats_url: String,
+    /// Bus server URL
+    #[arg(long, env = "BUS_URL", default_value = "ws://127.0.0.1:9000")]
+    bus_url: String,
 
     /// OpenAI API key
     #[arg(long, env = "OPENAI_API_KEY")]
@@ -59,15 +59,15 @@ async fn main() -> Result<()> {
     let cli = Cli::parse();
 
     info!(
-        nats_url = %cli.nats_url,
+        bus_url = %cli.bus_url,
         model = %cli.model,
         max_tool_rounds = cli.max_tool_rounds,
         "Starting seidrum-llm-openai provider plugin..."
     );
 
     // Connect to NATS
-    let nats = seidrum_common::bus_client::BusClient::connect(&cli.nats_url, "llm-openai").await?;
-    info!("Connected to NATS");
+    let nats = seidrum_common::bus_client::BusClient::connect(&cli.bus_url, "llm-openai").await?;
+    info!("Connected to bus");
 
     // Publish plugin registration
     let register = PluginRegister {

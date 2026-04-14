@@ -15,9 +15,9 @@ const PLUGIN_VERSION: &str = "0.1.0";
 #[command(name = "seidrum-event-emitter")]
 #[command(about = "Parses LLM responses for structured actions and emits events")]
 struct Args {
-    /// NATS server URL
-    #[arg(long, env = "NATS_URL", default_value = "nats://127.0.0.1:4222")]
-    nats_url: String,
+    /// Bus server URL
+    #[arg(long, env = "BUS_URL", default_value = "ws://127.0.0.1:9000")]
+    bus_url: String,
 }
 
 /// A task block extracted from LLM response.
@@ -86,11 +86,11 @@ async fn main() -> Result<()> {
     info!(plugin = PLUGIN_ID, "Starting event emitter plugin");
 
     // Connect to NATS
-    let client = seidrum_common::bus_client::BusClient::connect(&args.nats_url, "event-emitter")
+    let client = seidrum_common::bus_client::BusClient::connect(&args.bus_url, "event-emitter")
         .await
         .context("Failed to connect to NATS")?;
 
-    info!(url = %args.nats_url, "Connected to NATS");
+    info!(url = %args.bus_url, "Connected to bus");
 
     // Register plugin
     let register = PluginRegister {

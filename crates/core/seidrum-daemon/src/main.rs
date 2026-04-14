@@ -29,11 +29,12 @@ async fn main() -> Result<()> {
             if let Some(mgr) = &infra {
                 paths.ensure_dirs()?;
                 println!("Starting infrastructure...");
-                mgr.start_nats()?;
+                // eventbus is built into the kernel — no external service to start
                 mgr.start_arango()?;
                 mgr.wait_for_healthy().await?;
                 println!("Infrastructure ready.");
-            } else if !infra::is_nats_reachable(4222) {
+            } else if false {
+                // eventbus check removed
                 println!("No managed infrastructure and NATS is not reachable on :4222.");
                 println!("Run 'seidrum setup' to configure, or start NATS/ArangoDB manually.");
                 return Ok(());
@@ -46,7 +47,7 @@ async fn main() -> Result<()> {
 
             if let Ok(Some(mgr)) = infra::InfraManager::load(&paths) {
                 println!("Stopping infrastructure...");
-                mgr.stop_nats()?;
+                // eventbus shuts down with the kernel
                 mgr.stop_arango()?;
                 println!("Infrastructure stopped.");
             }
@@ -56,16 +57,7 @@ async fn main() -> Result<()> {
             // Show infra status, then daemon/plugin status
             if let Ok(Some(mgr)) = infra::InfraManager::load(&paths) {
                 println!("Infrastructure:");
-                let nats_status = if mgr.is_nats_running() {
-                    match mgr.nats_pid() {
-                        Some(pid) => {
-                            format!("running (PID {}, port {})", pid, mgr.config.nats.port)
-                        }
-                        None => format!("running (port {})", mgr.config.nats.port),
-                    }
-                } else {
-                    "not running".to_string()
-                };
+                println!("  EventBus: built into kernel (no external service)");
                 let arango_status = if mgr.is_arango_running() {
                     format!(
                         "running (container {}, port {})",
@@ -75,7 +67,6 @@ async fn main() -> Result<()> {
                 } else {
                     "not running".to_string()
                 };
-                println!("  NATS:     {}", nats_status);
                 println!("  ArangoDB: {}", arango_status);
                 println!();
             }

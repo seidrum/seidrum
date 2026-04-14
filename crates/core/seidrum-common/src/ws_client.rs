@@ -31,7 +31,7 @@ use tokio::sync::{mpsc, oneshot, Mutex};
 use tracing::{debug, info, warn};
 
 /// A message received from the bus via a WebSocket subscription.
-/// Field names mirror `async_nats::Message` so consumers can switch
+/// Field names mirror the bus Message type so consumers can switch
 /// backends without source-level changes.
 #[derive(Debug, Clone)]
 pub struct WsMessage {
@@ -66,7 +66,7 @@ impl WsSubscription {
 }
 
 /// Subject type alias — just a `String` for the WS backend. Matches
-/// the `async_nats::Subject` alias shape.
+/// the bus Subject type shape.
 pub type WsSubject = String;
 
 // === Wire protocol types (must match seidrum-eventbus ws.rs) ===

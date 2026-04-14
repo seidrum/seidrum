@@ -41,9 +41,9 @@ const PLUGIN_VERSION: &str = "0.1.0";
 #[command(name = "seidrum-api-gateway")]
 #[command(about = "HTTP/WebSocket API gateway for external Seidrum plugins")]
 struct Cli {
-    /// NATS server URL
-    #[arg(long, env = "NATS_URL", default_value = "nats://127.0.0.1:4222")]
-    nats_url: String,
+    /// Bus server URL
+    #[arg(long, env = "BUS_URL", default_value = "ws://127.0.0.1:9000")]
+    bus_url: String,
 
     /// Listen address for the HTTP/WebSocket server
     #[arg(long, env = "GATEWAY_LISTEN_ADDR", default_value = "0.0.0.0:8080")]
@@ -97,8 +97,8 @@ async fn main() -> Result<()> {
     info!(plugin = PLUGIN_ID, "Starting API gateway");
 
     // Connect to NATS
-    let nats = BusClient::connect(&cli.nats_url, PLUGIN_ID).await?;
-    info!(url = %cli.nats_url, "Connected to NATS");
+    let nats = BusClient::connect(&cli.bus_url, PLUGIN_ID).await?;
+    info!(url = %cli.bus_url, "Connected to bus");
 
     // Register self as a plugin
     let register = PluginRegister {
