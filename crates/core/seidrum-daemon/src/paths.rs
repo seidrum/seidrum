@@ -60,9 +60,9 @@ impl SeidrumPaths {
         self.seidrum_home.join("data")
     }
 
-    /// NATS JetStream data directory (~/.seidrum/data/nats/).
+    /// Eventbus data directory (~/.seidrum/data/nats/).
     pub fn nats_data_dir(&self) -> PathBuf {
-        self.seidrum_home.join("data").join("nats")
+        self.seidrum_home.join("data").join("eventbus")
     }
 
     /// Infrastructure config file (~/.seidrum/infra.yaml).
@@ -70,9 +70,9 @@ impl SeidrumPaths {
         self.seidrum_home.join("infra.yaml")
     }
 
-    /// NATS server PID file.
+    /// Kernel PID file.
     pub fn nats_pid_file(&self) -> PathBuf {
-        self.pid_dir.join("nats-server.pid")
+        self.pid_dir.join("kernel.pid")
     }
 
     /// ArangoDB container ID file.

@@ -16,9 +16,9 @@ const PLUGIN_VERSION: &str = "0.1.0";
 #[command(name = "seidrum-entity-extractor")]
 #[command(about = "Extracts entities from stored content using LLM")]
 struct Args {
-    /// NATS server URL
-    #[arg(long, env = "NATS_URL", default_value = "nats://127.0.0.1:4222")]
-    nats_url: String,
+    /// Bus server URL
+    #[arg(long, env = "BUS_URL", default_value = "ws://127.0.0.1:9000")]
+    bus_url: String,
 
     /// Google API key (falls back to OpenClaw auth-profiles.json)
     #[arg(long, env = "GOOGLE_API_KEY")]
@@ -125,11 +125,11 @@ async fn main() -> Result<()> {
     );
 
     // Connect to NATS
-    let client = seidrum_common::bus_client::BusClient::connect(&args.nats_url, "entity-extractor")
+    let client = seidrum_common::bus_client::BusClient::connect(&args.bus_url, "entity-extractor")
         .await
         .context("Failed to connect to NATS")?;
 
-    info!(url = %args.nats_url, "Connected to NATS");
+    info!(url = %args.bus_url, "Connected to NATS");
 
     // Register plugin
     let register = PluginRegister {

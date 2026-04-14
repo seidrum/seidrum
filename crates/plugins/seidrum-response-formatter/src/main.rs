@@ -16,9 +16,9 @@ use seidrum_common::events::{ChannelOutbound, EventEnvelope, LlmResponse, Plugin
     about = "Seidrum response formatter plugin"
 )]
 struct Cli {
-    /// NATS server URL
-    #[arg(long, env = "NATS_URL", default_value = "nats://localhost:4222")]
-    nats_url: String,
+    /// Bus server URL
+    #[arg(long, env = "BUS_URL", default_value = "ws://127.0.0.1:9000")]
+    bus_url: String,
 }
 
 // ---------------------------------------------------------------------------
@@ -125,10 +125,10 @@ async fn main() -> Result<()> {
 
     let cli = Cli::parse();
 
-    info!(nats_url = %cli.nats_url, "Starting seidrum-response-formatter plugin...");
+    info!(bus_url = %cli.bus_url, "Starting seidrum-response-formatter plugin...");
 
     // Connect to NATS
-    let nats = BusClient::connect(&cli.nats_url, "response-formatter").await?;
+    let nats = BusClient::connect(&cli.bus_url, "response-formatter").await?;
 
     // Publish plugin registration
     let register = PluginRegister {

@@ -1,5 +1,5 @@
 //! Process supervisor: spawn, monitor, restart, and gracefully shut down
-//! the kernel and all enabled plugins. Supports NATS-based plugin lifecycle control.
+//! the kernel and all enabled plugins. Supports bus-based plugin lifecycle control.
 
 #[cfg(not(unix))]
 compile_error!("seidrum-daemon requires a Unix system (Linux or macOS)");
@@ -24,13 +24,13 @@ const BACKOFF_WINDOW: Duration = Duration::from_secs(300);
 /// Grace period for SIGTERM before SIGKILL.
 const SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(10);
 
-/// NATS request to start a plugin.
+/// Bus request to start a plugin.
 #[derive(Debug, Serialize, Deserialize, Clone)]
 struct PluginStartCommand {
     plugin: String,
 }
 
-/// NATS request to stop a plugin.
+/// Bus request to stop a plugin.
 #[derive(Debug, Serialize, Deserialize, Clone)]
 struct PluginStopCommand {
     plugin: String,
@@ -227,7 +227,7 @@ pub async fn start(paths: &SeidrumPaths) -> Result<()> {
     kernel.spawn(paths)?;
     processes.push(kernel);
 
-    // Wait for kernel to connect to NATS
+    // Wait for kernel to start
     tokio::time::sleep(Duration::from_secs(2)).await;
 
     // 2. Load plugins.yaml and start enabled plugins
@@ -267,23 +267,22 @@ pub async fn start(paths: &SeidrumPaths) -> Result<()> {
         "All processes started, entering monitoring loop"
     );
 
-    // 3. Connect to NATS and subscribe to plugin control subjects
-    let nats_url =
-        std::env::var("NATS_URL").unwrap_or_else(|_| "nats://localhost:4222".to_string());
-    let nats_client =
-        match seidrum_common::bus_client::BusClient::connect(&nats_url, "daemon").await {
-            Ok(client) => {
-                info!("Connected to bus for plugin lifecycle control");
-                Some(client)
-            }
-            Err(e) => {
-                warn!(
-                    "Failed to connect to bus ({}), plugin lifecycle control unavailable",
-                    e
-                );
-                None
-            }
-        };
+    // 3. Connect to bus and subscribe to plugin control subjects
+    let bus_url = std::env::var("BUS_URL").unwrap_or_else(|_| "nats://localhost:4222".to_string());
+    let nats_client = match seidrum_common::bus_client::BusClient::connect(&bus_url, "daemon").await
+    {
+        Ok(client) => {
+            info!("Connected to bus for plugin lifecycle control");
+            Some(client)
+        }
+        Err(e) => {
+            warn!(
+                "Failed to connect to bus ({}), plugin lifecycle control unavailable",
+                e
+            );
+            None
+        }
+    };
 
     let mut start_sub = None;
     let mut stop_sub = None;
@@ -304,7 +303,7 @@ pub async fn start(paths: &SeidrumPaths) -> Result<()> {
         }
     }
 
-    // 4. Monitoring loop — handle SIGINT, SIGTERM, process checks, and NATS commands
+    // 4. Monitoring loop — handle SIGINT, SIGTERM, process checks, and bus commands
     let mut sigterm = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
         .context("Failed to register SIGTERM handler")?;
 
@@ -517,7 +516,7 @@ pub async fn stop(paths: &SeidrumPaths) -> Result<()> {
     Ok(())
 }
 
-/// Handle a plugin start request from NATS.
+/// Handle a plugin start request from bus.
 async fn handle_plugin_start(
     msg: &seidrum_common::bus_client::Message,
     processes: &mut Vec<ManagedProcess>,
@@ -606,7 +605,7 @@ async fn handle_plugin_start(
 
     match proc.spawn(paths) {
         Ok(()) => {
-            info!(name = %plugin_name, "Plugin started via NATS");
+            info!(name = %plugin_name, "Plugin started via bus");
             // Check if there's already an entry for this plugin name and update it instead of always pushing
             if let Some(existing) = processes.iter_mut().find(|p| p.name == *plugin_name) {
                 *existing = proc;
@@ -624,7 +623,7 @@ async fn handle_plugin_start(
             }
         }
         Err(e) => {
-            error!(name = %plugin_name, error = %e, "Failed to start plugin via NATS");
+            error!(name = %plugin_name, error = %e, "Failed to start plugin via bus");
             let response = PluginCommandResponse {
                 success: false,
                 message: format!("Failed to start plugin: {}", e),
@@ -638,7 +637,7 @@ async fn handle_plugin_start(
     }
 }
 
-/// Handle a plugin stop request from NATS.
+/// Handle a plugin stop request from bus.
 async fn handle_plugin_stop(
     msg: &seidrum_common::bus_client::Message,
     processes: &mut Vec<ManagedProcess>,
@@ -721,7 +720,7 @@ async fn handle_plugin_stop(
     // Write stopped marker so daemon doesn't restart it
     let _ = std::fs::write(paths.plugin_stopped_file(plugin_name), "");
 
-    info!(name = %plugin_name, %pid, "Sending SIGTERM to plugin via NATS");
+    info!(name = %plugin_name, %pid, "Sending SIGTERM to plugin via bus");
     send_sigterm(pid as u32);
 
     // Wait for graceful shutdown
@@ -738,7 +737,7 @@ async fn handle_plugin_stop(
                     .reply_to(reply, serde_json::to_vec(&response).unwrap_or_default())
                     .await;
             }
-            info!(name = %plugin_name, "Plugin stopped via NATS");
+            info!(name = %plugin_name, "Plugin stopped via bus");
             // Remove entry from processes vector
             processes.retain(|p| p.name != *plugin_name);
             return;
@@ -759,7 +758,7 @@ async fn handle_plugin_stop(
             .reply_to(reply, serde_json::to_vec(&response).unwrap_or_default())
             .await;
     }
-    info!(name = %plugin_name, "Plugin killed via NATS");
+    info!(name = %plugin_name, "Plugin killed via bus");
     // Remove entry from processes vector
     processes.retain(|p| p.name != *plugin_name);
 }

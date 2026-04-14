@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## What This Is
 
-Seidrum is an event-driven personal AI agent platform. Rust kernel + NATS JetStream + ArangoDB knowledge graph + plugin architecture. Everything is a plugin — independent processes that connect via NATS, declare consumed/produced event types, and self-wire.
+Seidrum is an event-driven personal AI agent platform. Rust kernel + seidrum-eventbus + ArangoDB knowledge graph + plugin architecture. Everything is a plugin — independent processes that connect via the eventbus (WebSocket), declare consumed/produced event types, and self-wire.
 
 ## Build Commands
 
@@ -73,7 +73,7 @@ Plugins never access ArangoDB directly — all brain operations go through bus r
 ### Configuration Files
 
 - `.env`: Secrets (API keys, tokens, passwords)
-- `config/platform.yaml`: Kernel config (NATS URL, ArangoDB connection, directories)
+- `config/platform.yaml`: Kernel config (eventbus URL, ArangoDB connection, directories)
 - `agents/*.yaml`: Agent definitions (prompt, tools, scope)
 - `workflows/*.yaml`: Workflow definitions (trigger, steps, routing)
 - `prompts/*.md`: Tera-templated system prompts
@@ -81,8 +81,8 @@ Plugins never access ArangoDB directly — all brain operations go through bus r
 
 ### Infrastructure
 
-- `docker-compose.yml`: Full stack (NATS + ArangoDB + kernel + all plugins)
-- `docker-compose.test.yml`: Minimal (NATS + ArangoDB only, for e2e tests)
+- `docker-compose.yml`: Full stack (ArangoDB + kernel + all plugins)
+- `docker-compose.test.yml`: Minimal (ArangoDB + kernel, for e2e tests)
 
 ## Documentation
 
@@ -101,7 +101,7 @@ Design docs in `docs/` — read the relevant doc before implementing:
 - Use `tracing` for logging, never `println!` in library/service code
 - Error handling: `anyhow::Result` for binaries, `thiserror` for library errors
 - No `unwrap()` in production code — use proper error propagation
-- All brain access from plugins goes through NATS request/reply to kernel
+- All brain access from plugins goes through bus request/reply to kernel
 - Plugins register via `plugin.register` and deregister via `plugin.deregister`
 - Capabilities register via `capability.register` with kind `"tool"`, `"command"`, or `"both"`
 - Scope enforcement on every brain query — ScopeService filters by scope field

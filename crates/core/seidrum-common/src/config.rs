@@ -11,8 +11,10 @@ use std::path::Path;
 /// Top-level platform configuration.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PlatformConfig {
-    /// NATS server URL.
-    pub nats_url: String,
+    /// Eventbus WebSocket URL for remote plugins.
+    /// Accepts the old `nats_url` key for backwards compatibility.
+    #[serde(alias = "nats_url")]
+    pub eventbus_url: String,
 
     /// ArangoDB server URL.
     pub arango_url: String,
@@ -329,11 +331,11 @@ mod tests {
     #[test]
     fn test_platform_config_defaults() {
         let yaml = r#"
-nats_url: nats://localhost:4222
+eventbus_url: ws://localhost:9000
 arango_url: http://localhost:8529
 "#;
         let config: PlatformConfig = serde_yaml::from_str(yaml).unwrap();
-        assert_eq!(config.nats_url, "nats://localhost:4222");
+        assert_eq!(config.eventbus_url, "ws://localhost:9000");
         assert_eq!(config.arango_url, "http://localhost:8529");
         assert_eq!(config.arango_database, "seidrum");
         assert_eq!(config.agents_dir, "agents/");
@@ -343,7 +345,7 @@ arango_url: http://localhost:8529
     #[test]
     fn test_platform_config_overrides() {
         let yaml = r#"
-nats_url: nats://nats:4222
+eventbus_url: ws://kernel:9000
 arango_url: http://arangodb:8529
 arango_database: my_db
 agents_dir: my_agents/
@@ -421,7 +423,7 @@ agent:
     #[test]
     fn test_platform_config_workflows_dir_default() {
         let yaml = r#"
-nats_url: nats://localhost:4222
+eventbus_url: ws://localhost:9000
 arango_url: http://localhost:8529
 "#;
         let config: PlatformConfig = serde_yaml::from_str(yaml).unwrap();

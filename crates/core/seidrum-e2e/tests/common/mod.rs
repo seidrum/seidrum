@@ -3,15 +3,15 @@
 use std::time::Duration;
 
 /// Connect to the bus using env vars or defaults.
-pub async fn connect_nats() -> seidrum_common::bus_client::BusClient {
-    let url = std::env::var("TEST_NATS_URL").unwrap_or_else(|_| "nats://localhost:4222".into());
+pub async fn connect_bus() -> seidrum_common::bus_client::BusClient {
+    let url = std::env::var("TEST_BUS_URL").unwrap_or_else(|_| "ws://localhost:9000".into());
     seidrum_common::bus_client::BusClient::connect(&url, "e2e-test")
         .await
         .expect("Failed to connect to bus. Is it running?")
 }
 
 /// Bus request/reply helper with timeout.
-pub async fn nats_request<T: serde::Serialize, R: serde::de::DeserializeOwned>(
+pub async fn bus_request<T: serde::Serialize, R: serde::de::DeserializeOwned>(
     nats: &seidrum_common::bus_client::BusClient,
     subject: &str,
     payload: &T,

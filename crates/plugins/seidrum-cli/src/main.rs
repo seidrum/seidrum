@@ -10,9 +10,9 @@ use tracing::{error, info};
 #[derive(Parser)]
 #[command(name = "seidrum-cli", about = "Seidrum CLI channel plugin")]
 struct Cli {
-    /// NATS server URL
-    #[arg(long, env = "NATS_URL", default_value = "nats://localhost:4222")]
-    nats_url: String,
+    /// Bus server URL
+    #[arg(long, env = "BUS_URL", default_value = "ws://127.0.0.1:9000")]
+    bus_url: String,
 }
 
 #[tokio::main]
@@ -21,10 +21,10 @@ async fn main() -> Result<()> {
 
     let cli = Cli::parse();
 
-    info!(nats_url = %cli.nats_url, "Starting seidrum-cli plugin...");
+    info!(bus_url = %cli.bus_url, "Starting seidrum-cli plugin...");
 
     // Connect to NATS
-    let nats = BusClient::connect(&cli.nats_url, "cli").await?;
+    let nats = BusClient::connect(&cli.bus_url, "cli").await?;
 
     // Register with kernel
     let registration = PluginRegister {
