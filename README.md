@@ -149,7 +149,7 @@ docker compose up -d
 ```
 seidrum/
 ├── crates/
-│   ├── seidrum-common/        # Shared types, events, NATS utilities
+│   ├── seidrum-common/        # Shared types, events, bus utilities
 │   ├── seidrum-kernel/        # Core services (brain, registry, scheduler)
 │   ├── seidrum-daemon/        # Unified CLI + process supervisor (`seidrum` binary)
 │   └── plugins/
@@ -190,7 +190,7 @@ use seidrum_common::bus_client::BusClient;
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
-    let nats = BusClient::connect("ws://localhost:9000", "my-plugin").await?;
+    let bus = BusClient::connect("ws://localhost:9000", "my-plugin").await?;
 
     // Register with the kernel
     let register = PluginRegister {
@@ -217,7 +217,7 @@ async fn main() -> anyhow::Result<()> {
 
 ### Agent consciousness
 
-Agents in Seidrum are not request-response handlers -- they are persistent, autonomous processes. Each agent runs a **consciousness loop** that continuously processes events from a dedicated NATS stream (`agent.{id}.consciousness`). Events include user messages, subscribed system events, self-scheduled wake-ups, and messages from other agents.
+Agents in Seidrum are not request-response handlers -- they are persistent, autonomous processes. Each agent runs a **consciousness loop** that continuously processes events from a dedicated eventbus stream (`agent.{id}.consciousness`). Events include user messages, subscribed system events, self-scheduled wake-ups, and messages from other agents.
 
 **Built-in capabilities** available to every agent: `brain-query`, `subscribe-events`, `unsubscribe-events`, `delegate-task`, `schedule-wake`, `send-notification`, `get-conversation`, `list-conversations`, `search-skills`, `load-skill`, `save-skill`.
 

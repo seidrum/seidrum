@@ -116,11 +116,11 @@ Stops all plugins, the kernel and ArangoDB.
 
 ## Power-user mode
 
-If you prefer to manage NATS and ArangoDB yourself (e.g., running on a remote server), just start them before running `seidrum start`. It will detect the running services and skip managed infrastructure automatically.
+If you prefer to manage ArangoDB yourself (e.g., running on a remote server), just start them before running `seidrum start`. It will detect the running services and skip managed infrastructure automatically.
 
 ## Troubleshooting
 
-**Port 4222 or 8529 already in use**: Another NATS or ArangoDB instance is running. Either stop it, or Seidrum will detect it and use the existing one.
+**Port 8529 already in use**: Another ArangoDB instance is running. Either stop it, or Seidrum will detect it and use the existing one.
 
 **ArangoDB container won't start**: Check Docker is running (`docker info`). Check logs: `docker logs seidrum-arangodb`.
 
@@ -134,7 +134,7 @@ If you prefer to manage NATS and ArangoDB yourself (e.g., running on a remote se
 
 | Path | Purpose |
 |------|---------|
-| `~/.seidrum/bin/` | Downloaded NATS binary |
+| `~/.seidrum/bin/` | Kernel binary |
 | `~/.seidrum/data/nats/` | seidrum-eventbus data |
 | `~/.seidrum/logs/` | Process log files |
 | `~/.seidrum/pids/` | PID files and metadata |

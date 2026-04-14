@@ -23,7 +23,9 @@ async fn main() -> anyhow::Result<()> {
         consumes: vec!["channel.*.inbound".into()],
         produces: vec!["my-plugin.processed".into()],
         health_subject: "plugin.my-plugin.health".into(),
-        ..Default::default()
+        consumed_event_types: vec![],
+        produced_event_types: vec![],
+        config_schema: None,
     };
     bus.publish_envelope("plugin.register", None, None, &register).await?;
 
