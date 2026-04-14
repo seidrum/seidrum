@@ -150,7 +150,7 @@ agent:
 
 ## Pipeline Semantics
 
-- **triggers:** NATS subjects that start the pipeline. Supports wildcards.
+- **triggers:** bus subjects that start the pipeline. Supports wildcards.
 - **steps:** Sequential. Each step's `consumes` must match the previous step's
   `produces` (or `trigger` for the first step).
 - **background:** Async. Triggered by brain events, not by the main pipeline.

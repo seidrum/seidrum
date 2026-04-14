@@ -106,12 +106,12 @@ Learned preferences (from feedback) needed to influence the agent's behavior on 
 
 ### Decision
 
-Before each LLM call, the consciousness service queries for preferences via NATS request/reply (with timeout). Retrieved preferences are formatted as a structured section in the system prompt and injected before sending the request to the LLM provider. The consciousness service also subscribes to `agent.feedback` events and stores new preferences as brain facts.
+Before each LLM call, the consciousness service queries for preferences via bus request/reply (with timeout). Retrieved preferences are formatted as a structured section in the system prompt and injected before sending the request to the LLM provider. The consciousness service also subscribes to `agent.feedback` events and stores new preferences as brain facts.
 
 ### Rationale
 
 - **Simplicity:** System prompt injection works with any LLM provider (OpenAI, Anthropic, local Ollama). No provider-specific preference handling required.
-- **Non-blocking:** NATS request/reply with a 5-second timeout ensures preferences don't delay conversation flow if the brain service is unavailable.
+- **Non-blocking:** bus request/reply with a 5-second timeout ensures preferences don't delay conversation flow if the brain service is unavailable.
 - **Persistence:** Preferences stored as brain facts participate in confidence decay (stale preferences fade) and scope filtering (preferences are scoped to agent + user).
 - **Queryability:** Preferences are queryable via the brain API, enabling UI display ("Your preferences: be concise, explain technical jargon").
 

@@ -45,7 +45,7 @@ seidrum start
 ```
 
 This starts:
-- NATS (native binary, port 4222)
+- eventbus (built into kernel, WS port 9000)
 - ArangoDB (Docker container, port 8529)
 - Kernel (brain, registries, workflow engine)
 - All enabled plugins
@@ -59,7 +59,7 @@ seidrum status
 You should see:
 ```
 Infrastructure:
-  NATS:     running (PID 12345, port 4222)
+  EventBus: running (built into kernel, WS on :9000)
   ArangoDB: running (container seidrum-arangodb, port 8529)
 
 Seidrum daemon: running (PID 67890)
@@ -112,7 +112,7 @@ seidrum plugin restart llm-router
 seidrum stop
 ```
 
-Stops all plugins, the kernel, NATS, and ArangoDB.
+Stops all plugins, the kernel and ArangoDB.
 
 ## Power-user mode
 
@@ -135,7 +135,7 @@ If you prefer to manage NATS and ArangoDB yourself (e.g., running on a remote se
 | Path | Purpose |
 |------|---------|
 | `~/.seidrum/bin/` | Downloaded NATS binary |
-| `~/.seidrum/data/nats/` | NATS JetStream data |
+| `~/.seidrum/data/nats/` | seidrum-eventbus data |
 | `~/.seidrum/logs/` | Process log files |
 | `~/.seidrum/pids/` | PID files and metadata |
 | `~/.seidrum/infra.yaml` | Infrastructure configuration |

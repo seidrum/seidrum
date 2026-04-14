@@ -34,7 +34,7 @@ You are an agent running inside Seidrum, an event-driven AI platform.
 - Your thinking is stored as an inner monologue for continuity across sessions
 
 ## Built-in capabilities
-- subscribe-events: Watch for specific NATS event patterns
+- subscribe-events: Watch for specific bus event patterns
 - unsubscribe-events: Stop watching for events
 - delegate-task: Ask another agent to handle a task
 - schedule-wake: Set a timer to resume work later
@@ -141,7 +141,7 @@ Key properties:
 
 ### The Consciousness Loop
 
-Every agent has an internal event stream — its "consciousness." This is a NATS subject (`agent.{id}.consciousness`) where events arrive that the agent should be aware of, even when no user is talking to it.
+Every agent has an internal event stream — its "consciousness." This is a bus subject (`agent.{id}.consciousness`) where events arrive that the agent should be aware of, even when no user is talking to it.
 
 Events that feed the consciousness:
 
@@ -373,7 +373,7 @@ None of this required the user to initiate a conversation. The agent observed ev
                     │     Agent Consciousness Loop     │
                     │                                  │
   Events ──────────►  Receive event                   │
-  (NATS subject:   │  │                               │
+  (bus subject:   │  │                               │
    agent.{id}.     │  ├── Is this relevant? (scope)   │
    consciousness)  │  ├── Load conversation context   │
                     │  ├── Prepend system prompt       │
@@ -403,7 +403,7 @@ These are always available to every agent. They are not registered via the capab
 
 | Capability | Description |
 |-----------|-------------|
-| `subscribe-events` | Watch for NATS event patterns. Optional `duration_seconds` for auto-expiry. |
+| `subscribe-events` | Watch for bus event patterns. Optional `duration_seconds` for auto-expiry. |
 | `unsubscribe-events` | Stop watching for events by subject pattern. |
 | `delegate-task` | Create a conversation with another agent. Specify target agent ID and message. |
 | `schedule-wake` | Set a timer. Specify delay, reason, and arbitrary context JSON. |

@@ -4,12 +4,12 @@
 
 Seidrum is a systems application: a long-running kernel daemon plus independent
 plugin processes. Rust for the kernel and core plugins. Plugins can be written
-in any language that speaks NATS.
+in any language that speaks the bus protocol.
 
 **Why Rust:**
 - Single static binary, no runtime, no GC.
 - Predictable latency in the event loop.
-- Native async with tokio for concurrent NATS handling.
+- Native async with tokio for concurrent event handling.
 - Serde for typed JSON serialization of all events.
 - ~15MB binaries. ~20MB Docker images from scratch.
 - Cross-compile to ARM for Raspberry Pi deployment.
@@ -20,7 +20,7 @@ in any language that speaks NATS.
 
 Only two infrastructure services:
 
-### NATS JetStream
+### seidrum-eventbus
 - **Role:** Event backbone. All inter-plugin communication.
 - **License:** Apache 2.0
 - **Image:** `nats:latest` (~20 MB)
@@ -31,7 +31,7 @@ Only two infrastructure services:
 - **Role:** Knowledge graph (brain). Graph + document + KV + vector + full-text.
 - **License:** Apache 2.0
 - **Image:** `arangodb:3.12` (~400 MB)
-- **Only the kernel connects to ArangoDB.** Plugins access via NATS.
+- **Only the kernel connects to ArangoDB.** Plugins access via bus.
 
 **No Redis. No LiteLLM.** LLM routing is handled by the llm-router plugin
 which calls provider APIs directly via reqwest. No Python in the stack.
@@ -45,8 +45,8 @@ which calls provider APIs directly via reqwest. No Python in the stack.
 # Async runtime
 tokio = { version = "1", features = ["full"] }
 
-# NATS client (official, async)
-async-nats = "0.38"
+# BusClient (official, async)
+seidrum-eventbus = "0.38"
 
 # HTTP client for ArangoDB
 reqwest = { version = "0.12", features = ["json", "rustls-tls"] }
@@ -87,7 +87,7 @@ Each plugin is its own Cargo binary. They share a common crate
 ```toml
 # seidrum-common/Cargo.toml
 [dependencies]
-async-nats = "0.38"
+seidrum-eventbus = "0.38"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 tokio = { version = "1", features = ["full"] }
@@ -222,7 +222,7 @@ services:
       dockerfile: crates/seidrum-kernel/Dockerfile
     command: ["serve"]
     environment:
-      NATS_URL: nats://nats:4222
+      BUS_URL: ws://kernel:9000
       ARANGO_URL: http://arangodb:8529
       ARANGO_PASSWORD: ${ARANGO_PASSWORD}
     depends_on: [nats, arangodb]
@@ -234,7 +234,7 @@ services:
       context: .
       dockerfile: crates/plugins/seidrum-telegram/Dockerfile
     environment:
-      NATS_URL: nats://nats:4222
+      BUS_URL: ws://kernel:9000
       TELEGRAM_TOKEN: ${TELEGRAM_TOKEN}
       TELEGRAM_ALLOWED_USERS: ${TELEGRAM_ALLOWED_USERS}
     depends_on: [nats]
@@ -245,7 +245,7 @@ services:
       context: .
       dockerfile: crates/plugins/seidrum-llm-router/Dockerfile
     environment:
-      NATS_URL: nats://nats:4222
+      BUS_URL: ws://kernel:9000
       ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY}
       OPENAI_API_KEY: ${OPENAI_API_KEY}
       OLLAMA_URL: ${OLLAMA_URL:-}
@@ -257,7 +257,7 @@ services:
       context: .
       dockerfile: crates/plugins/seidrum-content-ingester/Dockerfile
     environment:
-      NATS_URL: nats://nats:4222
+      BUS_URL: ws://kernel:9000
       EMBEDDING_PROVIDER: ${EMBEDDING_PROVIDER:-openai}
       OPENAI_API_KEY: ${OPENAI_API_KEY}
     depends_on: [nats]
@@ -268,7 +268,7 @@ services:
       context: .
       dockerfile: crates/plugins/seidrum-entity-extractor/Dockerfile
     environment:
-      NATS_URL: nats://nats:4222
+      BUS_URL: ws://kernel:9000
       ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY}
     depends_on: [nats]
     restart: unless-stopped
@@ -278,7 +278,7 @@ services:
       context: .
       dockerfile: crates/plugins/seidrum-fact-extractor/Dockerfile
     environment:
-      NATS_URL: nats://nats:4222
+      BUS_URL: ws://kernel:9000
       ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY}
     depends_on: [nats]
     restart: unless-stopped
@@ -288,7 +288,7 @@ services:
       context: .
       dockerfile: crates/plugins/seidrum-graph-context-loader/Dockerfile
     environment:
-      NATS_URL: nats://nats:4222
+      BUS_URL: ws://kernel:9000
     depends_on: [nats]
     restart: unless-stopped
 
@@ -297,7 +297,7 @@ services:
       context: .
       dockerfile: crates/plugins/seidrum-scope-classifier/Dockerfile
     environment:
-      NATS_URL: nats://nats:4222
+      BUS_URL: ws://kernel:9000
       ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY}
     depends_on: [nats]
     restart: unless-stopped
@@ -307,7 +307,7 @@ services:
       context: .
       dockerfile: crates/plugins/seidrum-response-formatter/Dockerfile
     environment:
-      NATS_URL: nats://nats:4222
+      BUS_URL: ws://kernel:9000
     depends_on: [nats]
     restart: unless-stopped
 
@@ -316,7 +316,7 @@ services:
       context: .
       dockerfile: crates/plugins/seidrum-event-emitter/Dockerfile
     environment:
-      NATS_URL: nats://nats:4222
+      BUS_URL: ws://kernel:9000
     depends_on: [nats]
     restart: unless-stopped
 
@@ -325,7 +325,7 @@ services:
       context: .
       dockerfile: crates/plugins/seidrum-task-detector/Dockerfile
     environment:
-      NATS_URL: nats://nats:4222
+      BUS_URL: ws://kernel:9000
       ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY}
     depends_on: [nats]
     restart: unless-stopped
@@ -361,7 +361,7 @@ Each plugin image: **~15-20 MB**.
 | Component            | RAM       | CPU     |
 |----------------------|-----------|---------|
 | Kernel               | ~30 MB    | minimal |
-| NATS                 | ~50 MB    | minimal |
+| EventBus             | ~10 MB    | embedded in kernel |
 | ArangoDB             | ~2-4 GB   | 1 core  |
 | All plugins combined | ~200 MB   | minimal |
 | **Total**            | **~2.5-4.5 GB** | **2 cores** |
@@ -376,7 +376,7 @@ Runs on a 4GB VPS. ArangoDB is the only memory-hungry component.
 |-----------------|------------------|-------------|------------|
 | Kernel          | Rust             | Your own    | ~15 MB     |
 | Each plugin     | Rust             | Your own    | ~15 MB     |
-| Event bus       | NATS JetStream   | Apache 2.0  | ~20 MB     |
+| Event bus       | seidrum-eventbus   | Apache 2.0  | ~20 MB     |
 | Knowledge graph | ArangoDB 3.12    | Apache 2.0  | ~400 MB    |
 | Telegram        | teloxide (in plugin) | MIT     | compiled in|
 

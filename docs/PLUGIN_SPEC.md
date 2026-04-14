@@ -5,7 +5,7 @@
 Everything outside the kernel is a plugin. There is one plugin interface.
 A plugin is a process that:
 
-1. Connects to NATS
+1. Connects to the bus
 2. Registers itself (declares what it consumes and produces)
 3. Subscribes to its declared event types
 4. Processes events and publishes results
@@ -25,7 +25,7 @@ plugin:
   id: telegram
   name: Telegram Channel
   version: 0.1.0
-  description: Bridges Telegram Bot API to NATS events
+  description: Bridges Telegram Bot API to bus events
 
   consumes:
     - channel.telegram.outbound
@@ -550,7 +550,7 @@ Env:
 ### Plugin Storage (Kernel Service)
 
 > **Note:** Plugin storage is not a plugin — it is a kernel-provided service.
-> It offers a persistent key-value store that any plugin can use via NATS
+> It offers a persistent key-value store that any plugin can use via bus
 > request/reply. This avoids plugins needing their own database connections.
 >
 > **Subjects:**
@@ -610,7 +610,7 @@ and [EVENT_CATALOG.md](EVENT_CATALOG.md) for the full REST API reference.
 
 **Audit Logging** (`audit.rs`):
 - In-memory ring buffer (1,000 entries) for fast dashboard queries
-- ArangoDB persistence via `brain.audit.store` NATS subject (fire-and-forget)
+- ArangoDB persistence via `brain.audit.store` bus subject (fire-and-forget)
 - Logs: auth success/failure, rate limit exceeded, token revocation,
   user registration, and other security events
 - Multi-tenant: entries include `user_id` for per-user accountability
@@ -650,7 +650,7 @@ and [EVENT_CATALOG.md](EVENT_CATALOG.md) for the full REST API reference.
 - Health: `GET /health` (public, no auth)
 
 **CLI arguments:**
-- `--bus-url` (env: `NATS_URL`, default: `nats://localhost:4222`)
+- `--bus-url` (env: `BUS_URL`, default: `ws://localhost:9000`)
 - `--listen-addr` (env: `GATEWAY_LISTEN_ADDR`, default: `0.0.0.0:8080`)
 - `--api-key` (env: `GATEWAY_API_KEY`, required)
 - `--jwt-secret` (env: `GATEWAY_JWT_SECRET`, optional — enables JWT auth)
@@ -660,19 +660,19 @@ and [EVENT_CATALOG.md](EVENT_CATALOG.md) for the full REST API reference.
 
 ## Writing a Custom Plugin
 
-### Via NATS (Rust or any NATS client)
+### Via bus (Rust or any BusClient)
 
 A custom plugin in any language follows this pattern:
 
-1. Connect to NATS at the configured URL
+1. Connect to the bus at the configured URL
 2. Publish a `plugin.register` event with your declaration
 3. Subscribe to your declared `consumes` subjects
 4. For each received event, process and publish to your `produces` subjects
 5. Respond to health pings on your declared health subject
 
-### Via API Gateway (any language, no NATS client needed)
+### Via API Gateway (any language, no BusClient needed)
 
-For languages without a NATS client, use the API gateway's WebSocket API:
+For languages without a BusClient, use the API gateway's WebSocket API:
 
 1. Connect to `ws://gateway:8080/ws?api_key=KEY`
 2. Send `{"type": "register", "plugin": {...}}`
@@ -689,7 +689,7 @@ import nats
 import json
 
 async def main():
-    nc = await nats.connect("nats://nats:4222")
+    nc = await nats.connect("ws://kernel:9000")
 
     # Register
     await nc.publish("plugin.register", json.dumps({
@@ -710,7 +710,7 @@ async def main():
                          json.dumps(result).encode())
 ```
 
-This works because the only contract is: connect to NATS, consume events,
+This works because the only contract is: connect to the bus, consume events,
 produce events. Language doesn't matter. Runtime doesn't matter.
 
 ## Daemon Process Manager
@@ -779,7 +779,7 @@ When a plugin declares a config schema:
 - The admin dashboard renders a configuration form automatically
 - Config changes are validated against the schema before saving
 - Updated config is persisted to plugin storage (`namespace: "config"`)
-- The plugin is notified via `plugin.{id}.config.update` NATS subject
+- The plugin is notified via `plugin.{id}.config.update` bus subject
 
 ## Skills System
 

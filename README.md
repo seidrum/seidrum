@@ -1,6 +1,6 @@
 # Seidrum
 
-An event-driven personal AI agent platform. Rust kernel, NATS JetStream messaging, ArangoDB knowledge graph, plugin architecture.
+An event-driven personal AI agent platform. Rust kernel, seidrum-eventbus messaging, ArangoDB knowledge graph, plugin architecture.
 
 From Old Norse *seidr* (seeing hidden connections) + *rum* (space). Pronounced **SAY-drum**.
 
@@ -8,12 +8,12 @@ From Old Norse *seidr* (seeing hidden connections) + *rum* (space). Pronounced *
 
 Seidrum connects LLMs to your digital life through a persistent knowledge graph. Messages, emails, files, and calendar events flow through a plugin pipeline that extracts entities, builds relationships, and maintains temporal facts with confidence scores.
 
-There is no architectural distinction between a Telegram adapter, an LLM provider, or an entity extractor. They are all **plugins** — independent processes that consume and produce typed NATS events. The kernel is minimal: it owns the brain (ArangoDB), the plugin registry, and the workflow engine. Everything else is a plugin.
+There is no architectural distinction between a Telegram adapter, an LLM provider, or an entity extractor. They are all **plugins** — independent processes that consume and produce typed bus events. The kernel is minimal: it owns the brain (ArangoDB), the plugin registry, and the workflow engine. Everything else is a plugin.
 
 ### Key ideas
 
-- **Events are the universal primitive.** Every interaction is a typed NATS message. The system routes events, not function calls.
-- **Everything is a plugin.** Telegram, LLM providers, entity extraction, code execution — all independent processes speaking NATS.
+- **Events are the universal primitive.** Every interaction is a typed bus message. The system routes events, not function calls.
+- **Everything is a plugin.** Telegram, LLM providers, entity extraction, code execution — all independent processes speaking the bus protocol.
 - **The brain is a graph, not a log.** Entities, facts, and relationships form a knowledge graph. Facts are temporal — they have confidence, provenance, and decay over time.
 - **Scopes are boundaries.** An agent in the "job search" scope cannot see "personal finance" data unless explicitly granted access.
 - **Always-on kernel.** Plugins register and deregister dynamically. No kernel restart needed when adding new capabilities.
@@ -30,7 +30,7 @@ There is no architectural distinction between a Telegram adapter, an LLM provide
                     │  └───────┘ └──────────────┘  │
                     │      Workflow Engine          │
                     └──────────┬──────────────────┘
-                               │ NATS JetStream
+                               │ seidrum-eventbus
         ┌──────────┬───────────┼───────────┬──────────┐
         │          │           │           │          │
    ┌────┴───┐ ┌────┴────┐ ┌───┴───┐ ┌─────┴────┐ ┌───┴────┐
@@ -93,10 +93,10 @@ git clone https://github.com/seidrum/seidrum.git
 cd seidrum
 cargo build --workspace --release
 
-# Interactive setup — downloads NATS, pulls ArangoDB, configures API keys
+# Interactive setup — sets up the eventbus, pulls ArangoDB, configures API keys
 seidrum setup
 
-# Start everything (NATS + ArangoDB + kernel + plugins)
+# Start everything (ArangoDB + kernel + plugins)
 seidrum start
 ```
 
@@ -108,7 +108,7 @@ See [docs/GETTING_STARTED.md](docs/GETTING_STARTED.md) for detailed instructions
 
 ```bash
 # Getting started
-seidrum setup                 # First-run wizard: downloads NATS, configures everything
+seidrum setup                 # First-run wizard: sets up the eventbus, configures everything
 seidrum start                 # Start infrastructure + kernel + all enabled plugins
 seidrum stop                  # Stop everything
 seidrum status                # Show infrastructure + process status
@@ -138,7 +138,7 @@ docker compose up -d
 | File | Purpose |
 |------|---------|
 | `.env` | Secrets — API keys, tokens, passwords |
-| `config/platform.yaml` | Kernel config — NATS URL, ArangoDB connection |
+| `config/platform.yaml` | Kernel config — eventbus URL, ArangoDB connection |
 | `agents/*.yaml` | Agent definitions — prompt, tools, scope |
 | `workflows/*.yaml` | Workflow wiring — triggers, steps, routing |
 | `config/plugins.yaml` | Plugin manifest — binaries, enabled state, env vars |
@@ -182,15 +182,15 @@ seidrum/
 
 ## Writing a plugin
 
-A plugin is any process that connects to NATS, registers itself, and processes events. Here's the minimal pattern in Rust:
+A plugin is any process that connects to the bus, registers itself, and processes events. Here's the minimal pattern in Rust:
 
 ```rust
 use seidrum_common::events::PluginRegister;
-use seidrum_common::nats_utils::NatsClient;
+use seidrum_common::bus_client::BusClient;
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
-    let nats = NatsClient::connect("nats://localhost:4222", "my-plugin").await?;
+    let nats = BusClient::connect("ws://localhost:9000", "my-plugin").await?;
 
     // Register with the kernel
     let register = PluginRegister {
@@ -225,7 +225,7 @@ Agents in Seidrum are not request-response handlers -- they are persistent, auto
 
 **Skills** provide behavioral RAG -- reusable instructions and procedures retrieved by semantic similarity at inference time. Skills come from YAML files (`skills/` directory), user instructions, or agent self-learning. See [Agent Consciousness](docs/AGENT_CONSCIOUSNESS.md) and [Agent Skills](docs/AGENT_SKILLS.md) for details.
 
-Plugins can also be written in **any language** using the API gateway. The gateway exposes a WebSocket and REST API that bridges to NATS:
+Plugins can also be written in **any language** using the API gateway. The gateway exposes a WebSocket and REST API that bridges to the bus:
 
 ```bash
 # Start the API gateway

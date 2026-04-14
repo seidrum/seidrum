@@ -1,6 +1,6 @@
 # Phase 5 Steps 3-5: NATS → EventBus Cutover — Implementation Plan
 
-**Status:** Ready to execute
+**Status:** ✅ COMPLETE. Executed in PR #33.
 **Branch:** `feat/eventbus-phase5-cutover` (to be created)
 **Dependencies:** PR #31 merged (WsClient + BusClient backend dispatch)
 **Estimated effort:** ~10-14 hours
