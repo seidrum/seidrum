@@ -7,7 +7,7 @@ plugin subscriptions — not from a central orchestrator dictating order.
 
 There are 5 concepts:
 
-1. **Events** — typed NATS messages. The universal communication primitive.
+1. **Events** — typed bus messages. The universal communication primitive.
 2. **Plugins** — independent processes that consume and produce typed events.
 3. **Capabilities** — tools, commands, or other invocable functions registered by plugins.
 4. **Workflows** — YAML-defined custom wiring that connects plugins, defines agents, and adds routing rules.
@@ -55,7 +55,7 @@ A plugin is an independent process that:
 
 1. Connects to NATS
 2. Registers itself: declares what event **types** it consumes and produces
-3. Subscribes to its declared NATS subjects
+3. Subscribes to its declared bus subjects
 4. Processes events and publishes results
 5. Optionally registers capabilities (tools, commands)
 6. Responds to health checks
@@ -74,7 +74,7 @@ not architectural distinctions:
 | Category | Examples | Pattern |
 |----------|----------|---------|
 | Channel | telegram, cli, email, calendar | Bidirectional: produces `channel.*.inbound`, consumes `channel.*.outbound` |
-| LLM Provider | llm-google, llm-openai, llm-ollama | Consumes `llm.provider.{id}`, produces reply via NATS request/reply |
+| LLM Provider | llm-google, llm-openai, llm-ollama | Consumes `llm.provider.{id}`, produces reply via bus request/reply |
 | Processing | content-ingester, entity-extractor | Consumes one event type, produces another |
 | Infrastructure | llm-router, tool-dispatcher, response-formatter | Orchestration and routing |
 
@@ -86,7 +86,7 @@ The LLM Router is a plugin that:
 - Produces: `llm.response`
 - Assembles context (prompt template, token budgeting)
 - Queries the capability registry for available tools
-- Dispatches to an LLM provider via `llm.provider.{id}` (NATS request/reply)
+- Dispatches to an LLM provider via `llm.provider.{id}` (bus request/reply)
 - Receives the provider's response and publishes `llm.response`
 
 The router speaks **unified format only**. It never touches provider-specific
@@ -98,7 +98,7 @@ temperature, max tokens.
 LLM Provider plugins are adapters:
 
 - Consume: `llm.provider.{id}` (unified format)
-- Produce: reply via NATS request/reply (unified format)
+- Produce: reply via bus request/reply (unified format)
 - Internally: translate unified → provider API format, call HTTP API
 - Handle the **tool call loop** internally:
   - If the LLM returns a function call → translate to unified `capability.call`
@@ -113,7 +113,7 @@ Each provider has its own config YAML (API keys, model defaults, etc.).
 
 Routes `capability.call` events to the owning plugin:
 
-- Consumes: `capability.call` (NATS request/reply)
+- Consumes: `capability.call` (bus request/reply)
 - Looks up which plugin owns the capability
 - Forwards to `capability.call.{plugin_id}`
 - Returns the result
@@ -433,7 +433,7 @@ operates in the data flow.
 
 | Concept | What it is | Who defines it |
 |---------|-----------|----------------|
-| Event | Typed NATS message | Plugins emit/consume |
+| Event | Typed bus message | Plugins emit/consume |
 | Plugin | Code that runs, self-registers | Developer |
 | Capability | Registered tool/command/future | Plugins register |
 | Data flow graph | Emerges from plugin registrations | Automatic |

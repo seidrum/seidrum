@@ -104,7 +104,7 @@ tool-use rounds.
 
 ## Brain Access from Plugins
 
-Plugins never connect to ArangoDB. They use NATS request/reply to the kernel:
+Plugins never connect to ArangoDB. They use bus request/reply to the kernel:
 
 ```rust
 // Read: query the brain
@@ -402,20 +402,20 @@ Behavior:
 
 ```
 Consumes: capability.call
-Produces: (forwards to owning plugin via NATS request/reply)
+Produces: (forwards to owning plugin via bus request/reply)
 
 Behavior:
 1. Subscribe to capability.call events
 2. Look up the target capability from an in-memory cache of registered
    capabilities (populated from capability.register events)
 3. Forward the call payload to the owning plugin's call_subject via
-   NATS request/reply with a 30s timeout
+   bus request/reply with a 30s timeout
 4. Return the plugin's response to the original caller
 5. If the target capability is unknown or the owning plugin does not
    respond within the timeout, return an error payload
 
 Config:
-  timeout: NATS request/reply timeout (default: 30s)
+  timeout: bus request/reply timeout (default: 30s)
 ```
 
 ### code-executor
@@ -616,8 +616,8 @@ and [EVENT_CATALOG.md](EVENT_CATALOG.md) for the full REST API reference.
 - Multi-tenant: entries include `user_id` for per-user accountability
 
 **Multi-User Support:**
-- User CRUD via `brain.user.*` NATS subjects (backed by `users` collection)
-- User-scoped API keys via `brain.apikey.*` NATS subjects (backed by
+- User CRUD via `brain.user.*` bus subjects (backed by `users` collection)
+- User-scoped API keys via `brain.apikey.*` bus subjects (backed by
   `api_keys` collection)
 - Endpoints: `GET /api/v1/users/me`, `GET /api/v1/users` (admin),
   `PUT /api/v1/users/:id/role` (admin), `DELETE /api/v1/users/:id` (admin)
@@ -650,7 +650,7 @@ and [EVENT_CATALOG.md](EVENT_CATALOG.md) for the full REST API reference.
 - Health: `GET /health` (public, no auth)
 
 **CLI arguments:**
-- `--nats-url` (env: `NATS_URL`, default: `nats://localhost:4222`)
+- `--bus-url` (env: `NATS_URL`, default: `nats://localhost:4222`)
 - `--listen-addr` (env: `GATEWAY_LISTEN_ADDR`, default: `0.0.0.0:8080`)
 - `--api-key` (env: `GATEWAY_API_KEY`, required)
 - `--jwt-secret` (env: `GATEWAY_JWT_SECRET`, optional — enables JWT auth)
@@ -795,7 +795,7 @@ The consciousness service registers three skill-related capabilities:
 | `load-skill` | Explicitly load a skill by ID into the current conversation context, ensuring it persists across turns. |
 | `save-skill` | Create a new skill from the current conversation (for learned behavior). Stores description, snippet, source, and tags. |
 
-These capabilities are available to all agents via `capability.call.consciousness` and use the `brain.skill.*` NATS subjects documented in the [Event Catalog](EVENT_CATALOG.md).
+These capabilities are available to all agents via `capability.call.consciousness` and use the `brain.skill.*` bus subjects documented in the [Event Catalog](EVENT_CATALOG.md).
 
 ### Skill YAML Format
 

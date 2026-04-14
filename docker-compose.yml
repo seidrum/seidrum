@@ -1,10 +1,6 @@
 services:
   # --- Infrastructure ---
-  nats:
-    image: nats:latest
     command: ["--jetstream", "--store_dir", "/data"]
-    ports: ["4222:4222", "8222:8222"]
-    volumes: ["nats-data:/data"]
     restart: unless-stopped
 
   arangodb:
@@ -22,10 +18,10 @@ services:
       dockerfile: crates/core/seidrum-kernel/Dockerfile
     command: ["serve"]
     environment:
-      NATS_URL: nats://nats:4222
+      BUS_URL: ws://kernel:9000
       ARANGO_URL: http://arangodb:8529
       ARANGO_PASSWORD: ${ARANGO_PASSWORD:-seidrum_dev}
-    depends_on: [nats, arangodb]
+    depends_on: [arangodb]
     restart: unless-stopped
 
   # --- Plugins ---
@@ -34,10 +30,10 @@ services:
       context: .
       dockerfile: crates/plugins/seidrum-telegram/Dockerfile
     environment:
-      NATS_URL: nats://nats:4222
+      BUS_URL: ws://kernel:9000
       TELEGRAM_TOKEN: ${TELEGRAM_TOKEN}
       TELEGRAM_ALLOWED_USERS: ${TELEGRAM_ALLOWED_USERS}
-    depends_on: [nats]
+    depends_on: [kernel]
     restart: unless-stopped
 
   llm-router:
@@ -45,10 +41,10 @@ services:
       context: .
       dockerfile: crates/plugins/seidrum-llm-router/Dockerfile
     environment:
-      NATS_URL: nats://nats:4222
+      BUS_URL: ws://kernel:9000
       LLM_ROUTING_STRATEGY: ${LLM_ROUTING_STRATEGY:-fallback}
       LLM_FALLBACK_PROVIDERS: ${LLM_FALLBACK_PROVIDERS:-google,openai,anthropic}
-    depends_on: [nats]
+    depends_on: [kernel]
     restart: unless-stopped
 
   llm-google:
@@ -56,9 +52,9 @@ services:
       context: .
       dockerfile: crates/plugins/seidrum-llm-google/Dockerfile
     environment:
-      NATS_URL: nats://nats:4222
+      BUS_URL: ws://kernel:9000
       GOOGLE_API_KEY: ${GOOGLE_API_KEY}
-    depends_on: [nats]
+    depends_on: [kernel]
     restart: unless-stopped
 
   tool-dispatcher:
@@ -66,8 +62,8 @@ services:
       context: .
       dockerfile: crates/plugins/seidrum-tool-dispatcher/Dockerfile
     environment:
-      NATS_URL: nats://nats:4222
-    depends_on: [nats]
+      BUS_URL: ws://kernel:9000
+    depends_on: [kernel]
     restart: unless-stopped
 
   content-ingester:
@@ -75,10 +71,10 @@ services:
       context: .
       dockerfile: crates/plugins/seidrum-content-ingester/Dockerfile
     environment:
-      NATS_URL: nats://nats:4222
+      BUS_URL: ws://kernel:9000
       EMBEDDING_PROVIDER: ${EMBEDDING_PROVIDER:-openai}
       OPENAI_API_KEY: ${OPENAI_API_KEY}
-    depends_on: [nats]
+    depends_on: [kernel]
     restart: unless-stopped
 
   entity-extractor:
@@ -86,9 +82,9 @@ services:
       context: .
       dockerfile: crates/plugins/seidrum-entity-extractor/Dockerfile
     environment:
-      NATS_URL: nats://nats:4222
+      BUS_URL: ws://kernel:9000
       GOOGLE_API_KEY: ${GOOGLE_API_KEY}
-    depends_on: [nats]
+    depends_on: [kernel]
     restart: unless-stopped
 
   fact-extractor:
@@ -96,9 +92,9 @@ services:
       context: .
       dockerfile: crates/plugins/seidrum-fact-extractor/Dockerfile
     environment:
-      NATS_URL: nats://nats:4222
+      BUS_URL: ws://kernel:9000
       GOOGLE_API_KEY: ${GOOGLE_API_KEY}
-    depends_on: [nats]
+    depends_on: [kernel]
     restart: unless-stopped
 
   graph-context-loader:
@@ -106,8 +102,8 @@ services:
       context: .
       dockerfile: crates/plugins/seidrum-graph-context-loader/Dockerfile
     environment:
-      NATS_URL: nats://nats:4222
-    depends_on: [nats]
+      BUS_URL: ws://kernel:9000
+    depends_on: [kernel]
     restart: unless-stopped
 
   scope-classifier:
@@ -115,9 +111,9 @@ services:
       context: .
       dockerfile: crates/plugins/seidrum-scope-classifier/Dockerfile
     environment:
-      NATS_URL: nats://nats:4222
+      BUS_URL: ws://kernel:9000
       GOOGLE_API_KEY: ${GOOGLE_API_KEY}
-    depends_on: [nats]
+    depends_on: [kernel]
     restart: unless-stopped
 
   response-formatter:
@@ -125,8 +121,8 @@ services:
       context: .
       dockerfile: crates/plugins/seidrum-response-formatter/Dockerfile
     environment:
-      NATS_URL: nats://nats:4222
-    depends_on: [nats]
+      BUS_URL: ws://kernel:9000
+    depends_on: [kernel]
     restart: unless-stopped
 
   event-emitter:
@@ -134,8 +130,8 @@ services:
       context: .
       dockerfile: crates/plugins/seidrum-event-emitter/Dockerfile
     environment:
-      NATS_URL: nats://nats:4222
-    depends_on: [nats]
+      BUS_URL: ws://kernel:9000
+    depends_on: [kernel]
     restart: unless-stopped
 
   task-detector:
@@ -143,9 +139,9 @@ services:
       context: .
       dockerfile: crates/plugins/seidrum-task-detector/Dockerfile
     environment:
-      NATS_URL: nats://nats:4222
+      BUS_URL: ws://kernel:9000
       GOOGLE_API_KEY: ${GOOGLE_API_KEY}
-    depends_on: [nats]
+    depends_on: [kernel]
     restart: unless-stopped
 
   code-executor:
@@ -153,8 +149,8 @@ services:
       context: .
       dockerfile: crates/plugins/seidrum-code-executor/Dockerfile
     environment:
-      NATS_URL: nats://nats:4222
-    depends_on: [nats]
+      BUS_URL: ws://kernel:9000
+    depends_on: [kernel]
     restart: unless-stopped
 
   notification:
@@ -162,10 +158,10 @@ services:
       context: .
       dockerfile: crates/plugins/seidrum-notification/Dockerfile
     environment:
-      NATS_URL: nats://nats:4222
+      BUS_URL: ws://kernel:9000
       NOTIFICATION_CHANNEL: ${NOTIFICATION_CHANNEL:-telegram}
       NOTIFICATION_LEVEL: ${NOTIFICATION_LEVEL:-all}
-    depends_on: [nats]
+    depends_on: [kernel]
     restart: unless-stopped
 
   llm-openai:
@@ -173,10 +169,10 @@ services:
       context: .
       dockerfile: crates/plugins/seidrum-llm-openai/Dockerfile
     environment:
-      NATS_URL: nats://nats:4222
+      BUS_URL: ws://kernel:9000
       OPENAI_API_KEY: ${OPENAI_API_KEY}
       LLM_MODEL: ${LLM_OPENAI_MODEL:-gpt-4o}
-    depends_on: [nats]
+    depends_on: [kernel]
     restart: unless-stopped
 
   llm-anthropic:
@@ -184,10 +180,10 @@ services:
       context: .
       dockerfile: crates/plugins/seidrum-llm-anthropic/Dockerfile
     environment:
-      NATS_URL: nats://nats:4222
+      BUS_URL: ws://kernel:9000
       ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY}
       LLM_MODEL: ${LLM_ANTHROPIC_MODEL:-claude-sonnet-4-6}
-    depends_on: [nats]
+    depends_on: [kernel]
     restart: unless-stopped
 
   llm-ollama:
@@ -195,10 +191,10 @@ services:
       context: .
       dockerfile: crates/plugins/seidrum-llm-ollama/Dockerfile
     environment:
-      NATS_URL: nats://nats:4222
+      BUS_URL: ws://kernel:9000
       OLLAMA_URL: ${OLLAMA_URL:-http://ollama:11434}
       LLM_MODEL: ${LLM_OLLAMA_MODEL:-llama3.2}
-    depends_on: [nats]
+    depends_on: [kernel]
     restart: unless-stopped
 
   feedback-extractor:
@@ -206,8 +202,8 @@ services:
       context: .
       dockerfile: crates/plugins/seidrum-feedback-extractor/Dockerfile
     environment:
-      NATS_URL: nats://nats:4222
-    depends_on: [nats]
+      BUS_URL: ws://kernel:9000
+    depends_on: [kernel]
     restart: unless-stopped
 
   email:
@@ -215,7 +211,7 @@ services:
       context: .
       dockerfile: crates/plugins/seidrum-email/Dockerfile
     environment:
-      NATS_URL: nats://nats:4222
+      BUS_URL: ws://kernel:9000
       IMAP_HOST: ${IMAP_HOST}
       IMAP_PORT: ${IMAP_PORT:-993}
       IMAP_USER: ${IMAP_USER}
@@ -226,7 +222,7 @@ services:
       SMTP_PASSWORD: ${SMTP_PASSWORD}
       SMTP_FROM: ${SMTP_FROM}
       EMAIL_POLL_INTERVAL: ${EMAIL_POLL_INTERVAL:-60}
-    depends_on: [nats]
+    depends_on: [kernel]
     restart: unless-stopped
 
   calendar:
@@ -234,13 +230,12 @@ services:
       context: .
       dockerfile: crates/plugins/seidrum-calendar/Dockerfile
     environment:
-      NATS_URL: nats://nats:4222
+      BUS_URL: ws://kernel:9000
       GOOGLE_API_KEY: ${GOOGLE_API_KEY}
       GOOGLE_CALENDAR_ID: ${GOOGLE_CALENDAR_ID:-primary}
       CALENDAR_POLL_INTERVAL: ${CALENDAR_POLL_INTERVAL:-300}
-    depends_on: [nats]
+    depends_on: [kernel]
     restart: unless-stopped
 
 volumes:
-  nats-data:
   arango-data:

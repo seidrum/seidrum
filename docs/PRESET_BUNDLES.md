@@ -341,4 +341,4 @@ Following Seidrum conventions:
 - No `unwrap()` in production code
 - All event structs derive `Serialize, Deserialize, Debug, Clone`
 - Scope enforcement on brain queries
-- NATS event publishing for state changes
+- bus event publishing for state changes

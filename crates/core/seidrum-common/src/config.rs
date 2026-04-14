@@ -100,7 +100,7 @@ pub struct AgentConfig {
 /// Pipeline definition with triggers and sequential steps.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Pipeline {
-    /// NATS subjects that start this pipeline (supports wildcards).
+    /// Bus subjects that start this pipeline (supports wildcards).
     pub triggers: Vec<String>,
 
     /// Sequential processing steps.
@@ -232,7 +232,7 @@ pub struct AgentDefinition {
     /// Whether this agent is enabled. Defaults to false so first boot starts clean.
     #[serde(default)]
     pub enabled: bool,
-    /// NATS subjects this agent subscribes to for consciousness events.
+    /// Bus subjects this agent subscribes to for consciousness events.
     #[serde(default)]
     pub subscribe: Vec<String>,
     /// Per-agent guardrail overrides.

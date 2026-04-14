@@ -25,12 +25,12 @@ pub struct EventOrigin {
 // Event Envelope
 // ---------------------------------------------------------------------------
 
-/// Common wrapper for all NATS events.
+/// Common wrapper for all bus events.
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct EventEnvelope {
     /// ULID
     pub id: String,
-    /// Matches NATS subject
+    /// Matches bus subject
     pub event_type: String,
     pub timestamp: DateTime<Utc>,
     /// Plugin that emitted this
@@ -468,9 +468,9 @@ pub struct PluginRegister {
     pub name: String,
     pub version: String,
     pub description: String,
-    /// NATS subjects this plugin consumes
+    /// bus subjects this plugin consumes
     pub consumes: Vec<String>,
-    /// NATS subjects this plugin produces
+    /// bus subjects this plugin produces
     pub produces: Vec<String>,
     pub health_subject: String,
     /// Event types this plugin consumes (e.g., "ChannelInbound").
@@ -937,7 +937,7 @@ pub struct ConsciousnessEvent {
     pub origin: Option<EventOrigin>,
 }
 
-/// Request to subscribe an agent to NATS event patterns at runtime.
+/// Request to subscribe an agent to bus event patterns at runtime.
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct SubscribeEventsRequest {
     pub subjects: Vec<String>,
@@ -945,7 +945,7 @@ pub struct SubscribeEventsRequest {
     pub duration_seconds: Option<u64>,
 }
 
-/// Request to unsubscribe an agent from NATS event patterns.
+/// Request to unsubscribe an agent from bus event patterns.
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct UnsubscribeEventsRequest {
     pub subjects: Vec<String>,
