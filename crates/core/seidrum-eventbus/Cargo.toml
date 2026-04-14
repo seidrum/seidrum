@@ -44,5 +44,7 @@ name = "phase5_retry"
 path = "tests/phase5_retry.rs"
 
 [dev-dependencies]
+anyhow = "1"
 tempfile = "3"
 tokio = { version = "1", features = ["full", "macros"] }
+tracing-subscriber = "0.3"

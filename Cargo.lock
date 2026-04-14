@@ -3720,6 +3720,7 @@ dependencies = [
 name = "seidrum-eventbus"
 version = "0.1.0"
 dependencies = [
+ "anyhow",
  "async-trait",
  "axum",
  "base64 0.22.1",
@@ -3736,6 +3737,7 @@ dependencies = [
  "tower",
  "tower-http",
  "tracing",
+ "tracing-subscriber",
  "ulid",
  "url",
 ]
