@@ -298,6 +298,48 @@ async fn test_ws_client_operations_after_server_shutdown_do_not_hang() {
     );
 }
 
+/// BusClient::connect retries when the server isn't up yet, then
+/// succeeds once the server starts.
+#[tokio::test]
+async fn test_bus_client_connect_retries_until_server_ready() {
+    use seidrum_common::bus_client::BusClient;
+    use seidrum_eventbus::test_utils::pick_ephemeral_addr;
+
+    let ws_addr = pick_ephemeral_addr();
+    let url = format!("ws://{}", ws_addr);
+
+    // Start the connect in a background task BEFORE the server is up.
+    let url_clone = url.clone();
+    let connect_task =
+        tokio::spawn(async move { BusClient::connect(&url_clone, "retry-test").await });
+
+    // Wait 500ms, THEN start the server. The connect should be
+    // retrying during this window.
+    tokio::time::sleep(Duration::from_millis(500)).await;
+
+    let store = Arc::new(seidrum_eventbus::storage::memory_store::InMemoryEventStore::new());
+    let handles = seidrum_eventbus::EventBusBuilder::new()
+        .storage(store)
+        .with_websocket(ws_addr)
+        .unsafe_allow_ws_dev_mode()
+        .build_with_handles()
+        .await
+        .unwrap();
+    seidrum_eventbus::test_utils::wait_for_ws_ready(ws_addr).await;
+
+    // The connect should succeed now that the server is up.
+    let result = tokio::time::timeout(Duration::from_secs(10), connect_task)
+        .await
+        .expect("connect task should finish")
+        .expect("connect task should not panic");
+
+    assert!(result.is_ok(), "BusClient should connect after retries");
+    let client = result.unwrap();
+    assert!(client.is_connected());
+
+    handles.shutdown_and_join().await;
+}
+
 /// Configurable request timeout via `with_request_timeout`.
 #[tokio::test]
 async fn test_ws_client_request_timeout_configurable() {

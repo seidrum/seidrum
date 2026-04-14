@@ -45,7 +45,21 @@ pub struct BusClient {
 }
 
 impl BusClient {
-    /// Connect to the bus via WebSocket.
+    /// Maximum number of connection attempts before giving up.
+    const CONNECT_MAX_ATTEMPTS: u32 = 20;
+    /// Initial retry delay (doubles each attempt, capped at 5s).
+    const CONNECT_INITIAL_BACKOFF_MS: u64 = 250;
+    /// Maximum retry delay.
+    const CONNECT_MAX_BACKOFF_MS: u64 = 5000;
+
+    /// Connect to the bus via WebSocket, retrying with exponential
+    /// backoff if the server isn't up yet.
+    ///
+    /// This handles the common startup-ordering scenario where a
+    /// plugin process starts before the kernel has finished binding
+    /// its WS port. With the default 20 attempts × 250ms→5s backoff,
+    /// the plugin will wait up to ~30s for the kernel to appear.
+    ///
     /// `url` must be `ws://` or `wss://`.
     pub async fn connect(url: &str, source: &str) -> Result<Self> {
         if !url.starts_with("ws://") && !url.starts_with("wss://") {
@@ -53,11 +67,47 @@ impl BusClient {
                 "unsupported bus URL scheme: {url} (expected ws:// or wss://)"
             ));
         }
-        let ws = WsClient::connect(url, source).await?;
-        Ok(Self {
-            backend: BackendHandle::Ws(ws),
-            source: source.to_string(),
-        })
+
+        let mut attempt = 0u32;
+        let mut backoff_ms = Self::CONNECT_INITIAL_BACKOFF_MS;
+
+        loop {
+            attempt += 1;
+            match WsClient::connect(url, source).await {
+                Ok(ws) => {
+                    if attempt > 1 {
+                        info!(
+                            url,
+                            source,
+                            attempts = attempt,
+                            "connected to bus after retries"
+                        );
+                    }
+                    return Ok(Self {
+                        backend: BackendHandle::Ws(ws),
+                        source: source.to_string(),
+                    });
+                }
+                Err(e) => {
+                    if attempt >= Self::CONNECT_MAX_ATTEMPTS {
+                        return Err(e.context(format!(
+                            "failed to connect to bus at {} after {} attempts",
+                            url, attempt
+                        )));
+                    }
+                    debug!(
+                        url,
+                        source,
+                        attempt,
+                        backoff_ms,
+                        error = %e,
+                        "bus not ready, retrying..."
+                    );
+                    tokio::time::sleep(std::time::Duration::from_millis(backoff_ms)).await;
+                    backoff_ms = (backoff_ms * 2).min(Self::CONNECT_MAX_BACKOFF_MS);
+                }
+            }
+        }
     }
 
     /// Create a `BusClient` backed by an in-process `EventBus`.
