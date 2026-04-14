@@ -290,7 +290,7 @@ async fn main() -> Result<()> {
 
     // Connect to NATS
     let nats = seidrum_common::bus_client::BusClient::connect(&cli.bus_url, "email").await?;
-    info!("Connected to NATS at {}", cli.bus_url);
+    info!("Connected to bus at {}", cli.bus_url);
 
     // Register plugin
     let register = PluginRegister {

@@ -116,7 +116,7 @@ async fn main() -> Result<()> {
     let nats = seidrum_common::bus_client::BusClient::connect(&cli.bus_url, "content-ingester")
         .await
         .context("failed to connect to NATS")?;
-    info!("Connected to NATS");
+    info!("Connected to bus");
 
     // Register with kernel
     let register = PluginRegister {

@@ -151,7 +151,7 @@ async fn main() -> Result<()> {
 
     // Connect to NATS
     let nats = seidrum_common::bus_client::BusClient::connect(&cli.bus_url, "llm-router").await?;
-    info!("Connected to NATS");
+    info!("Connected to bus");
 
     // Publish plugin registration
     let register = serde_json::json!({

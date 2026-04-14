@@ -66,7 +66,7 @@ async fn main() -> Result<()> {
 
     // Connect to NATS
     let nats = BusClient::connect(&cli.bus_url, "telegram").await?;
-    info!("Connected to NATS at {}", cli.bus_url);
+    info!("Connected to bus at {}", cli.bus_url);
 
     // Register plugin
     let register = PluginRegister {

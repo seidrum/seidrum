@@ -132,7 +132,7 @@ async fn main() -> Result<()> {
         .await
         .context("Failed to connect to NATS")?;
 
-    info!(url = %args.bus_url, "Connected to NATS");
+    info!(url = %args.bus_url, "Connected to bus");
 
     // Register plugin
     let register = PluginRegister {

@@ -116,7 +116,7 @@ async fn main() -> Result<()> {
 
     // Connect to NATS
     let nats = seidrum_common::bus_client::BusClient::connect(&cli.bus_url, "llm-google").await?;
-    info!("Connected to NATS");
+    info!("Connected to bus");
 
     // Publish plugin registration
     let register = PluginRegister {

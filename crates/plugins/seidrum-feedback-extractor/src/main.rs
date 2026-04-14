@@ -177,7 +177,7 @@ async fn main() -> Result<()> {
     // Connect to NATS
     let nats =
         seidrum_common::bus_client::BusClient::connect(&cli.bus_url, "feedback-extractor").await?;
-    info!("Connected to NATS");
+    info!("Connected to bus");
 
     // Initialize response buffer (LRU cache)
     let response_buffer: Arc<Mutex<LruCache<String, ResponseContext>>> = Arc::new(Mutex::new(

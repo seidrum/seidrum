@@ -268,7 +268,7 @@ pub async fn start(paths: &SeidrumPaths) -> Result<()> {
     );
 
     // 3. Connect to bus and subscribe to plugin control subjects
-    let bus_url = std::env::var("BUS_URL").unwrap_or_else(|_| "nats://localhost:4222".to_string());
+    let bus_url = std::env::var("BUS_URL").unwrap_or_else(|_| "ws://localhost:9000".to_string());
     let nats_client = match seidrum_common::bus_client::BusClient::connect(&bus_url, "daemon").await
     {
         Ok(client) => {

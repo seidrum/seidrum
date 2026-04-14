@@ -98,7 +98,7 @@ async fn main() -> Result<()> {
 
     // Connect to NATS
     let nats = BusClient::connect(&cli.bus_url, PLUGIN_ID).await?;
-    info!(url = %cli.bus_url, "Connected to NATS");
+    info!(url = %cli.bus_url, "Connected to bus");
 
     // Register self as a plugin
     let register = PluginRegister {
