@@ -19,7 +19,7 @@ There are 5 concepts:
 
 Events have two dimensions:
 
-- **Subject** (NATS routing): `channel.telegram.inbound` — determines delivery.
+- **Subject** (bus routing): `channel.telegram.inbound` — determines delivery.
 - **Type** (contract): `ChannelInbound` — determines structure.
 
 Multiple subjects can carry the same type:
@@ -53,7 +53,7 @@ struct EventEnvelope {
 
 A plugin is an independent process that:
 
-1. Connects to NATS
+1. Connects to the bus
 2. Registers itself: declares what event **types** it consumes and produces
 3. Subscribes to its declared bus subjects
 4. Processes events and publishes results
@@ -102,7 +102,7 @@ LLM Provider plugins are adapters:
 - Internally: translate unified → provider API format, call HTTP API
 - Handle the **tool call loop** internally:
   - If the LLM returns a function call → translate to unified `capability.call`
-  - Dispatch via NATS to the capability dispatcher
+  - Dispatch via bus to the capability dispatcher
   - Get result, translate back to provider format
   - Call the LLM again, repeat until content
 - Only return the final response (all tool calls resolved)
@@ -360,7 +360,7 @@ External Request
                  │     (auth result available via request extensions)
                  │
                  └─ 4. Audit ─────────────▶ AuditLog
-                       (in-memory ring buffer + ArangoDB via NATS)
+                       (in-memory ring buffer + ArangoDB via bus)
 ```
 
 Failures at any stage short-circuit the pipeline:
@@ -389,7 +389,7 @@ API Gateway (auth event occurs)
   │
   ├─ In-memory ring buffer (1,000 entries, fast dashboard queries)
   │
-  └─ NATS publish "brain.audit.store" (fire-and-forget)
+  └─ bus publish "brain.audit.store" (fire-and-forget)
        └─ Kernel Brain Service
             └─ ArangoDB "audit_log" collection (permanent storage)
 ```
@@ -416,7 +416,7 @@ Each plugin has its own optional config YAML:
 
 ```
 config/
-  platform.yaml           # kernel config (NATS URL, ArangoDB, etc.)
+  platform.yaml           # kernel config (eventbus URL, ArangoDB, etc.)
   llm-router.yaml         # provider, model, fallback, temperature
   llm-google.yaml         # API key, model defaults
   telegram.yaml           # token, allowed users, whisper paths

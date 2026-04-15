@@ -8,13 +8,13 @@
 > traversal and vector similarity.
 >
 > Only the kernel has direct ArangoDB access. All plugins interact with
-> the brain through NATS request/reply events.
+> the brain through bus request/reply events.
 
 ---
 
 ## Design Principles
 
-1. **Everything is an event first.** Content enters via NATS events.
+1. **Everything is an event first.** Content enters via bus events.
    Plugins request the kernel to store and extract knowledge.
 2. **Scopes are boundaries, not silos.** A scope defines a context
    (project, life area). Entities can exist in multiple scopes. The kernel
@@ -478,7 +478,7 @@ FOR fact IN facts
 ## Ingestion Flow (via plugins + kernel)
 
 ```
-NATS event (channel.telegram.inbound)
+bus event (channel.telegram.inbound)
   ├─→ Content Ingester Plugin → brain.content.store → Kernel stores + embeds
   │                                                  → brain.content.stored
   ├─→ Entity Extractor Plugin (async) → brain.entity.upsert → Kernel stores

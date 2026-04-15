@@ -198,7 +198,7 @@ let tool_results = nats.request("brain.query.request", BrainQueryRequest {
 2. If response contains tool_calls:
    a. For each tool call:
       - MCP tool: JSON-RPC request to MCP server
-      - Built-in (brain-query): NATS request to kernel
+      - Built-in (brain-query): bus request to kernel
       - CLI tool: execute command (sandboxed)
    b. Append tool results as messages
    c. Send updated messages back to LLM

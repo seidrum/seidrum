@@ -80,7 +80,7 @@ struct Claims {
    revoke their own tokens; admins can revoke any token.
 
 4. **Persistence:** The revocation list is saved to plugin storage
-   (`storage.set` via NATS) every 15 minutes and restored on startup.
+   (`storage.set` via bus) every 15 minutes and restored on startup.
    This survives gateway restarts.
 
 5. **Cleanup:** Revocation entries are capped at 10,000. When exceeded,
@@ -223,7 +223,7 @@ struct AuditEntry {
 - **In-memory:** Capped ring buffer (default 1,000 entries) for fast
   dashboard queries via `GET /api/v1/audit`.
 - **ArangoDB:** Every entry is also published to `brain.audit.store`
-  (fire-and-forget via NATS) for permanent storage in the `audit_log`
+  (fire-and-forget via bus) for permanent storage in the `audit_log`
   collection. Historical queries use `brain.audit.query`.
 
 ---
@@ -285,7 +285,7 @@ completes. Unauthenticated connections receive `401 Unauthorized`.
 ### Event Stream WebSocket (`/ws/events`)
 
 Same authentication as the plugin WebSocket. Supports optional `filter`
-(NATS subject pattern) and `correlation_id` query parameters for
+(bus subject pattern) and `correlation_id` query parameters for
 scoping the event stream.
 
 ### Subject Blocking

@@ -1,6 +1,6 @@
 # Phase 5 Migration Plan: NATS → seidrum-eventbus
 
-**Status:** Research complete. Abstraction layer cleaned up (PR #30). Implementation pending.
+**Status:** ✅ COMPLETE (PRs #30, #31, #33). Originally: research complete, abstraction layer cleaned up (PR #30). Implementation pending.
 **Reference:** PLAN.md L184-225, CLAUDE.md, ARCHITECTURE.md
 **Strategy:** Option B (replace-and-fix, no feature flag) per user direction.
 **Research Date:** 2026-04-11 (updated 2026-04-12 post-rename PR #30)

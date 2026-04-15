@@ -45,7 +45,7 @@ seidrum start
 ```
 
 This starts:
-- NATS (native binary, port 4222)
+- eventbus (built into kernel, WS port 9000)
 - ArangoDB (Docker container, port 8529)
 - Kernel (brain, registries, workflow engine)
 - All enabled plugins
@@ -59,7 +59,7 @@ seidrum status
 You should see:
 ```
 Infrastructure:
-  NATS:     running (PID 12345, port 4222)
+  EventBus: running (built into kernel, WS on :9000)
   ArangoDB: running (container seidrum-arangodb, port 8529)
 
 Seidrum daemon: running (PID 67890)
@@ -112,15 +112,15 @@ seidrum plugin restart llm-router
 seidrum stop
 ```
 
-Stops all plugins, the kernel, NATS, and ArangoDB.
+Stops all plugins, the kernel and ArangoDB.
 
 ## Power-user mode
 
-If you prefer to manage NATS and ArangoDB yourself (e.g., running on a remote server), just start them before running `seidrum start`. It will detect the running services and skip managed infrastructure automatically.
+If you prefer to manage ArangoDB yourself (e.g., running on a remote server), just start them before running `seidrum start`. It will detect the running services and skip managed infrastructure automatically.
 
 ## Troubleshooting
 
-**Port 4222 or 8529 already in use**: Another NATS or ArangoDB instance is running. Either stop it, or Seidrum will detect it and use the existing one.
+**Port 8529 already in use**: Another ArangoDB instance is running. Either stop it, or Seidrum will detect it and use the existing one.
 
 **ArangoDB container won't start**: Check Docker is running (`docker info`). Check logs: `docker logs seidrum-arangodb`.
 
@@ -134,8 +134,8 @@ If you prefer to manage NATS and ArangoDB yourself (e.g., running on a remote se
 
 | Path | Purpose |
 |------|---------|
-| `~/.seidrum/bin/` | Downloaded NATS binary |
-| `~/.seidrum/data/nats/` | NATS JetStream data |
+| `~/.seidrum/bin/` | Kernel binary |
+| `~/.seidrum/data/nats/` | seidrum-eventbus data |
 | `~/.seidrum/logs/` | Process log files |
 | `~/.seidrum/pids/` | PID files and metadata |
 | `~/.seidrum/infra.yaml` | Infrastructure configuration |

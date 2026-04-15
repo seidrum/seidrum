@@ -2,8 +2,8 @@
 
 ## Overview
 
-Every interaction in Seidrum is a NATS event. Events are JSON payloads
-published to NATS subjects following: `{domain}.{resource}.{action}`.
+Every interaction in Seidrum is a bus event. Events are JSON payloads
+published to bus subjects following: `{domain}.{resource}.{action}`.
 
 All events share a common envelope:
 
@@ -11,7 +11,7 @@ All events share a common envelope:
 #[derive(Serialize, Deserialize)]
 struct EventEnvelope {
     id: String,                      // ULID
-    event_type: String,              // matches NATS subject
+    event_type: String,              // matches bus subject
     timestamp: DateTime<Utc>,
     source: String,                  // plugin that emitted this
     correlation_id: Option<String>,  // links related events
@@ -187,7 +187,7 @@ struct ScopeAssigned {
 
 ### `brain.query.request` (plugin → kernel, request/reply)
 
-Read query against the brain. Uses NATS request/reply pattern.
+Read query against the brain. Uses bus request/reply pattern.
 
 ```rust
 struct BrainQueryRequest {
@@ -376,8 +376,8 @@ struct PluginRegister {
     name: String,
     version: String,
     description: String,
-    consumes: Vec<String>,   // NATS subjects
-    produces: Vec<String>,   // NATS subjects
+    consumes: Vec<String>,   // bus subjects
+    produces: Vec<String>,   // bus subjects
     health_subject: String,  // e.g., "plugin.telegram.health"
 }
 ```
