@@ -13,7 +13,7 @@ use serde::{Deserialize, Serialize};
 use tokio::process::Command;
 use tracing::{error, info, warn};
 
-use crate::config::{load_plugins_config, resolve_plugin_env};
+use crate::config::{load_plugins_config, resolve_plugin_env, sync_process_env_from_file};
 use crate::paths::SeidrumPaths;
 use crate::status::ProcessMeta;
 
@@ -190,9 +190,19 @@ impl ManagedProcess {
     }
 }
 
+fn sync_runtime_env_file() -> Result<()> {
+    let env_path = std::path::Path::new(".env");
+    let loaded = sync_process_env_from_file(env_path)?;
+    if loaded > 0 {
+        info!(path = %env_path.display(), loaded, "Loaded environment from .env");
+    }
+    Ok(())
+}
+
 /// Start the daemon: spawn kernel + all enabled plugins, enter monitoring loop.
 pub async fn start(paths: &SeidrumPaths) -> Result<()> {
     paths.ensure_dirs()?;
+    sync_runtime_env_file()?;
 
     // Check if already running — use create_new for atomic PID file creation
     let pid_file = paths.daemon_pid_file();
@@ -598,6 +608,18 @@ async fn handle_plugin_start(
     let _ = std::fs::remove_file(paths.plugin_stopped_file(plugin_name));
 
     // Resolve env vars
+    if let Err(e) = sync_runtime_env_file() {
+        let response = PluginCommandResponse {
+            success: false,
+            message: format!("Failed to load .env: {}", e),
+        };
+        if let Some(reply) = &msg.reply {
+            let _ = client
+                .reply_to(reply, serde_json::to_vec(&response).unwrap_or_default())
+                .await;
+        }
+        return;
+    }
     let env = crate::config::resolve_plugin_env(entry);
 
     // Create and spawn process
@@ -771,6 +793,8 @@ pub async fn run_kernel_command(paths: &SeidrumPaths, args: &[&str]) -> Result<(
         anyhow::bail!("seidrum-kernel not found at {}", kernel_binary.display());
     }
 
+    sync_runtime_env_file()?;
+
     let status = std::process::Command::new(&kernel_binary)
         .args(args)
         .status()
@@ -790,6 +814,8 @@ pub async fn start_plugin(paths: &SeidrumPaths, name: &str) -> Result<()> {
         .plugins
         .get(name)
         .ok_or_else(|| anyhow::anyhow!("Plugin '{}' not found in plugins.yaml", name))?;
+
+    sync_runtime_env_file()?;
 
     // Remove stopped marker
     let _ = std::fs::remove_file(paths.plugin_stopped_file(name));

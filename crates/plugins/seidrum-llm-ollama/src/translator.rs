@@ -20,7 +20,9 @@ pub fn unified_to_ollama_messages(messages: &[UnifiedMessage]) -> Vec<OllamaMess
         let mut ollama_msg = OllamaMessage {
             role: msg.role.clone(),
             content: msg.content.clone(),
+            thinking: None,
             tool_calls: None,
+            tool_name: None,
         };
 
         // Add tool calls
@@ -29,12 +31,13 @@ pub fn unified_to_ollama_messages(messages: &[UnifiedMessage]) -> Vec<OllamaMess
                 tool_calls
                     .iter()
                     .map(|tc| OllamaToolCall {
-                        id: tc.id.clone(),
-                        call_type: "function".to_string(),
+                        id: Some(tc.id.clone()),
+                        call_type: Some("function".to_string()),
                         function: OllamaFunctionCall {
+                            index: None,
                             name: tc.name.clone(),
-                            arguments: serde_json::to_string(&tc.arguments)
-                                .unwrap_or_else(|_| "{}".to_string()),
+                            arguments: tc.arguments.clone(),
+                            description: None,
                         },
                     })
                     .collect(),
@@ -49,7 +52,9 @@ pub fn unified_to_ollama_messages(messages: &[UnifiedMessage]) -> Vec<OllamaMess
                 result.push(OllamaMessage {
                     role: "tool".to_string(),
                     content: Some(tr.content.clone()),
+                    thinking: None,
                     tool_calls: None,
+                    tool_name: None,
                 });
             }
         }
@@ -77,16 +82,23 @@ pub fn unified_to_ollama_tools(tools: &[ToolSchema]) -> Vec<OllamaTool> {
 pub fn ollama_tool_calls_to_unified(tool_calls: &[OllamaToolCall]) -> Vec<UnifiedToolCall> {
     tool_calls
         .iter()
-        .filter_map(|tc| {
-            // Parse arguments from JSON string
-            let args = serde_json::from_str(&tc.function.arguments)
-                .unwrap_or_else(|_| serde_json::json!({}));
+        .enumerate()
+        .map(|(idx, tc)| {
+            let args = match &tc.function.arguments {
+                serde_json::Value::String(raw) => serde_json::from_str(raw)
+                    .unwrap_or_else(|_| serde_json::Value::String(raw.clone())),
+                value => value.clone(),
+            };
 
-            Some(UnifiedToolCall {
-                id: tc.id.clone(),
+            UnifiedToolCall {
+                id: tc
+                    .id
+                    .clone()
+                    .or_else(|| tc.function.index.map(|i| format!("call_{i}")))
+                    .unwrap_or_else(|| format!("call_{idx}")),
                 name: tc.function.name.clone(),
                 arguments: args,
-            })
+            }
         })
         .collect()
 }
@@ -152,7 +164,7 @@ mod tests {
         assert!(ollama_msgs[0].tool_calls.is_some());
         let tool_calls = ollama_msgs[0].tool_calls.as_ref().unwrap();
         assert_eq!(tool_calls[0].function.name, "search");
-        assert_eq!(tool_calls[0].id, "call_123");
+        assert_eq!(tool_calls[0].id.as_deref(), Some("call_123"));
     }
 
     #[test]
@@ -191,11 +203,13 @@ mod tests {
     #[test]
     fn test_ollama_tool_calls_to_unified() {
         let tool_calls = vec![OllamaToolCall {
-            id: "call_123".to_string(),
-            call_type: "function".to_string(),
+            id: Some("call_123".to_string()),
+            call_type: Some("function".to_string()),
             function: OllamaFunctionCall {
+                index: None,
                 name: "search".to_string(),
-                arguments: r#"{"query": "test"}"#.to_string(),
+                arguments: serde_json::json!({"query": "test"}),
+                description: None,
             },
         }];
 
@@ -203,6 +217,25 @@ mod tests {
         assert_eq!(unified.len(), 1);
         assert_eq!(unified[0].id, "call_123");
         assert_eq!(unified[0].name, "search");
+        assert_eq!(unified[0].arguments, serde_json::json!({"query": "test"}));
+    }
+
+    #[test]
+    fn test_ollama_tool_calls_to_unified_with_string_args() {
+        let tool_calls = vec![OllamaToolCall {
+            id: None,
+            call_type: None,
+            function: OllamaFunctionCall {
+                index: Some(7),
+                name: "search".to_string(),
+                arguments: serde_json::Value::String(r#"{"query":"test"}"#.to_string()),
+                description: None,
+            },
+        }];
+
+        let unified = ollama_tool_calls_to_unified(&tool_calls);
+        assert_eq!(unified.len(), 1);
+        assert_eq!(unified[0].id, "call_7");
         assert_eq!(unified[0].arguments, serde_json::json!({"query": "test"}));
     }
 }
