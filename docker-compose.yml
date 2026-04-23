@@ -21,6 +21,7 @@ services:
       BUS_URL: ws://kernel:9000
       ARANGO_URL: http://arangodb:8529
       ARANGO_PASSWORD: ${ARANGO_PASSWORD:-seidrum_dev}
+      LLM_PROVIDER: ${LLM_PROVIDER:-google}
     depends_on: [arangodb]
     restart: unless-stopped
 
@@ -192,9 +193,12 @@ services:
       dockerfile: crates/plugins/seidrum-llm-ollama/Dockerfile
     environment:
       BUS_URL: ws://kernel:9000
-      OLLAMA_URL: ${OLLAMA_URL:-http://ollama:11434}
-      LLM_MODEL: ${LLM_OLLAMA_MODEL:-llama3.2}
+      OLLAMA_URL: ${OLLAMA_URL:-http://host.docker.internal:11434}
+      OLLAMA_API_KEY: ${OLLAMA_API_KEY:-}
+      LLM_MODEL: ${LLM_OLLAMA_MODEL:-}
     depends_on: [kernel]
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
     restart: unless-stopped
 
   feedback-extractor:

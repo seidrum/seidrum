@@ -3,7 +3,7 @@ mod translator;
 
 use std::time::Instant;
 
-use anyhow::Result;
+use anyhow::{Context, Result};
 use clap::Parser;
 use tracing::{error, info, warn};
 
@@ -11,7 +11,9 @@ use seidrum_common::events::{
     EventEnvelope, LlmResponse, PluginRegister, TokenUsage, ToolCallResponse, UnifiedLlmRequest,
 };
 
-use ollama_types::{OllamaMessage, OllamaRequest, OllamaResponse};
+use ollama_types::{
+    OllamaMessage, OllamaModelTag, OllamaOptions, OllamaRequest, OllamaResponse, OllamaTagsResponse,
+};
 use translator::{
     ollama_tool_calls_to_unified, tool_call_to_dispatch_request, unified_to_ollama_messages,
     unified_to_ollama_tools,
@@ -35,8 +37,12 @@ struct Cli {
     #[arg(long, env = "OLLAMA_URL", default_value = "http://localhost:11434")]
     ollama_url: String,
 
-    /// Model to use
-    #[arg(long, env = "LLM_MODEL", default_value = "llama3.2")]
+    /// Optional API key for direct access to ollama.com/api
+    #[arg(long, env = "OLLAMA_API_KEY", default_value = "")]
+    ollama_api_key: String,
+
+    /// Model to use. If empty, the first installed non-embedding model is selected.
+    #[arg(long, env = "LLM_MODEL", default_value = "")]
     model: String,
 
     /// Max tokens for response
@@ -61,7 +67,7 @@ async fn main() -> Result<()> {
     info!(
         bus_url = %cli.bus_url,
         ollama_url = %cli.ollama_url,
-        model = %cli.model,
+        model = cli.model.trim(),
         max_tool_rounds = cli.max_tool_rounds,
         "Starting seidrum-llm-ollama provider plugin..."
     );
@@ -111,7 +117,8 @@ async fn main() -> Result<()> {
         let nats_clone = nats.clone();
         let http_clone = http.clone();
         let ollama_url_clone = cli.ollama_url.clone();
-        let model = cli.model.clone();
+        let ollama_api_key = cli.ollama_api_key.clone();
+        let configured_model = normalize_optional_string(&cli.model);
         let max_tokens = cli.max_tokens;
         let max_tool_rounds = cli.max_tool_rounds;
 
@@ -120,7 +127,8 @@ async fn main() -> Result<()> {
                 &msg.payload,
                 &http_clone,
                 &ollama_url_clone,
-                &model,
+                configured_model.as_deref(),
+                &ollama_api_key,
                 max_tokens,
                 max_tool_rounds,
                 &nats_clone,
@@ -149,7 +157,7 @@ async fn main() -> Result<()> {
                         agent_id: "unknown".to_string(),
                         content: Some(format!("LLM provider error: {}", e)),
                         tool_calls: None,
-                        model_used: model,
+                        model_used: configured_model.unwrap_or_else(|| "<auto>".to_string()),
                         provider: "ollama".to_string(),
                         tokens: TokenUsage {
                             prompt_tokens: 0,
@@ -173,6 +181,140 @@ async fn main() -> Result<()> {
     Ok(())
 }
 
+fn normalize_optional_string(value: &str) -> Option<String> {
+    let trimmed = value.trim();
+    if trimmed.is_empty() {
+        None
+    } else {
+        Some(trimmed.to_string())
+    }
+}
+
+fn ollama_endpoint(base_url: &str, path: &str) -> String {
+    let trimmed = base_url.trim_end_matches('/');
+    let suffix = path.trim_start_matches('/');
+    if trimmed.ends_with("/api") {
+        format!("{trimmed}/{suffix}")
+    } else {
+        format!("{trimmed}/api/{suffix}")
+    }
+}
+
+fn apply_ollama_auth(request: reqwest::RequestBuilder, api_key: &str) -> reqwest::RequestBuilder {
+    match normalize_optional_string(api_key) {
+        Some(key) => request.bearer_auth(key),
+        None => request,
+    }
+}
+
+fn is_embedding_model(model: &OllamaModelTag) -> bool {
+    let mut haystack = vec![model.name.to_lowercase(), model.model.to_lowercase()];
+    if !model.details.family.is_empty() {
+        haystack.push(model.details.family.to_lowercase());
+    }
+    haystack.extend(
+        model
+            .details
+            .families
+            .iter()
+            .map(|family| family.to_lowercase()),
+    );
+    haystack.iter().any(|value| {
+        value.contains("embed") || value.contains("embedding") || value.contains("bert")
+    })
+}
+
+fn pick_default_model(models: &[OllamaModelTag]) -> Option<String> {
+    models
+        .iter()
+        .find(|model| !is_embedding_model(model))
+        .or_else(|| models.first())
+        .map(|model| model.model.clone())
+}
+
+fn available_models_summary(models: &[OllamaModelTag]) -> String {
+    models
+        .iter()
+        .map(|model| model.model.as_str())
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
+async fn fetch_models(
+    http: &reqwest::Client,
+    ollama_url: &str,
+    ollama_api_key: &str,
+) -> Result<Vec<OllamaModelTag>> {
+    let response = apply_ollama_auth(
+        http.get(ollama_endpoint(ollama_url, "tags")),
+        ollama_api_key,
+    )
+    .send()
+    .await
+    .context("failed to fetch Ollama model list")?;
+
+    let status = response.status();
+    let body_bytes = response.bytes().await?;
+    if !status.is_success() {
+        let body = String::from_utf8_lossy(&body_bytes);
+        anyhow::bail!("failed to list Ollama models ({}): {}", status, body);
+    }
+
+    let tags: OllamaTagsResponse =
+        serde_json::from_slice(&body_bytes).context("invalid JSON from /api/tags")?;
+    Ok(tags.models)
+}
+
+async fn resolve_model(
+    http: &reqwest::Client,
+    ollama_url: &str,
+    configured_model: Option<&str>,
+    ollama_api_key: &str,
+) -> Result<String> {
+    if let Some(model) = configured_model {
+        return Ok(model.to_string());
+    }
+
+    let models = fetch_models(http, ollama_url, ollama_api_key).await?;
+    let selected = pick_default_model(&models).ok_or_else(|| {
+        anyhow::anyhow!(
+            "No Ollama models available. Pull a local chat model or set LLM_OLLAMA_MODEL explicitly."
+        )
+    })?;
+    info!(model = %selected, "Auto-selected Ollama model");
+    Ok(selected)
+}
+
+fn build_ollama_messages(request: &UnifiedLlmRequest) -> Vec<OllamaMessage> {
+    let mut messages = Vec::new();
+    if let Some(system_prompt) = request
+        .system_prompt
+        .as_deref()
+        .map(str::trim)
+        .filter(|prompt| !prompt.is_empty())
+    {
+        messages.push(OllamaMessage::text("system", system_prompt));
+    }
+    messages.extend(unified_to_ollama_messages(&request.messages));
+    messages
+}
+
+fn build_ollama_options(
+    request: &UnifiedLlmRequest,
+    fallback_max_tokens: u32,
+) -> Option<OllamaOptions> {
+    let options = OllamaOptions {
+        temperature: request.config.temperature.map(|t| t as f32),
+        num_predict: Some(request.config.max_tokens.unwrap_or(fallback_max_tokens)),
+        top_p: request.config.top_p.map(|p| p as f32),
+    };
+    if options.is_empty() {
+        None
+    } else {
+        Some(options)
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Provider request handler
 // ---------------------------------------------------------------------------
@@ -181,8 +323,9 @@ async fn handle_provider_request(
     payload: &[u8],
     http: &reqwest::Client,
     ollama_url: &str,
-    model: &str,
-    _max_tokens: u32,
+    configured_model: Option<&str>,
+    ollama_api_key: &str,
+    max_tokens: u32,
     max_tool_rounds: u32,
     nats: &seidrum_common::bus_client::BusClient,
 ) -> Result<LlmResponse> {
@@ -190,16 +333,18 @@ async fn handle_provider_request(
 
     let agent_id = &request.agent_id;
     let correlation_id = request.correlation_id.as_deref();
+    let model = resolve_model(http, ollama_url, configured_model, ollama_api_key).await?;
 
     info!(
         agent_id = %agent_id,
         message_count = request.messages.len(),
         tool_count = request.tools.len(),
+        model = %model,
         "Handling llm.provider.ollama request"
     );
 
-    // Convert unified messages to Ollama format
-    let mut messages = unified_to_ollama_messages(&request.messages);
+    // Convert unified messages to Ollama format and preserve the shared system prompt.
+    let mut messages = build_ollama_messages(&request);
 
     // Convert unified tool schemas to Ollama tool format
     let tools_option = if request.tools.is_empty() {
@@ -208,14 +353,14 @@ async fn handle_provider_request(
         Some(unified_to_ollama_tools(&request.tools))
     };
 
-    // Temperature from config
-    let temperature = request.config.temperature.map(|t| t as f32);
+    let options = build_ollama_options(&request, max_tokens);
 
     // Tool call loop
     let mut total_input_tokens: u32 = 0;
     let mut total_output_tokens: u32 = 0;
     let mut final_content: Option<String> = None;
     let mut tool_rounds_count: u32 = 0;
+    let mut finish_reason = "stop".to_string();
     let start = Instant::now();
 
     for round in 0..=max_tool_rounds {
@@ -224,15 +369,14 @@ async fn handle_provider_request(
         let api_request = OllamaRequest {
             model: model.to_string(),
             messages: messages.clone(),
-            temperature,
             tools: tools_option.clone(),
+            options: options.clone(),
             stream: false,
         };
 
-        let url = format!("{}/api/chat", ollama_url);
+        let url = ollama_endpoint(ollama_url, "chat");
 
-        let response = http
-            .post(&url)
+        let response = apply_ollama_auth(http.post(&url), ollama_api_key)
             .header("Content-Type", "application/json")
             .json(&api_request)
             .send()
@@ -251,10 +395,31 @@ async fn handle_provider_request(
                 // Don't log raw body — it may contain sensitive information
                 Err(_) => format!("Non-JSON error response (status {})", status),
             };
+
+            if err_msg.contains("not found") {
+                let available = fetch_models(http, ollama_url, ollama_api_key)
+                    .await
+                    .ok()
+                    .filter(|models| !models.is_empty())
+                    .map(|models| available_models_summary(&models));
+
+                if let Some(available_models) = available {
+                    anyhow::bail!(
+                        "Ollama model '{}' not found. Available models: {}",
+                        model,
+                        available_models
+                    );
+                }
+            }
+
             anyhow::bail!("Ollama API error ({}): {}", status, err_msg);
         }
 
         let api_response: OllamaResponse = serde_json::from_slice(&body_bytes)?;
+        finish_reason = api_response
+            .done_reason
+            .clone()
+            .unwrap_or_else(|| "stop".to_string());
 
         // Update token counts
         if let Some(prompt_tokens) = api_response.prompt_eval_count {
@@ -268,6 +433,7 @@ async fn handle_provider_request(
             model = %model,
             input_tokens = total_input_tokens,
             output_tokens = total_output_tokens,
+            finish_reason = %finish_reason,
             round,
             "Ollama API response received"
         );
@@ -375,7 +541,7 @@ async fn handle_provider_request(
                 Ok(s) => s,
                 Err(_) => tool_result.result.to_string(),
             };
-            messages.push(OllamaMessage::text("tool", &result_content));
+            messages.push(OllamaMessage::tool_result(&tc.name, &result_content));
         }
     }
 
@@ -395,7 +561,7 @@ async fn handle_provider_request(
             estimated_cost_usd: 0.0,
         },
         duration_ms,
-        finish_reason: "stop".to_string(),
+        finish_reason,
         tool_rounds: tool_rounds_count,
     };
 
@@ -407,4 +573,90 @@ async fn handle_provider_request(
     );
 
     Ok(llm_response)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use seidrum_common::events::{LlmCallConfig, UnifiedMessage};
+
+    #[test]
+    fn build_messages_prepends_system_prompt() {
+        let request = UnifiedLlmRequest {
+            agent_id: "assistant".to_string(),
+            messages: vec![UnifiedMessage {
+                role: "user".to_string(),
+                content: Some("Hello".to_string()),
+                tool_calls: None,
+                tool_results: None,
+            }],
+            system_prompt: Some("You are concise.".to_string()),
+            tools: vec![],
+            config: LlmCallConfig {
+                temperature: Some(0.2),
+                max_tokens: Some(128),
+                top_p: Some(0.9),
+            },
+            routing_strategy: "best-first".to_string(),
+            model_preferences: vec![],
+            correlation_id: None,
+            scope: None,
+            user_id: None,
+        };
+
+        let messages = build_ollama_messages(&request);
+        assert_eq!(messages.len(), 2);
+        assert_eq!(messages[0].role, "system");
+        assert_eq!(messages[0].content.as_deref(), Some("You are concise."));
+        assert_eq!(messages[1].role, "user");
+    }
+
+    #[test]
+    fn build_options_maps_shared_config() {
+        let request = UnifiedLlmRequest {
+            agent_id: "assistant".to_string(),
+            messages: vec![],
+            system_prompt: None,
+            tools: vec![],
+            config: LlmCallConfig {
+                temperature: Some(0.2),
+                max_tokens: Some(128),
+                top_p: Some(0.9),
+            },
+            routing_strategy: "best-first".to_string(),
+            model_preferences: vec![],
+            correlation_id: None,
+            scope: None,
+            user_id: None,
+        };
+
+        let options = build_ollama_options(&request, 4096).expect("options");
+        assert_eq!(options.temperature, Some(0.2_f32));
+        assert_eq!(options.num_predict, Some(128));
+        assert_eq!(options.top_p, Some(0.9_f32));
+    }
+
+    #[test]
+    fn pick_default_model_prefers_chat_model_over_embedding_model() {
+        let models = vec![
+            OllamaModelTag {
+                name: "nomic-embed-text:latest".to_string(),
+                model: "nomic-embed-text:latest".to_string(),
+                details: ollama_types::OllamaModelDetails {
+                    family: "nomic-bert".to_string(),
+                    families: vec!["nomic-bert".to_string()],
+                },
+            },
+            OllamaModelTag {
+                name: "gemma4:26b".to_string(),
+                model: "gemma4:26b".to_string(),
+                details: ollama_types::OllamaModelDetails {
+                    family: "gemma4".to_string(),
+                    families: vec!["gemma4".to_string()],
+                },
+            },
+        ];
+
+        assert_eq!(pick_default_model(&models).as_deref(), Some("gemma4:26b"));
+    }
 }
