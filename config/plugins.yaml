@@ -94,7 +94,7 @@ plugins:
     env:
       OLLAMA_URL: "${OLLAMA_URL:-http://localhost:11434}"
       OLLAMA_API_KEY: "${OLLAMA_API_KEY}"
-      LLM_MODEL: "${LLM_OLLAMA_MODEL:-}"
+      LLM_MODEL: "${LLM_OLLAMA_MODEL:-llama3.2}"
 
   feedback-extractor:
     binary: seidrum-feedback-extractor

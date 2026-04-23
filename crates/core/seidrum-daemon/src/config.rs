@@ -98,6 +98,107 @@ pub fn resolve_plugin_env(entry: &PluginEntry) -> BTreeMap<String, String> {
         .collect()
 }
 
+/// Load a `.env` file into the current process without overriding already
+/// exported variables.
+pub fn sync_process_env_from_file(path: &Path) -> Result<usize> {
+    if !path.exists() {
+        return Ok(0);
+    }
+
+    let contents = std::fs::read_to_string(path)
+        .with_context(|| format!("Failed to read {}", path.display()))?;
+    let entries = parse_env_contents(&contents)
+        .with_context(|| format!("Failed to parse {}", path.display()))?;
+
+    let mut loaded = 0;
+    for (key, value) in entries {
+        if std::env::var_os(&key).is_none() {
+            std::env::set_var(&key, value);
+            loaded += 1;
+        }
+    }
+
+    Ok(loaded)
+}
+
+fn parse_env_contents(contents: &str) -> Result<BTreeMap<String, String>> {
+    let mut entries = BTreeMap::new();
+
+    for (line_no, line) in contents.lines().enumerate() {
+        if let Some((key, value)) =
+            parse_env_line(line).with_context(|| format!("line {}", line_no + 1))?
+        {
+            entries.insert(key, value);
+        }
+    }
+
+    Ok(entries)
+}
+
+fn parse_env_line(line: &str) -> Result<Option<(String, String)>> {
+    let trimmed = line.trim();
+    if trimmed.is_empty() || trimmed.starts_with('#') {
+        return Ok(None);
+    }
+
+    let eq_pos = trimmed
+        .find('=')
+        .ok_or_else(|| anyhow::anyhow!("expected KEY=VALUE"))?;
+    let key = trimmed[..eq_pos].trim();
+    if key.is_empty() {
+        anyhow::bail!("environment variable name cannot be empty");
+    }
+
+    let raw_value = trimmed[eq_pos + 1..].trim();
+    let value = parse_env_value(raw_value)?;
+    Ok(Some((key.to_string(), value)))
+}
+
+fn parse_env_value(raw: &str) -> Result<String> {
+    if raw.starts_with('"') {
+        return parse_double_quoted_env_value(raw);
+    }
+
+    if raw.starts_with('\'') {
+        if raw.len() < 2 || !raw.ends_with('\'') {
+            anyhow::bail!("unterminated single-quoted value");
+        }
+        return Ok(raw[1..raw.len() - 1].to_string());
+    }
+
+    Ok(raw.to_string())
+}
+
+fn parse_double_quoted_env_value(raw: &str) -> Result<String> {
+    if raw.len() < 2 || !raw.ends_with('"') {
+        anyhow::bail!("unterminated double-quoted value");
+    }
+
+    let mut value = String::new();
+    let mut chars = raw[1..raw.len() - 1].chars();
+    while let Some(ch) = chars.next() {
+        if ch != '\\' {
+            value.push(ch);
+            continue;
+        }
+
+        let escaped = chars
+            .next()
+            .ok_or_else(|| anyhow::anyhow!("unterminated escape sequence"))?;
+        match escaped {
+            '\\' => value.push('\\'),
+            '"' => value.push('"'),
+            '\'' => value.push('\''),
+            'n' => value.push('\n'),
+            'r' => value.push('\r'),
+            't' => value.push('\t'),
+            other => value.push(other),
+        }
+    }
+
+    Ok(value)
+}
+
 /// List all plugins in a formatted table.
 pub fn list_plugins(paths: &SeidrumPaths) -> Result<()> {
     let config = load_plugins_config(&paths.plugins_yaml())?;
@@ -160,18 +261,29 @@ pub fn set_enabled(paths: &SeidrumPaths, name: &str, enabled: bool) -> Result<()
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::{Mutex, OnceLock};
+
+    fn env_lock() -> &'static Mutex<()> {
+        static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+        LOCK.get_or_init(|| Mutex::new(()))
+    }
 
     #[test]
     fn resolve_env_simple() {
-        std::env::set_var("SEIDRUM_TEST_VAR", "hello");
-        assert_eq!(resolve_env("${SEIDRUM_TEST_VAR}"), "hello");
-        std::env::remove_var("SEIDRUM_TEST_VAR");
+        let _guard = env_lock().lock().unwrap();
+        std::env::set_var("SEIDRUM_TEST_VAR_SIMPLE", "hello");
+        assert_eq!(resolve_env("${SEIDRUM_TEST_VAR_SIMPLE}"), "hello");
+        std::env::remove_var("SEIDRUM_TEST_VAR_SIMPLE");
     }
 
     #[test]
     fn resolve_env_default() {
-        std::env::remove_var("SEIDRUM_MISSING_VAR");
-        assert_eq!(resolve_env("${SEIDRUM_MISSING_VAR:-fallback}"), "fallback");
+        let _guard = env_lock().lock().unwrap();
+        std::env::remove_var("SEIDRUM_TEST_MISSING_VAR");
+        assert_eq!(
+            resolve_env("${SEIDRUM_TEST_MISSING_VAR:-fallback}"),
+            "fallback"
+        );
     }
 
     #[test]
@@ -181,11 +293,88 @@ mod tests {
 
     #[test]
     fn resolve_env_multiple() {
-        std::env::set_var("SEIDRUM_A", "one");
-        std::env::set_var("SEIDRUM_B", "two");
-        assert_eq!(resolve_env("${SEIDRUM_A}-${SEIDRUM_B}"), "one-two");
-        std::env::remove_var("SEIDRUM_A");
-        std::env::remove_var("SEIDRUM_B");
+        let _guard = env_lock().lock().unwrap();
+        std::env::set_var("SEIDRUM_TEST_A", "one");
+        std::env::set_var("SEIDRUM_TEST_B", "two");
+        assert_eq!(
+            resolve_env("${SEIDRUM_TEST_A}-${SEIDRUM_TEST_B}"),
+            "one-two"
+        );
+        std::env::remove_var("SEIDRUM_TEST_A");
+        std::env::remove_var("SEIDRUM_TEST_B");
+    }
+
+    #[test]
+    fn sync_process_env_from_file_loads_quoted_values() {
+        let _guard = env_lock().lock().unwrap();
+        let tempdir = tempfile::tempdir().unwrap();
+        let env_path = tempdir.path().join(".env");
+
+        std::fs::write(
+            &env_path,
+            [
+                "SEIDRUM_ENV_PLAIN=hello",
+                "SEIDRUM_ENV_SPACED=\"hello world\"",
+                "SEIDRUM_ENV_MULTILINE=\"line1\\nline2\"",
+            ]
+            .join("\n"),
+        )
+        .unwrap();
+
+        std::env::remove_var("SEIDRUM_ENV_PLAIN");
+        std::env::remove_var("SEIDRUM_ENV_SPACED");
+        std::env::remove_var("SEIDRUM_ENV_MULTILINE");
+
+        let loaded = sync_process_env_from_file(&env_path).unwrap();
+
+        assert_eq!(loaded, 3);
+        assert_eq!(
+            std::env::var("SEIDRUM_ENV_PLAIN").unwrap(),
+            "hello".to_string()
+        );
+        assert_eq!(
+            std::env::var("SEIDRUM_ENV_SPACED").unwrap(),
+            "hello world".to_string()
+        );
+        assert_eq!(
+            std::env::var("SEIDRUM_ENV_MULTILINE").unwrap(),
+            "line1\nline2".to_string()
+        );
+
+        std::env::remove_var("SEIDRUM_ENV_PLAIN");
+        std::env::remove_var("SEIDRUM_ENV_SPACED");
+        std::env::remove_var("SEIDRUM_ENV_MULTILINE");
+    }
+
+    #[test]
+    fn sync_process_env_from_file_preserves_existing_values() {
+        let _guard = env_lock().lock().unwrap();
+        let tempdir = tempfile::tempdir().unwrap();
+        let env_path = tempdir.path().join(".env");
+
+        std::fs::write(
+            &env_path,
+            "SEIDRUM_ENV_EXISTING=from-file\nSEIDRUM_ENV_NEW=new-value\n",
+        )
+        .unwrap();
+
+        std::env::set_var("SEIDRUM_ENV_EXISTING", "from-shell");
+        std::env::remove_var("SEIDRUM_ENV_NEW");
+
+        let loaded = sync_process_env_from_file(&env_path).unwrap();
+
+        assert_eq!(loaded, 1);
+        assert_eq!(
+            std::env::var("SEIDRUM_ENV_EXISTING").unwrap(),
+            "from-shell".to_string()
+        );
+        assert_eq!(
+            std::env::var("SEIDRUM_ENV_NEW").unwrap(),
+            "new-value".to_string()
+        );
+
+        std::env::remove_var("SEIDRUM_ENV_EXISTING");
+        std::env::remove_var("SEIDRUM_ENV_NEW");
     }
 
     #[test]

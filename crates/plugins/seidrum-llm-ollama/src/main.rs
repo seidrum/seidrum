@@ -41,8 +41,9 @@ struct Cli {
     #[arg(long, env = "OLLAMA_API_KEY", default_value = "")]
     ollama_api_key: String,
 
-    /// Model to use. If empty, the first installed non-embedding model is selected.
-    #[arg(long, env = "LLM_MODEL", default_value = "")]
+    /// Model to use. Set an explicit empty string to auto-select the first
+    /// installed non-embedding model.
+    #[arg(long, env = "LLM_MODEL", default_value = "llama3.2")]
     model: String,
 
     /// Max tokens for response
