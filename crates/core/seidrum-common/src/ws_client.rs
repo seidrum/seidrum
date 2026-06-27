@@ -327,7 +327,9 @@ impl WsClient {
                 return Ok(());
             }
             if tokio::time::Instant::now() >= deadline {
-                return Err(anyhow::anyhow!("timed out connecting to eventbus WS"));
+                return Err(anyhow::anyhow!(
+                    "failed to connect or timed out connecting to eventbus WS"
+                ));
             }
             tokio::time::sleep(Duration::from_millis(10)).await;
         }
