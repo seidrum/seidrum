@@ -13,7 +13,7 @@ use reqwest::Client;
 use serde_json::json;
 use std::collections::HashMap;
 use std::net::IpAddr;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use thiserror::Error;
 use tracing::{debug, warn};
@@ -218,6 +218,53 @@ fn is_private_ip(ip: &IpAddr) -> bool {
     }
 }
 
+/// Webhook circuit breaker settings.
+#[derive(Debug, Clone, Copy)]
+pub struct WebhookCircuitBreakerConfig {
+    /// Consecutive delivery failures before opening the circuit.
+    pub failure_threshold: u32,
+    /// Initial open-circuit cooldown before allowing a half-open probe.
+    pub initial_cooldown: Duration,
+    /// Maximum cooldown after repeated failed half-open probes.
+    pub max_cooldown: Duration,
+}
+
+impl Default for WebhookCircuitBreakerConfig {
+    fn default() -> Self {
+        Self {
+            failure_threshold: 3,
+            initial_cooldown: Duration::from_secs(30),
+            max_cooldown: Duration::from_secs(300),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum CircuitMode {
+    Closed,
+    Open,
+    HalfOpen,
+}
+
+#[derive(Debug, Clone)]
+struct CircuitState {
+    mode: CircuitMode,
+    consecutive_failures: u32,
+    cooldown: Duration,
+    opened_until: Option<SystemTime>,
+}
+
+impl CircuitState {
+    fn new(config: WebhookCircuitBreakerConfig) -> Self {
+        Self {
+            mode: CircuitMode::Closed,
+            consecutive_failures: 0,
+            cooldown: config.initial_cooldown,
+            opened_until: None,
+        }
+    }
+}
+
 /// Webhook delivery channel.
 /// Sends events as HTTP POST requests to a configured URL.
 ///
@@ -241,6 +288,8 @@ pub struct WebhookChannel {
     /// `Strict` so production deployments are safe by default; the
     /// builder threads the configured policy through here.
     policy: WebhookUrlPolicy,
+    circuit_config: WebhookCircuitBreakerConfig,
+    circuits: Mutex<HashMap<String, CircuitState>>,
 }
 
 impl WebhookChannel {
@@ -252,12 +301,25 @@ impl WebhookChannel {
     /// Create a new webhook delivery channel with an explicit SSRF policy.
     /// Use [`WebhookUrlPolicy::Permissive`] only for tests / trusted networks.
     pub fn with_policy(policy: WebhookUrlPolicy) -> Arc<Self> {
+        Self::with_policy_and_circuit(policy, WebhookCircuitBreakerConfig::default())
+    }
+
+    /// Create a new webhook delivery channel with explicit SSRF and circuit breaker settings.
+    pub fn with_policy_and_circuit(
+        policy: WebhookUrlPolicy,
+        circuit_config: WebhookCircuitBreakerConfig,
+    ) -> Arc<Self> {
         let client = Client::builder()
             .redirect(Policy::none())
             .timeout(Duration::from_secs(30))
             .build()
             .expect("reqwest client builder should succeed with default settings");
-        Arc::new(Self { client, policy })
+        Arc::new(Self {
+            client,
+            policy,
+            circuit_config,
+            circuits: Mutex::new(HashMap::new()),
+        })
     }
 
     /// Extract URL and headers from ChannelConfig.
@@ -268,6 +330,86 @@ impl WebhookChannel {
                 "Invalid config for WebhookChannel".to_string(),
             )),
         }
+    }
+
+    fn ensure_circuit_allows_delivery(&self, url: &str) -> DeliveryResult<()> {
+        let now = SystemTime::now();
+        let mut circuits = self
+            .circuits
+            .lock()
+            .expect("webhook circuit mutex poisoned");
+        let state = circuits
+            .entry(url.to_string())
+            .or_insert_with(|| CircuitState::new(self.circuit_config));
+
+        match state.mode {
+            CircuitMode::Closed | CircuitMode::HalfOpen => Ok(()),
+            CircuitMode::Open => {
+                if state.opened_until.is_some_and(|until| now >= until) {
+                    state.mode = CircuitMode::HalfOpen;
+                    debug!(url = %url, "Webhook circuit half-open; allowing probe delivery");
+                    Ok(())
+                } else {
+                    warn!(url = %url, "Webhook circuit open; skipping delivery");
+                    Err(DeliveryError::Failed(
+                        "webhook circuit open; delivery skipped until cooldown expires".to_string(),
+                    ))
+                }
+            }
+        }
+    }
+
+    fn record_success(&self, url: &str) {
+        let mut circuits = self
+            .circuits
+            .lock()
+            .expect("webhook circuit mutex poisoned");
+        let state = circuits
+            .entry(url.to_string())
+            .or_insert_with(|| CircuitState::new(self.circuit_config));
+        if state.mode != CircuitMode::Closed || state.consecutive_failures > 0 {
+            debug!(url = %url, "Webhook circuit closed after successful delivery");
+        }
+        *state = CircuitState::new(self.circuit_config);
+    }
+
+    fn record_failure(&self, url: &str) {
+        let mut circuits = self
+            .circuits
+            .lock()
+            .expect("webhook circuit mutex poisoned");
+        let state = circuits
+            .entry(url.to_string())
+            .or_insert_with(|| CircuitState::new(self.circuit_config));
+        state.consecutive_failures = state.consecutive_failures.saturating_add(1);
+
+        if state.mode == CircuitMode::HalfOpen
+            || state.consecutive_failures >= self.circuit_config.failure_threshold
+        {
+            state.mode = CircuitMode::Open;
+            state.opened_until = Some(SystemTime::now() + state.cooldown);
+            warn!(
+                url = %url,
+                cooldown_ms = state.cooldown.as_millis() as u64,
+                consecutive_failures = state.consecutive_failures,
+                "Webhook circuit opened"
+            );
+            state.cooldown = std::cmp::min(
+                state.cooldown.saturating_mul(2),
+                self.circuit_config.max_cooldown,
+            );
+        }
+    }
+
+    fn circuit_blocks_health(&self, url: &str) -> bool {
+        let now = SystemTime::now();
+        let circuits = self
+            .circuits
+            .lock()
+            .expect("webhook circuit mutex poisoned");
+        circuits.get(url).is_some_and(|state| {
+            state.mode == CircuitMode::Open && state.opened_until.is_some_and(|until| now < until)
+        })
     }
 }
 
@@ -281,6 +423,7 @@ impl DeliveryChannel for WebhookChannel {
     ) -> DeliveryResult<DeliveryReceipt> {
         let start = SystemTime::now();
         let (url, headers) = Self::extract_config(config)?;
+        self.ensure_circuit_allows_delivery(&url)?;
 
         // N1 + F5 + F6: validate-and-pin the URL on every delivery.
         // The validator runs synchronous DNS via to_socket_addrs, so we
@@ -303,12 +446,14 @@ impl DeliveryChannel for WebhookChannel {
                     error = %e,
                     "WebhookChannel rejecting delivery — URL no longer passes policy (DNS rebinding?)"
                 );
+                self.record_failure(&url);
                 return Err(DeliveryError::Permanent(format!(
                     "URL no longer passes SSRF policy: {}",
                     e
                 )));
             }
             Err(join_err) => {
+                self.record_failure(&url);
                 return Err(DeliveryError::Failed(format!(
                     "validation task panicked: {}",
                     join_err
@@ -330,6 +475,7 @@ impl DeliveryChannel for WebhookChannel {
         {
             Ok(c) => c,
             Err(e) => {
+                self.record_failure(&url);
                 return Err(DeliveryError::Failed(format!(
                     "failed to build pinned client: {}",
                     e
@@ -353,11 +499,10 @@ impl DeliveryChannel for WebhookChannel {
         }
 
         // Send the request
-        let response = req
-            .json(&body)
-            .send()
-            .await
-            .map_err(|e| DeliveryError::Failed(format!("HTTP request failed: {}", e)))?;
+        let response = req.json(&body).send().await.map_err(|e| {
+            self.record_failure(&url);
+            DeliveryError::Failed(format!("HTTP request failed: {}", e))
+        })?;
 
         // Classify status code: 4xx is permanent (auth errors, not-found,
         // method-not-allowed don't get better with retries); 5xx and other
@@ -373,6 +518,7 @@ impl DeliveryChannel for WebhookChannel {
             // "try again later"), and 429 (Too Many Requests) as transient.
             // All other 4xx are permanent.
             let code = status.as_u16();
+            self.record_failure(&url);
             if status.is_client_error() && code != 408 && code != 425 && code != 429 {
                 return Err(DeliveryError::Permanent(msg));
             }
@@ -390,6 +536,7 @@ impl DeliveryChannel for WebhookChannel {
             .as_millis() as u64;
 
         debug!("Webhook delivery succeeded to {} in {}us", url, elapsed);
+        self.record_success(&url);
 
         Ok(DeliveryReceipt {
             delivered_at,
@@ -414,6 +561,9 @@ impl DeliveryChannel for WebhookChannel {
             Ok(c) => c,
             Err(_) => return false,
         };
+        if self.circuit_blocks_health(&url) {
+            return false;
+        }
 
         // Use HEAD to avoid triggering side-effects on POST-only endpoints.
         // Fall back to treating connection success as healthy if HEAD returns
@@ -461,6 +611,108 @@ mod tests {
     #[test]
     fn test_webhook_channel_new() {
         let _channel = WebhookChannel::new();
+    }
+
+    #[tokio::test]
+    async fn test_webhook_circuit_opens_skips_and_half_open_retries() {
+        let channel = WebhookChannel::with_policy_and_circuit(
+            WebhookUrlPolicy::Permissive,
+            WebhookCircuitBreakerConfig {
+                failure_threshold: 2,
+                initial_cooldown: Duration::from_millis(25),
+                max_cooldown: Duration::from_millis(100),
+            },
+        );
+        let config = ChannelConfig::Webhook {
+            // Permissive policy still rejects unspecified destinations, so this
+            // deterministically fails without depending on an external server.
+            url: "http://0.0.0.0/hook".to_string(),
+            headers: HashMap::new(),
+        };
+
+        let first = channel.deliver(b"event", "webhook.circuit", &config).await;
+        assert!(matches!(first, Err(DeliveryError::Permanent(_))));
+
+        let second = channel.deliver(b"event", "webhook.circuit", &config).await;
+        assert!(matches!(second, Err(DeliveryError::Permanent(_))));
+        assert!(!channel.is_healthy(&config).await);
+
+        let skipped = channel.deliver(b"event", "webhook.circuit", &config).await;
+        assert!(matches!(skipped, Err(DeliveryError::Failed(msg)) if msg.contains("circuit open")));
+
+        tokio::time::sleep(Duration::from_millis(35)).await;
+        let half_open_probe = channel.deliver(b"event", "webhook.circuit", &config).await;
+        assert!(matches!(half_open_probe, Err(DeliveryError::Permanent(_))));
+        assert!(!channel.is_healthy(&config).await);
+    }
+
+    #[tokio::test]
+    async fn test_webhook_circuit_recovery_closes_after_half_open_success() {
+        use axum::{routing::post, Router};
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        let hits = Arc::new(AtomicUsize::new(0));
+        let handler_hits = Arc::clone(&hits);
+        let app = Router::new().route(
+            "/hook",
+            post(move || {
+                let handler_hits = Arc::clone(&handler_hits);
+                async move {
+                    let attempt = handler_hits.fetch_add(1, Ordering::SeqCst);
+                    if attempt < 2 {
+                        axum::http::StatusCode::INTERNAL_SERVER_ERROR
+                    } else {
+                        axum::http::StatusCode::OK
+                    }
+                }
+            }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            axum::serve(listener, app).await.unwrap();
+        });
+
+        let channel = WebhookChannel::with_policy_and_circuit(
+            WebhookUrlPolicy::Permissive,
+            WebhookCircuitBreakerConfig {
+                failure_threshold: 2,
+                initial_cooldown: Duration::from_millis(25),
+                max_cooldown: Duration::from_millis(100),
+            },
+        );
+        let config = ChannelConfig::Webhook {
+            url: format!("http://{}/hook", addr),
+            headers: HashMap::new(),
+        };
+
+        assert!(matches!(
+            channel.deliver(b"event", "webhook.circuit", &config).await,
+            Err(DeliveryError::Failed(_))
+        ));
+        assert!(matches!(
+            channel.deliver(b"event", "webhook.circuit", &config).await,
+            Err(DeliveryError::Failed(_))
+        ));
+        assert_eq!(hits.load(Ordering::SeqCst), 2);
+
+        let skipped = channel.deliver(b"event", "webhook.circuit", &config).await;
+        assert!(matches!(skipped, Err(DeliveryError::Failed(msg)) if msg.contains("circuit open")));
+        assert_eq!(hits.load(Ordering::SeqCst), 2);
+
+        tokio::time::sleep(Duration::from_millis(35)).await;
+        assert!(channel
+            .deliver(b"event", "webhook.circuit", &config)
+            .await
+            .is_ok());
+        assert_eq!(hits.load(Ordering::SeqCst), 3);
+        assert!(channel
+            .deliver(b"event", "webhook.circuit", &config)
+            .await
+            .is_ok());
+        assert_eq!(hits.load(Ordering::SeqCst), 4);
+
+        server.abort();
     }
 
     // === N8a / C2 SSRF unit tests ===
