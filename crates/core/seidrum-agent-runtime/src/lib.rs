@@ -281,6 +281,271 @@ pub trait AuthorizationAuditStore: Send + Sync + Clone + 'static {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum OutboundDeliveryStatus {
+    Queued,
+    Sent,
+    Failed,
+    RetryScheduled,
+    Cancelled,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct OutboundDeliveryRecord {
+    pub delivery_id: String,
+    pub session_id: String,
+    pub channel_origin: Option<ChannelContinuationIdentity>,
+    pub payload_text: String,
+    pub status: OutboundDeliveryStatus,
+    pub attempt_count: u32,
+    pub max_attempts: u32,
+    pub retry_after: Option<String>,
+    pub last_error: Option<String>,
+    pub linked_runtime_event_id: Option<String>,
+    pub provider_message_id: Option<String>,
+}
+
+impl OutboundDeliveryRecord {
+    pub fn queued(
+        delivery_id: impl Into<String>,
+        session_id: impl Into<String>,
+        channel_origin: Option<ChannelContinuationIdentity>,
+        payload_text: impl Into<String>,
+        linked_runtime_event_id: Option<impl Into<String>>,
+    ) -> Self {
+        Self {
+            delivery_id: delivery_id.into(),
+            session_id: session_id.into(),
+            channel_origin,
+            payload_text: payload_text.into(),
+            status: OutboundDeliveryStatus::Queued,
+            attempt_count: 0,
+            max_attempts: 3,
+            retry_after: None,
+            last_error: None,
+            linked_runtime_event_id: linked_runtime_event_id.map(Into::into),
+            provider_message_id: None,
+        }
+    }
+
+    pub fn with_max_attempts(mut self, max_attempts: u32) -> Self {
+        self.max_attempts = max_attempts;
+        self
+    }
+
+    pub fn mark_sent(&mut self, provider_message_id: Option<impl Into<String>>) {
+        self.status = OutboundDeliveryStatus::Sent;
+        self.attempt_count += 1;
+        self.retry_after = None;
+        self.last_error = None;
+        self.provider_message_id = provider_message_id.map(Into::into);
+    }
+
+    pub fn mark_cancelled(&mut self, reason: impl Into<String>) {
+        self.status = OutboundDeliveryStatus::Cancelled;
+        self.retry_after = None;
+        self.last_error = Some(reason.into());
+    }
+}
+
+#[async_trait]
+pub trait OutboundDeliveryStore: Send + Sync + Clone + 'static {
+    async fn put_outbound_delivery(
+        &self,
+        record: OutboundDeliveryRecord,
+    ) -> Result<(), RuntimeError>;
+
+    async fn outbound_delivery(
+        &self,
+        delivery_id: &str,
+    ) -> Result<Option<OutboundDeliveryRecord>, RuntimeError>;
+
+    async fn list_outbound_deliveries(&self) -> Result<Vec<OutboundDeliveryRecord>, RuntimeError>;
+
+    async fn outbound_deliveries_for_session(
+        &self,
+        session_id: &str,
+        status: Option<OutboundDeliveryStatus>,
+    ) -> Result<Vec<OutboundDeliveryRecord>, RuntimeError> {
+        Ok(self
+            .list_outbound_deliveries()
+            .await?
+            .into_iter()
+            .filter(|record| record.session_id == session_id)
+            .filter(|record| status.is_none_or(|status| record.status == status))
+            .collect())
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct OutboundRetryPolicy {
+    max_attempts: u32,
+    backoff_schedule: Vec<String>,
+}
+
+impl OutboundRetryPolicy {
+    pub fn new(
+        max_attempts: u32,
+        backoff_schedule: impl IntoIterator<Item = impl ToString>,
+    ) -> Self {
+        Self {
+            max_attempts,
+            backoff_schedule: backoff_schedule
+                .into_iter()
+                .map(|value| value.to_string())
+                .collect(),
+        }
+    }
+
+    pub fn record_failure(
+        &self,
+        delivery: &mut OutboundDeliveryRecord,
+        error: impl Into<String>,
+    ) -> Result<(), RuntimeError> {
+        delivery.attempt_count += 1;
+        delivery.last_error = Some(error.into());
+        let max_attempts = delivery.max_attempts.min(self.max_attempts);
+        if delivery.attempt_count >= max_attempts {
+            delivery.status = OutboundDeliveryStatus::Failed;
+            delivery.retry_after = None;
+        } else {
+            delivery.status = OutboundDeliveryStatus::RetryScheduled;
+            let backoff_index = delivery.attempt_count.saturating_sub(1) as usize;
+            delivery.retry_after = self
+                .backoff_schedule
+                .get(backoff_index)
+                .cloned()
+                .or_else(|| self.backoff_schedule.last().cloned());
+        }
+        Ok(())
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FakeOutboundDeliverySink {
+    result: Result<String, String>,
+}
+
+impl FakeOutboundDeliverySink {
+    pub fn successful(provider_message_id: impl Into<String>) -> Self {
+        Self {
+            result: Ok(provider_message_id.into()),
+        }
+    }
+
+    pub fn failing(error: impl Into<String>) -> Self {
+        Self {
+            result: Err(error.into()),
+        }
+    }
+
+    fn deliver(&self, _delivery: &OutboundDeliveryRecord) -> Result<String, String> {
+        self.result.clone()
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct FakeOutboundDeliveryExecutor<S> {
+    store: S,
+    sink: FakeOutboundDeliverySink,
+    retry_policy: OutboundRetryPolicy,
+}
+
+impl<S> FakeOutboundDeliveryExecutor<S>
+where
+    S: OutboundDeliveryStore,
+{
+    pub fn new(
+        store: S,
+        sink: FakeOutboundDeliverySink,
+        retry_policy: OutboundRetryPolicy,
+    ) -> Self {
+        Self {
+            store,
+            sink,
+            retry_policy,
+        }
+    }
+
+    pub async fn dispatch_one(
+        &self,
+        delivery_id: &str,
+    ) -> Result<OutboundDeliveryRecord, RuntimeError> {
+        let mut delivery = self
+            .store
+            .outbound_delivery(delivery_id)
+            .await?
+            .ok_or_else(|| {
+                RuntimeError::Store(format!("delivery `{delivery_id}` is not defined"))
+            })?;
+        match self.sink.deliver(&delivery) {
+            Ok(provider_message_id) => delivery.mark_sent(Some(provider_message_id)),
+            Err(error) => self.retry_policy.record_failure(&mut delivery, error)?,
+        }
+        self.store.put_outbound_delivery(delivery.clone()).await?;
+        Ok(delivery)
+    }
+}
+
+pub async fn enqueue_outbound_response<S>(
+    store: &S,
+    event: &RuntimeEvent,
+    channel_origin: Option<ChannelContinuationIdentity>,
+) -> Result<OutboundDeliveryRecord, RuntimeError>
+where
+    S: OutboundDeliveryStore,
+{
+    let RuntimeEvent::OutboundResponse {
+        session_id,
+        agent_id,
+        text,
+    } = event;
+    let delivery = OutboundDeliveryRecord::queued(
+        new_record_id(),
+        session_id.clone(),
+        channel_origin,
+        text.clone(),
+        Some(format!("runtime:{session_id}:{agent_id}")),
+    );
+    store.put_outbound_delivery(delivery.clone()).await?;
+    Ok(delivery)
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct RuntimeInspection {
+    pub session_id: String,
+    pub trace: RuntimeTrace,
+    pub authorization_audits: Vec<AuthorizationAuditRecord>,
+    pub outbound_deliveries: Vec<OutboundDeliveryRecord>,
+}
+
+pub async fn inspect_runtime_session<S>(
+    store: &S,
+    session_id: &str,
+) -> Result<RuntimeInspection, RuntimeError>
+where
+    S: RuntimeStore + AuthorizationAuditStore + OutboundDeliveryStore,
+{
+    Ok(RuntimeInspection {
+        session_id: session_id.to_string(),
+        trace: replay_session_trace(store, session_id).await?,
+        authorization_audits: store.authorization_audits_for_session(session_id).await?,
+        outbound_deliveries: store
+            .outbound_deliveries_for_session(session_id, None)
+            .await?,
+    })
+}
+
+pub async fn append_inspection_authorization_audit<S>(
+    store: &S,
+    record: AuthorizationAuditRecord,
+) -> Result<(), RuntimeError>
+where
+    S: AuthorizationAuditStore,
+{
+    store.append_authorization_audit(record).await
+}
+
 #[derive(Debug, Clone, Default)]
 pub struct InMemoryAuthorizationAuditStore {
     inner: Arc<Mutex<Vec<AuthorizationAuditRecord>>>,
@@ -762,6 +1027,8 @@ const JOB_DEFINITIONS_TABLE: redb::TableDefinition<&str, &[u8]> =
 const JOB_RUNS_TABLE: redb::TableDefinition<&str, &[u8]> = redb::TableDefinition::new("job_runs");
 const AUTHORIZATION_AUDITS_TABLE: redb::TableDefinition<u64, &[u8]> =
     redb::TableDefinition::new("authorization_audits");
+const OUTBOUND_DELIVERIES_TABLE: redb::TableDefinition<&str, &[u8]> =
+    redb::TableDefinition::new("outbound_deliveries");
 
 #[derive(Debug, Clone)]
 pub struct RedbTurnStore {
@@ -796,6 +1063,13 @@ impl RedbTurnStore {
                 .map_err(|error| {
                     RuntimeError::Store(format!(
                         "failed to open authorization audits table: {error}"
+                    ))
+                })?;
+            write_txn
+                .open_table(OUTBOUND_DELIVERIES_TABLE)
+                .map_err(|error| {
+                    RuntimeError::Store(format!(
+                        "failed to open outbound deliveries table: {error}"
                     ))
                 })?;
         }
@@ -946,6 +1220,93 @@ impl AuthorizationAuditStore for RedbTurnStore {
             })?);
         }
         records.sort_by_key(|record: &AuthorizationAuditRecord| record.sequence);
+        Ok(records)
+    }
+}
+
+#[async_trait]
+impl OutboundDeliveryStore for RedbTurnStore {
+    async fn put_outbound_delivery(
+        &self,
+        record: OutboundDeliveryRecord,
+    ) -> Result<(), RuntimeError> {
+        let serialized = serde_json::to_vec(&record).map_err(|error| {
+            RuntimeError::Store(format!("failed to serialize outbound delivery: {error}"))
+        })?;
+        let write_txn = self
+            .db
+            .begin_write()
+            .map_err(|error| RuntimeError::Store(format!("failed to begin redb write: {error}")))?;
+        {
+            let mut table = write_txn
+                .open_table(OUTBOUND_DELIVERIES_TABLE)
+                .map_err(|error| {
+                    RuntimeError::Store(format!(
+                        "failed to open outbound deliveries table: {error}"
+                    ))
+                })?;
+            table
+                .insert(record.delivery_id.as_str(), serialized.as_slice())
+                .map_err(|error| {
+                    RuntimeError::Store(format!("failed to insert outbound delivery: {error}"))
+                })?;
+        }
+        write_txn.commit().map_err(|error| {
+            RuntimeError::Store(format!("failed to commit outbound delivery: {error}"))
+        })?;
+        Ok(())
+    }
+
+    async fn outbound_delivery(
+        &self,
+        delivery_id: &str,
+    ) -> Result<Option<OutboundDeliveryRecord>, RuntimeError> {
+        let read_txn = self
+            .db
+            .begin_read()
+            .map_err(|error| RuntimeError::Store(format!("failed to begin redb read: {error}")))?;
+        let table = read_txn
+            .open_table(OUTBOUND_DELIVERIES_TABLE)
+            .map_err(|error| {
+                RuntimeError::Store(format!("failed to open outbound deliveries table: {error}"))
+            })?;
+        table
+            .get(delivery_id)
+            .map_err(|error| {
+                RuntimeError::Store(format!("failed to read outbound delivery: {error}"))
+            })?
+            .map(|data| {
+                serde_json::from_slice(data.value()).map_err(|error| {
+                    RuntimeError::Store(format!("failed to deserialize outbound delivery: {error}"))
+                })
+            })
+            .transpose()
+    }
+
+    async fn list_outbound_deliveries(&self) -> Result<Vec<OutboundDeliveryRecord>, RuntimeError> {
+        let read_txn = self
+            .db
+            .begin_read()
+            .map_err(|error| RuntimeError::Store(format!("failed to begin redb read: {error}")))?;
+        let table = read_txn
+            .open_table(OUTBOUND_DELIVERIES_TABLE)
+            .map_err(|error| {
+                RuntimeError::Store(format!("failed to open outbound deliveries table: {error}"))
+            })?;
+        let mut records = Vec::new();
+        for entry in table.iter().map_err(|error| {
+            RuntimeError::Store(format!("failed to iterate outbound deliveries: {error}"))
+        })? {
+            let (_, data) = entry.map_err(|error| {
+                RuntimeError::Store(format!("failed to read outbound delivery: {error}"))
+            })?;
+            records.push(serde_json::from_slice(data.value()).map_err(|error| {
+                RuntimeError::Store(format!("failed to deserialize outbound delivery: {error}"))
+            })?);
+        }
+        records.sort_by(|left: &OutboundDeliveryRecord, right| {
+            left.delivery_id.cmp(&right.delivery_id)
+        });
         Ok(records)
     }
 }
