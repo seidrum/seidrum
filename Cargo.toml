@@ -1,6 +1,7 @@
 [workspace]
 members = [
     "crates/core/seidrum-common",
+    "crates/core/seidrum-agent-runtime",
     "crates/core/seidrum-kernel",
     "crates/core/seidrum-daemon",
     "crates/core/seidrum-e2e",
