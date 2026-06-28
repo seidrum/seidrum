@@ -67,7 +67,7 @@ async fn main() -> Result<()> {
                 } else {
                     "not running".to_string()
                 };
-                println!("  ArangoDB: {}", arango_status);
+                println!("  ArangoDB: {arango_status}");
                 println!();
             }
             status::show(&paths).await
@@ -98,7 +98,7 @@ async fn main() -> Result<()> {
             PkgAction::Info { name } => pkg::list::show_package_info(&name, &paths),
             PkgAction::Update { name } => {
                 if let Some(n) = name {
-                    println!("Updating package: {}", n);
+                    println!("Updating package: {n}");
                     println!("Update functionality not yet implemented");
                 } else {
                     println!("Updating all packages...");

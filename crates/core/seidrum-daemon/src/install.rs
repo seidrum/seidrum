@@ -41,7 +41,7 @@ fn systemd_unit_path() -> std::path::PathBuf {
         std::path::PathBuf::from("/etc/systemd/system/seidrum.service")
     } else {
         let home = std::env::var("HOME").unwrap_or_else(|_| ".".to_string());
-        std::path::PathBuf::from(format!("{}/.config/systemd/user/seidrum.service", home))
+        std::path::PathBuf::from(format!("{home}/.config/systemd/user/seidrum.service"))
     }
 }
 
@@ -162,8 +162,7 @@ fn uninstall_systemd() -> Result<()> {
 fn launchd_plist_path() -> std::path::PathBuf {
     let home = std::env::var("HOME").unwrap_or_else(|_| ".".to_string());
     std::path::PathBuf::from(format!(
-        "{}/Library/LaunchAgents/com.seidrum.daemon.plist",
-        home
+        "{home}/Library/LaunchAgents/com.seidrum.daemon.plist"
     ))
 }
 

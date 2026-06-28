@@ -94,8 +94,7 @@ impl SubjectIndex {
 
         if tokens.len() > MAX_SUBJECT_DEPTH {
             return Err(EventBusError::InvalidSubject(format!(
-                "subject pattern exceeds maximum depth of {} tokens",
-                MAX_SUBJECT_DEPTH
+                "subject pattern exceeds maximum depth of {MAX_SUBJECT_DEPTH} tokens"
             )));
         }
 
@@ -513,7 +512,7 @@ mod tests {
     fn test_subject_depth_limit() {
         let mut index = SubjectIndex::new();
         let deep_pattern = (0..257)
-            .map(|i| format!("level{}", i))
+            .map(|i| format!("level{i}"))
             .collect::<Vec<_>>()
             .join(".");
         let result = index.subscribe(make_entry("sub1", &deep_pattern, 10));

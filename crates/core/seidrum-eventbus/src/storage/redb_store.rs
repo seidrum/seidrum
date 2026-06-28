@@ -41,7 +41,7 @@ impl RedbEventStore {
     pub fn open<P: AsRef<Path>>(path: P) -> StorageResult<Self> {
         let path_ref = path.as_ref();
         let db = Database::create(path_ref)
-            .map_err(|e| StorageError::DatabaseError(format!("failed to open redb: {}", e)))?;
+            .map_err(|e| StorageError::DatabaseError(format!("failed to open redb: {e}")))?;
 
         // Tighten file mode on Unix. No-op on other platforms.
         #[cfg(unix)]
@@ -61,35 +61,31 @@ impl RedbEventStore {
         // Ensure tables exist
         {
             let write_txn = db.begin_write().map_err(|e| {
-                StorageError::DatabaseError(format!("failed to begin transaction: {}", e))
+                StorageError::DatabaseError(format!("failed to begin transaction: {e}"))
             })?;
             {
                 let _t1 = write_txn.open_table(EVENTS_TABLE).map_err(|e| {
-                    StorageError::DatabaseError(format!("failed to open events table: {}", e))
+                    StorageError::DatabaseError(format!("failed to open events table: {e}"))
                 })?;
                 let _t2 = write_txn.open_table(SUBJECT_IDX_TABLE).map_err(|e| {
-                    StorageError::DatabaseError(format!("failed to open subject_idx table: {}", e))
+                    StorageError::DatabaseError(format!("failed to open subject_idx table: {e}"))
                 })?;
                 let _t3 = write_txn.open_table(STATUS_IDX_TABLE).map_err(|e| {
-                    StorageError::DatabaseError(format!("failed to open status_idx table: {}", e))
+                    StorageError::DatabaseError(format!("failed to open status_idx table: {e}"))
                 })?;
                 let _t4 = write_txn
                     .open_table(FAILED_DELIVERIES_IDX_TABLE)
                     .map_err(|e| {
                         StorageError::DatabaseError(format!(
-                            "failed to open failed_deliveries_idx table: {}",
-                            e
+                            "failed to open failed_deliveries_idx table: {e}"
                         ))
                     })?;
                 let _t5 = write_txn.open_table(SUBSCRIPTIONS_TABLE).map_err(|e| {
-                    StorageError::DatabaseError(format!(
-                        "failed to open subscriptions table: {}",
-                        e
-                    ))
+                    StorageError::DatabaseError(format!("failed to open subscriptions table: {e}"))
                 })?;
             }
             write_txn.commit().map_err(|e| {
-                StorageError::DatabaseError(format!("failed to commit transaction: {}", e))
+                StorageError::DatabaseError(format!("failed to commit transaction: {e}"))
             })?;
         }
 
@@ -114,18 +110,18 @@ impl EventStore for RedbEventStore {
             // Use a single write transaction for atomic seq generation + insert.
             // This prevents race conditions where two concurrent appends could
             // read the same last_seq from separate read transactions.
-            let write_txn = db.begin_write().map_err(|e| {
-                StorageError::DatabaseError(format!("failed to begin write: {}", e))
-            })?;
+            let write_txn = db
+                .begin_write()
+                .map_err(|e| StorageError::DatabaseError(format!("failed to begin write: {e}")))?;
 
             // Get next seq inside the write transaction (serialized by redb)
             let next_seq = {
                 let events_table = write_txn.open_table(EVENTS_TABLE).map_err(|e| {
-                    StorageError::DatabaseError(format!("failed to open events table: {}", e))
+                    StorageError::DatabaseError(format!("failed to open events table: {e}"))
                 })?;
                 let last_seq: u64 = events_table
                     .last()
-                    .map_err(|e| StorageError::DatabaseError(format!("failed to get last: {}", e)))?
+                    .map_err(|e| StorageError::DatabaseError(format!("failed to get last: {e}")))?
                     .map(|(k, _)| k.value())
                     .unwrap_or(0);
                 last_seq + 1
@@ -136,50 +132,47 @@ impl EventStore for RedbEventStore {
             stored.stored_at = RedbEventStore::current_time_ms();
 
             let serialized = serde_json::to_vec(&stored).map_err(|e| {
-                StorageError::OperationFailed(format!("failed to serialize event: {}", e))
+                StorageError::OperationFailed(format!("failed to serialize event: {e}"))
             })?;
 
             {
                 let mut events_table = write_txn.open_table(EVENTS_TABLE).map_err(|e| {
-                    StorageError::DatabaseError(format!("failed to open events table: {}", e))
+                    StorageError::DatabaseError(format!("failed to open events table: {e}"))
                 })?;
                 events_table
                     .insert(next_seq, serialized.as_slice())
                     .map_err(|e| {
-                        StorageError::DatabaseError(format!("failed to insert event: {}", e))
+                        StorageError::DatabaseError(format!("failed to insert event: {e}"))
                     })?;
             }
             {
                 let mut subject_idx = write_txn.open_table(SUBJECT_IDX_TABLE).map_err(|e| {
-                    StorageError::DatabaseError(format!("failed to open subject_idx: {}", e))
+                    StorageError::DatabaseError(format!("failed to open subject_idx: {e}"))
                 })?;
                 subject_idx
                     .insert((stored.subject.as_str(), next_seq), ())
                     .map_err(|e| {
-                        StorageError::DatabaseError(format!(
-                            "failed to insert subject index: {}",
-                            e
-                        ))
+                        StorageError::DatabaseError(format!("failed to insert subject index: {e}"))
                     })?;
             }
             {
                 let mut status_idx = write_txn.open_table(STATUS_IDX_TABLE).map_err(|e| {
-                    StorageError::DatabaseError(format!("failed to open status_idx: {}", e))
+                    StorageError::DatabaseError(format!("failed to open status_idx: {e}"))
                 })?;
                 status_idx
                     .insert((stored.status.as_u8(), next_seq), ())
                     .map_err(|e| {
-                        StorageError::DatabaseError(format!("failed to insert status index: {}", e))
+                        StorageError::DatabaseError(format!("failed to insert status index: {e}"))
                     })?;
             }
             write_txn
                 .commit()
-                .map_err(|e| StorageError::DatabaseError(format!("failed to commit: {}", e)))?;
+                .map_err(|e| StorageError::DatabaseError(format!("failed to commit: {e}")))?;
 
             Ok(next_seq)
         })
         .await
-        .map_err(|e| StorageError::OperationFailed(format!("spawn_blocking error: {}", e)))?
+        .map_err(|e| StorageError::OperationFailed(format!("spawn_blocking error: {e}")))?
     }
 
     async fn get(&self, seq: u64) -> StorageResult<Option<StoredEvent>> {
@@ -187,18 +180,18 @@ impl EventStore for RedbEventStore {
         tokio::task::spawn_blocking(move || {
             let read_txn = db
                 .begin_read()
-                .map_err(|e| StorageError::DatabaseError(format!("failed to begin read: {}", e)))?;
+                .map_err(|e| StorageError::DatabaseError(format!("failed to begin read: {e}")))?;
             let events_table = read_txn.open_table(EVENTS_TABLE).map_err(|e| {
-                StorageError::DatabaseError(format!("failed to open events table: {}", e))
+                StorageError::DatabaseError(format!("failed to open events table: {e}"))
             })?;
             match events_table
                 .get(seq)
-                .map_err(|e| StorageError::DatabaseError(format!("failed to get event: {}", e)))?
+                .map_err(|e| StorageError::DatabaseError(format!("failed to get event: {e}")))?
             {
                 Some(data) => {
                     let bytes = data.value().to_vec();
                     let event: StoredEvent = serde_json::from_slice(&bytes).map_err(|e| {
-                        StorageError::OperationFailed(format!("failed to deserialize: {}", e))
+                        StorageError::OperationFailed(format!("failed to deserialize: {e}"))
                     })?;
                     Ok(Some(event))
                 }
@@ -206,60 +199,58 @@ impl EventStore for RedbEventStore {
             }
         })
         .await
-        .map_err(|e| StorageError::OperationFailed(format!("spawn_blocking error: {}", e)))?
+        .map_err(|e| StorageError::OperationFailed(format!("spawn_blocking error: {e}")))?
     }
 
     async fn update_status(&self, seq: u64, status: EventStatus) -> StorageResult<()> {
         let db = Arc::clone(&self.db);
 
         tokio::task::spawn_blocking(move || {
-            let write_txn = db.begin_write().map_err(|e| {
-                StorageError::DatabaseError(format!("failed to begin write: {}", e))
-            })?;
+            let write_txn = db
+                .begin_write()
+                .map_err(|e| StorageError::DatabaseError(format!("failed to begin write: {e}")))?;
 
             // Read the event
             let old_status_u8;
             let serialized = {
                 let events_table = write_txn.open_table(EVENTS_TABLE).map_err(|e| {
-                    StorageError::DatabaseError(format!("failed to open events table: {}", e))
+                    StorageError::DatabaseError(format!("failed to open events table: {e}"))
                 })?;
                 let data = events_table
                     .get(seq)
-                    .map_err(|e| {
-                        StorageError::DatabaseError(format!("failed to get event: {}", e))
-                    })?
+                    .map_err(|e| StorageError::DatabaseError(format!("failed to get event: {e}")))?
                     .ok_or(StorageError::NotFound)?;
                 let bytes = data.value().to_vec();
                 let mut event: StoredEvent = serde_json::from_slice(&bytes).map_err(|e| {
-                    StorageError::OperationFailed(format!("failed to deserialize event: {}", e))
+                    StorageError::OperationFailed(format!("failed to deserialize event: {e}"))
                 })?;
                 old_status_u8 = event.status.as_u8();
                 event.status = status;
                 serde_json::to_vec(&event).map_err(|e| {
-                    StorageError::OperationFailed(format!("failed to serialize event: {}", e))
+                    StorageError::OperationFailed(format!("failed to serialize event: {e}"))
                 })?
             };
 
             // Write back
             {
                 let mut events_table = write_txn.open_table(EVENTS_TABLE).map_err(|e| {
-                    StorageError::DatabaseError(format!("failed to open events table: {}", e))
+                    StorageError::DatabaseError(format!("failed to open events table: {e}"))
                 })?;
                 events_table
                     .insert(seq, serialized.as_slice())
                     .map_err(|e| {
-                        StorageError::DatabaseError(format!("failed to update event: {}", e))
+                        StorageError::DatabaseError(format!("failed to update event: {e}"))
                     })?;
             }
 
             // Update status index: remove old, insert new
             {
                 let mut status_idx = write_txn.open_table(STATUS_IDX_TABLE).map_err(|e| {
-                    StorageError::DatabaseError(format!("failed to open status_idx: {}", e))
+                    StorageError::DatabaseError(format!("failed to open status_idx: {e}"))
                 })?;
                 let _ = status_idx.remove((old_status_u8, seq));
                 status_idx.insert((status.as_u8(), seq), ()).map_err(|e| {
-                    StorageError::DatabaseError(format!("failed to insert new status index: {}", e))
+                    StorageError::DatabaseError(format!("failed to insert new status index: {e}"))
                 })?;
             }
 
@@ -278,10 +269,10 @@ impl EventStore for RedbEventStore {
 
             write_txn
                 .commit()
-                .map_err(|e| StorageError::DatabaseError(format!("failed to commit: {}", e)))
+                .map_err(|e| StorageError::DatabaseError(format!("failed to commit: {e}")))
         })
         .await
-        .map_err(|e| StorageError::OperationFailed(format!("spawn_blocking error: {}", e)))?
+        .map_err(|e| StorageError::OperationFailed(format!("spawn_blocking error: {e}")))?
     }
 
     async fn record_delivery(
@@ -296,25 +287,23 @@ impl EventStore for RedbEventStore {
         let subscriber_id = subscriber_id.to_string();
 
         tokio::task::spawn_blocking(move || {
-            let write_txn = db.begin_write().map_err(|e| {
-                StorageError::DatabaseError(format!("failed to begin write: {}", e))
-            })?;
+            let write_txn = db
+                .begin_write()
+                .map_err(|e| StorageError::DatabaseError(format!("failed to begin write: {e}")))?;
 
             // Read the event, mutate the delivery record, and capture the
             // post-update state of the failed-deliveries index.
             let (serialized, has_failed_deliveries) = {
                 let events_table = write_txn.open_table(EVENTS_TABLE).map_err(|e| {
-                    StorageError::DatabaseError(format!("failed to open events table: {}", e))
+                    StorageError::DatabaseError(format!("failed to open events table: {e}"))
                 })?;
                 let data = events_table
                     .get(seq)
-                    .map_err(|e| {
-                        StorageError::DatabaseError(format!("failed to get event: {}", e))
-                    })?
+                    .map_err(|e| StorageError::DatabaseError(format!("failed to get event: {e}")))?
                     .ok_or(StorageError::NotFound)?;
                 let bytes = data.value().to_vec();
                 let mut event: StoredEvent = serde_json::from_slice(&bytes).map_err(|e| {
-                    StorageError::OperationFailed(format!("failed to deserialize event: {}", e))
+                    StorageError::OperationFailed(format!("failed to deserialize event: {e}"))
                 })?;
 
                 // Update or insert delivery record
@@ -367,7 +356,7 @@ impl EventStore for RedbEventStore {
                     .any(|d| d.status == DeliveryStatus::Failed);
 
                 let serialized = serde_json::to_vec(&event).map_err(|e| {
-                    StorageError::OperationFailed(format!("failed to serialize event: {}", e))
+                    StorageError::OperationFailed(format!("failed to serialize event: {e}"))
                 })?;
                 (serialized, has_failed)
             };
@@ -375,12 +364,12 @@ impl EventStore for RedbEventStore {
             // Write back the event
             {
                 let mut events_table = write_txn.open_table(EVENTS_TABLE).map_err(|e| {
-                    StorageError::DatabaseError(format!("failed to open events table: {}", e))
+                    StorageError::DatabaseError(format!("failed to open events table: {e}"))
                 })?;
                 events_table
                     .insert(seq, serialized.as_slice())
                     .map_err(|e| {
-                        StorageError::DatabaseError(format!("failed to update event: {}", e))
+                        StorageError::DatabaseError(format!("failed to update event: {e}"))
                     })?;
             }
 
@@ -392,15 +381,13 @@ impl EventStore for RedbEventStore {
                         .open_table(FAILED_DELIVERIES_IDX_TABLE)
                         .map_err(|e| {
                             StorageError::DatabaseError(format!(
-                                "failed to open failed_deliveries_idx: {}",
-                                e
+                                "failed to open failed_deliveries_idx: {e}"
                             ))
                         })?;
                 if has_failed_deliveries {
                     failed_idx.insert(seq, ()).map_err(|e| {
                         StorageError::DatabaseError(format!(
-                            "failed to insert failed_deliveries_idx: {}",
-                            e
+                            "failed to insert failed_deliveries_idx: {e}"
                         ))
                     })?;
                 } else {
@@ -410,10 +397,10 @@ impl EventStore for RedbEventStore {
 
             write_txn
                 .commit()
-                .map_err(|e| StorageError::DatabaseError(format!("failed to commit: {}", e)))
+                .map_err(|e| StorageError::DatabaseError(format!("failed to commit: {e}")))
         })
         .await
-        .map_err(|e| StorageError::OperationFailed(format!("spawn_blocking error: {}", e)))?
+        .map_err(|e| StorageError::OperationFailed(format!("spawn_blocking error: {e}")))?
     }
 
     async fn query_by_status(
@@ -427,23 +414,22 @@ impl EventStore for RedbEventStore {
         tokio::task::spawn_blocking(move || {
             let read_txn = db
                 .begin_read()
-                .map_err(|e| StorageError::DatabaseError(format!("failed to begin read: {}", e)))?;
+                .map_err(|e| StorageError::DatabaseError(format!("failed to begin read: {e}")))?;
             let status_idx = read_txn.open_table(STATUS_IDX_TABLE).map_err(|e| {
-                StorageError::DatabaseError(format!("failed to open status_idx: {}", e))
+                StorageError::DatabaseError(format!("failed to open status_idx: {e}"))
             })?;
             let events_table = read_txn.open_table(EVENTS_TABLE).map_err(|e| {
-                StorageError::DatabaseError(format!("failed to open events table: {}", e))
+                StorageError::DatabaseError(format!("failed to open events table: {e}"))
             })?;
 
             let mut results = Vec::new();
-            let iter = status_idx.range((status_u8, u64::MIN)..).map_err(|e| {
-                StorageError::DatabaseError(format!("failed to range query: {}", e))
-            })?;
+            let iter = status_idx
+                .range((status_u8, u64::MIN)..)
+                .map_err(|e| StorageError::DatabaseError(format!("failed to range query: {e}")))?;
 
             for item in iter {
-                let (key, _) = item.map_err(|e| {
-                    StorageError::DatabaseError(format!("failed to iterate: {}", e))
-                })?;
+                let (key, _) = item
+                    .map_err(|e| StorageError::DatabaseError(format!("failed to iterate: {e}")))?;
                 let (key_status, seq): (u8, u64) = key.value();
                 if key_status != status_u8 {
                     break;
@@ -452,12 +438,13 @@ impl EventStore for RedbEventStore {
                     break;
                 }
 
-                if let Some(data) = events_table.get(seq).map_err(|e| {
-                    StorageError::DatabaseError(format!("failed to get event: {}", e))
-                })? {
+                if let Some(data) = events_table
+                    .get(seq)
+                    .map_err(|e| StorageError::DatabaseError(format!("failed to get event: {e}")))?
+                {
                     let bytes = data.value().to_vec();
                     let event: StoredEvent = serde_json::from_slice(&bytes).map_err(|e| {
-                        StorageError::OperationFailed(format!("failed to deserialize: {}", e))
+                        StorageError::OperationFailed(format!("failed to deserialize: {e}"))
                     })?;
                     // Verify actual status matches index (guards against stale entries).
                     if event.status == status {
@@ -469,7 +456,7 @@ impl EventStore for RedbEventStore {
             Ok(results)
         })
         .await
-        .map_err(|e| StorageError::OperationFailed(format!("spawn_blocking error: {}", e)))?
+        .map_err(|e| StorageError::OperationFailed(format!("spawn_blocking error: {e}")))?
     }
 
     async fn query_by_subject(
@@ -484,26 +471,23 @@ impl EventStore for RedbEventStore {
         tokio::task::spawn_blocking(move || {
             let read_txn = db
                 .begin_read()
-                .map_err(|e| StorageError::DatabaseError(format!("failed to begin read: {}", e)))?;
+                .map_err(|e| StorageError::DatabaseError(format!("failed to begin read: {e}")))?;
             let subject_idx = read_txn.open_table(SUBJECT_IDX_TABLE).map_err(|e| {
-                StorageError::DatabaseError(format!("failed to open subject_idx: {}", e))
+                StorageError::DatabaseError(format!("failed to open subject_idx: {e}"))
             })?;
             let events_table = read_txn.open_table(EVENTS_TABLE).map_err(|e| {
-                StorageError::DatabaseError(format!("failed to open events table: {}", e))
+                StorageError::DatabaseError(format!("failed to open events table: {e}"))
             })?;
 
             let mut results = Vec::new();
             let start_seq = since.unwrap_or(0);
             let iter = subject_idx
                 .range((subject.as_str(), start_seq)..)
-                .map_err(|e| {
-                    StorageError::DatabaseError(format!("failed to range query: {}", e))
-                })?;
+                .map_err(|e| StorageError::DatabaseError(format!("failed to range query: {e}")))?;
 
             for item in iter {
-                let (key, _) = item.map_err(|e| {
-                    StorageError::DatabaseError(format!("failed to iterate: {}", e))
-                })?;
+                let (key, _) = item
+                    .map_err(|e| StorageError::DatabaseError(format!("failed to iterate: {e}")))?;
                 let (key_subject, seq): (&str, u64) = key.value();
                 if key_subject != subject.as_str() {
                     break;
@@ -512,12 +496,13 @@ impl EventStore for RedbEventStore {
                     break;
                 }
 
-                if let Some(data) = events_table.get(seq).map_err(|e| {
-                    StorageError::DatabaseError(format!("failed to get event: {}", e))
-                })? {
+                if let Some(data) = events_table
+                    .get(seq)
+                    .map_err(|e| StorageError::DatabaseError(format!("failed to get event: {e}")))?
+                {
                     let bytes = data.value().to_vec();
                     let event: StoredEvent = serde_json::from_slice(&bytes).map_err(|e| {
-                        StorageError::OperationFailed(format!("failed to deserialize: {}", e))
+                        StorageError::OperationFailed(format!("failed to deserialize: {e}"))
                     })?;
                     results.push(event);
                 }
@@ -526,7 +511,7 @@ impl EventStore for RedbEventStore {
             Ok(results)
         })
         .await
-        .map_err(|e| StorageError::OperationFailed(format!("spawn_blocking error: {}", e)))?
+        .map_err(|e| StorageError::OperationFailed(format!("spawn_blocking error: {e}")))?
     }
 
     async fn query_retryable(
@@ -539,16 +524,15 @@ impl EventStore for RedbEventStore {
         tokio::task::spawn_blocking(move || {
             let read_txn = db
                 .begin_read()
-                .map_err(|e| StorageError::DatabaseError(format!("failed to begin read: {}", e)))?;
+                .map_err(|e| StorageError::DatabaseError(format!("failed to begin read: {e}")))?;
             let events_table = read_txn.open_table(EVENTS_TABLE).map_err(|e| {
-                StorageError::DatabaseError(format!("failed to open events table: {}", e))
+                StorageError::DatabaseError(format!("failed to open events table: {e}"))
             })?;
             let failed_idx = read_txn
                 .open_table(FAILED_DELIVERIES_IDX_TABLE)
                 .map_err(|e| {
                     StorageError::DatabaseError(format!(
-                        "failed to open failed_deliveries_idx: {}",
-                        e
+                        "failed to open failed_deliveries_idx: {e}"
                     ))
                 })?;
 
@@ -556,18 +540,18 @@ impl EventStore for RedbEventStore {
             // Iterate only events known to have at least one Failed delivery.
             let iter = failed_idx
                 .iter()
-                .map_err(|e| StorageError::DatabaseError(format!("failed to iterate: {}", e)))?;
+                .map_err(|e| StorageError::DatabaseError(format!("failed to iterate: {e}")))?;
 
             let now = RedbEventStore::current_time_ms();
             for item in iter {
-                let (key, _) = item.map_err(|e| {
-                    StorageError::DatabaseError(format!("failed to iterate: {}", e))
-                })?;
+                let (key, _) = item
+                    .map_err(|e| StorageError::DatabaseError(format!("failed to iterate: {e}")))?;
                 let seq: u64 = key.value();
 
-                let data = match events_table.get(seq).map_err(|e| {
-                    StorageError::DatabaseError(format!("failed to get event: {}", e))
-                })? {
+                let data = match events_table
+                    .get(seq)
+                    .map_err(|e| StorageError::DatabaseError(format!("failed to get event: {e}")))?
+                {
                     Some(d) => d,
                     None => {
                         tracing::warn!(
@@ -579,7 +563,7 @@ impl EventStore for RedbEventStore {
                 };
                 let bytes = data.value().to_vec();
                 let event: StoredEvent = serde_json::from_slice(&bytes).map_err(|e| {
-                    StorageError::OperationFailed(format!("failed to deserialize: {}", e))
+                    StorageError::OperationFailed(format!("failed to deserialize: {e}"))
                 })?;
 
                 for delivery in &event.deliveries {
@@ -609,7 +593,7 @@ impl EventStore for RedbEventStore {
             Ok(results)
         })
         .await
-        .map_err(|e| StorageError::OperationFailed(format!("spawn_blocking error: {}", e)))?
+        .map_err(|e| StorageError::OperationFailed(format!("spawn_blocking error: {e}")))?
     }
 
     async fn count_retryable(&self, max_attempts: u32) -> StorageResult<u64> {
@@ -617,16 +601,15 @@ impl EventStore for RedbEventStore {
         tokio::task::spawn_blocking(move || {
             let read_txn = db
                 .begin_read()
-                .map_err(|e| StorageError::DatabaseError(format!("failed to begin read: {}", e)))?;
+                .map_err(|e| StorageError::DatabaseError(format!("failed to begin read: {e}")))?;
             let events_table = read_txn.open_table(EVENTS_TABLE).map_err(|e| {
-                StorageError::DatabaseError(format!("failed to open events table: {}", e))
+                StorageError::DatabaseError(format!("failed to open events table: {e}"))
             })?;
             let failed_idx = read_txn
                 .open_table(FAILED_DELIVERIES_IDX_TABLE)
                 .map_err(|e| {
                     StorageError::DatabaseError(format!(
-                        "failed to open failed_deliveries_idx: {}",
-                        e
+                        "failed to open failed_deliveries_idx: {e}"
                     ))
                 })?;
 
@@ -634,15 +617,15 @@ impl EventStore for RedbEventStore {
             let mut count = 0u64;
             let iter = failed_idx
                 .iter()
-                .map_err(|e| StorageError::DatabaseError(format!("failed to iterate: {}", e)))?;
+                .map_err(|e| StorageError::DatabaseError(format!("failed to iterate: {e}")))?;
             for item in iter {
-                let (key, _) = item.map_err(|e| {
-                    StorageError::DatabaseError(format!("failed to iterate: {}", e))
-                })?;
+                let (key, _) = item
+                    .map_err(|e| StorageError::DatabaseError(format!("failed to iterate: {e}")))?;
                 let seq: u64 = key.value();
-                let data = match events_table.get(seq).map_err(|e| {
-                    StorageError::DatabaseError(format!("failed to get event: {}", e))
-                })? {
+                let data = match events_table
+                    .get(seq)
+                    .map_err(|e| StorageError::DatabaseError(format!("failed to get event: {e}")))?
+                {
                     Some(d) => d,
                     None => {
                         tracing::warn!(
@@ -654,7 +637,7 @@ impl EventStore for RedbEventStore {
                 };
                 let bytes = data.value().to_vec();
                 let event: StoredEvent = serde_json::from_slice(&bytes).map_err(|e| {
-                    StorageError::OperationFailed(format!("failed to deserialize: {}", e))
+                    StorageError::OperationFailed(format!("failed to deserialize: {e}"))
                 })?;
                 for delivery in &event.deliveries {
                     if delivery.is_retryable(max_attempts, now) {
@@ -665,7 +648,7 @@ impl EventStore for RedbEventStore {
             Ok(count)
         })
         .await
-        .map_err(|e| StorageError::OperationFailed(format!("spawn_blocking error: {}", e)))?
+        .map_err(|e| StorageError::OperationFailed(format!("spawn_blocking error: {e}")))?
     }
 
     async fn compact(&self, older_than: Duration) -> StorageResult<u64> {
@@ -678,27 +661,27 @@ impl EventStore for RedbEventStore {
             // This prevents TOCTOU races where an event's status could change
             // between identification and deletion.
             let write_txn = db.begin_write().map_err(|e| {
-                StorageError::DatabaseError(format!("failed to begin write: {}", e))
+                StorageError::DatabaseError(format!("failed to begin write: {e}"))
             })?;
 
             let to_delete: Vec<(u64, String, u8)> = {
                 let events_table = write_txn.open_table(EVENTS_TABLE).map_err(|e| {
-                    StorageError::DatabaseError(format!("failed to open events table: {}", e))
+                    StorageError::DatabaseError(format!("failed to open events table: {e}"))
                 })?;
 
                 let mut items = Vec::new();
                 let iter = events_table.iter().map_err(|e| {
-                    StorageError::DatabaseError(format!("failed to iterate: {}", e))
+                    StorageError::DatabaseError(format!("failed to iterate: {e}"))
                 })?;
 
                 for item in iter {
                     let (key, data) = item.map_err(|e| {
-                        StorageError::DatabaseError(format!("failed to iterate: {}", e))
+                        StorageError::DatabaseError(format!("failed to iterate: {e}"))
                     })?;
                     let seq: u64 = key.value();
                     let bytes = data.value().to_vec();
                     let event: StoredEvent = serde_json::from_slice(&bytes).map_err(|e| {
-                        StorageError::OperationFailed(format!("failed to deserialize: {}", e))
+                        StorageError::OperationFailed(format!("failed to deserialize: {e}"))
                     })?;
 
                     let terminal = matches!(
@@ -722,16 +705,16 @@ impl EventStore for RedbEventStore {
 
             // Open tables once outside the loop to avoid repeated handle setup.
             let mut events_table = write_txn.open_table(EVENTS_TABLE).map_err(|e| {
-                StorageError::DatabaseError(format!("failed to open events table: {}", e))
+                StorageError::DatabaseError(format!("failed to open events table: {e}"))
             })?;
             let mut subject_idx = write_txn.open_table(SUBJECT_IDX_TABLE).map_err(|e| {
-                StorageError::DatabaseError(format!("failed to open subject_idx: {}", e))
+                StorageError::DatabaseError(format!("failed to open subject_idx: {e}"))
             })?;
             let mut status_idx = write_txn.open_table(STATUS_IDX_TABLE).map_err(|e| {
-                StorageError::DatabaseError(format!("failed to open status_idx: {}", e))
+                StorageError::DatabaseError(format!("failed to open status_idx: {e}"))
             })?;
             let mut failed_idx = write_txn.open_table(FAILED_DELIVERIES_IDX_TABLE).map_err(|e| {
-                StorageError::DatabaseError(format!("failed to open failed_deliveries_idx: {}", e))
+                StorageError::DatabaseError(format!("failed to open failed_deliveries_idx: {e}"))
             })?;
 
             for (seq, subject, status_u8) in &to_delete {
@@ -755,68 +738,65 @@ impl EventStore for RedbEventStore {
 
             write_txn
                 .commit()
-                .map_err(|e| StorageError::DatabaseError(format!("failed to commit: {}", e)))?;
+                .map_err(|e| StorageError::DatabaseError(format!("failed to commit: {e}")))?;
 
             Ok(removed)
         })
         .await
-        .map_err(|e| StorageError::OperationFailed(format!("spawn_blocking error: {}", e)))?
+        .map_err(|e| StorageError::OperationFailed(format!("spawn_blocking error: {e}")))?
     }
 
     async fn requeue_dead_lettered(&self, seq: u64) -> StorageResult<StoredEvent> {
         let db = Arc::clone(&self.db);
         tokio::task::spawn_blocking(move || {
-            let write_txn = db.begin_write().map_err(|e| {
-                StorageError::DatabaseError(format!("failed to begin write: {}", e))
-            })?;
+            let write_txn = db
+                .begin_write()
+                .map_err(|e| StorageError::DatabaseError(format!("failed to begin write: {e}")))?;
 
             let mut event: StoredEvent = {
                 let events_table = write_txn.open_table(EVENTS_TABLE).map_err(|e| {
-                    StorageError::DatabaseError(format!("failed to open events table: {}", e))
+                    StorageError::DatabaseError(format!("failed to open events table: {e}"))
                 })?;
                 let data = events_table
                     .get(seq)
-                    .map_err(|e| {
-                        StorageError::DatabaseError(format!("failed to get event: {}", e))
-                    })?
+                    .map_err(|e| StorageError::DatabaseError(format!("failed to get event: {e}")))?
                     .ok_or(StorageError::NotFound)?;
                 serde_json::from_slice(data.value()).map_err(|e| {
-                    StorageError::OperationFailed(format!("failed to deserialize event: {}", e))
+                    StorageError::OperationFailed(format!("failed to deserialize event: {e}"))
                 })?
             };
 
             if event.status != EventStatus::DeadLettered {
                 return Err(StorageError::OperationFailed(format!(
-                    "event {} is not dead-lettered",
-                    seq
+                    "event {seq} is not dead-lettered"
                 )));
             }
             let old_status = event.status.as_u8();
             event.status = EventStatus::Pending;
             event.deliveries.clear();
             let serialized = serde_json::to_vec(&event).map_err(|e| {
-                StorageError::OperationFailed(format!("failed to serialize event: {}", e))
+                StorageError::OperationFailed(format!("failed to serialize event: {e}"))
             })?;
 
             {
                 let mut events_table = write_txn.open_table(EVENTS_TABLE).map_err(|e| {
-                    StorageError::DatabaseError(format!("failed to open events table: {}", e))
+                    StorageError::DatabaseError(format!("failed to open events table: {e}"))
                 })?;
                 events_table
                     .insert(seq, serialized.as_slice())
                     .map_err(|e| {
-                        StorageError::DatabaseError(format!("failed to update event: {}", e))
+                        StorageError::DatabaseError(format!("failed to update event: {e}"))
                     })?;
             }
             {
                 let mut status_idx = write_txn.open_table(STATUS_IDX_TABLE).map_err(|e| {
-                    StorageError::DatabaseError(format!("failed to open status_idx: {}", e))
+                    StorageError::DatabaseError(format!("failed to open status_idx: {e}"))
                 })?;
                 let _ = status_idx.remove((old_status, seq));
                 status_idx
                     .insert((EventStatus::Pending.as_u8(), seq), ())
                     .map_err(|e| {
-                        StorageError::DatabaseError(format!("failed to insert status index: {}", e))
+                        StorageError::DatabaseError(format!("failed to insert status index: {e}"))
                     })?;
             }
             {
@@ -825,8 +805,7 @@ impl EventStore for RedbEventStore {
                         .open_table(FAILED_DELIVERIES_IDX_TABLE)
                         .map_err(|e| {
                             StorageError::DatabaseError(format!(
-                                "failed to open failed_deliveries_idx: {}",
-                                e
+                                "failed to open failed_deliveries_idx: {e}"
                             ))
                         })?;
                 let _ = failed_idx.remove(seq);
@@ -834,56 +813,53 @@ impl EventStore for RedbEventStore {
 
             write_txn
                 .commit()
-                .map_err(|e| StorageError::DatabaseError(format!("failed to commit: {}", e)))?;
+                .map_err(|e| StorageError::DatabaseError(format!("failed to commit: {e}")))?;
             Ok(event)
         })
         .await
-        .map_err(|e| StorageError::OperationFailed(format!("spawn_blocking error: {}", e)))?
+        .map_err(|e| StorageError::OperationFailed(format!("spawn_blocking error: {e}")))?
     }
 
     async fn purge_dead_lettered(&self, seq: u64) -> StorageResult<()> {
         let db = Arc::clone(&self.db);
         tokio::task::spawn_blocking(move || {
-            let write_txn = db.begin_write().map_err(|e| {
-                StorageError::DatabaseError(format!("failed to begin write: {}", e))
-            })?;
+            let write_txn = db
+                .begin_write()
+                .map_err(|e| StorageError::DatabaseError(format!("failed to begin write: {e}")))?;
 
             let event: StoredEvent = {
                 let events_table = write_txn.open_table(EVENTS_TABLE).map_err(|e| {
-                    StorageError::DatabaseError(format!("failed to open events table: {}", e))
+                    StorageError::DatabaseError(format!("failed to open events table: {e}"))
                 })?;
                 let data = events_table
                     .get(seq)
-                    .map_err(|e| {
-                        StorageError::DatabaseError(format!("failed to get event: {}", e))
-                    })?
+                    .map_err(|e| StorageError::DatabaseError(format!("failed to get event: {e}")))?
                     .ok_or(StorageError::NotFound)?;
                 serde_json::from_slice(data.value()).map_err(|e| {
-                    StorageError::OperationFailed(format!("failed to deserialize event: {}", e))
+                    StorageError::OperationFailed(format!("failed to deserialize event: {e}"))
                 })?
             };
             if event.status != EventStatus::DeadLettered {
                 return Err(StorageError::OperationFailed(format!(
-                    "event {} is not dead-lettered",
-                    seq
+                    "event {seq} is not dead-lettered"
                 )));
             }
 
             {
                 let mut events_table = write_txn.open_table(EVENTS_TABLE).map_err(|e| {
-                    StorageError::DatabaseError(format!("failed to open events table: {}", e))
+                    StorageError::DatabaseError(format!("failed to open events table: {e}"))
                 })?;
                 let _ = events_table.remove(seq);
             }
             {
                 let mut subject_idx = write_txn.open_table(SUBJECT_IDX_TABLE).map_err(|e| {
-                    StorageError::DatabaseError(format!("failed to open subject_idx: {}", e))
+                    StorageError::DatabaseError(format!("failed to open subject_idx: {e}"))
                 })?;
                 let _ = subject_idx.remove((event.subject.as_str(), seq));
             }
             {
                 let mut status_idx = write_txn.open_table(STATUS_IDX_TABLE).map_err(|e| {
-                    StorageError::DatabaseError(format!("failed to open status_idx: {}", e))
+                    StorageError::DatabaseError(format!("failed to open status_idx: {e}"))
                 })?;
                 let _ = status_idx.remove((event.status.as_u8(), seq));
             }
@@ -893,8 +869,7 @@ impl EventStore for RedbEventStore {
                         .open_table(FAILED_DELIVERIES_IDX_TABLE)
                         .map_err(|e| {
                             StorageError::DatabaseError(format!(
-                                "failed to open failed_deliveries_idx: {}",
-                                e
+                                "failed to open failed_deliveries_idx: {e}"
                             ))
                         })?;
                 let _ = failed_idx.remove(seq);
@@ -902,10 +877,10 @@ impl EventStore for RedbEventStore {
 
             write_txn
                 .commit()
-                .map_err(|e| StorageError::DatabaseError(format!("failed to commit: {}", e)))
+                .map_err(|e| StorageError::DatabaseError(format!("failed to commit: {e}")))
         })
         .await
-        .map_err(|e| StorageError::OperationFailed(format!("spawn_blocking error: {}", e)))?
+        .map_err(|e| StorageError::OperationFailed(format!("spawn_blocking error: {e}")))?
     }
 
     async fn save_subscription(&self, sub: &PersistedSubscription) -> StorageResult<()> {
@@ -913,26 +888,26 @@ impl EventStore for RedbEventStore {
         let sub = sub.clone();
         tokio::task::spawn_blocking(move || {
             let serialized = serde_json::to_vec(&sub).map_err(|e| {
-                StorageError::OperationFailed(format!("serialize subscription: {}", e))
+                StorageError::OperationFailed(format!("serialize subscription: {e}"))
             })?;
             let write_txn = db
                 .begin_write()
-                .map_err(|e| StorageError::DatabaseError(format!("begin write: {}", e)))?;
+                .map_err(|e| StorageError::DatabaseError(format!("begin write: {e}")))?;
             {
                 let mut t = write_txn.open_table(SUBSCRIPTIONS_TABLE).map_err(|e| {
-                    StorageError::DatabaseError(format!("open subscriptions table: {}", e))
+                    StorageError::DatabaseError(format!("open subscriptions table: {e}"))
                 })?;
                 t.insert(sub.persisted_id.as_str(), serialized.as_slice())
                     .map_err(|e| {
-                        StorageError::DatabaseError(format!("insert subscription: {}", e))
+                        StorageError::DatabaseError(format!("insert subscription: {e}"))
                     })?;
             }
             write_txn
                 .commit()
-                .map_err(|e| StorageError::DatabaseError(format!("commit: {}", e)))
+                .map_err(|e| StorageError::DatabaseError(format!("commit: {e}")))
         })
         .await
-        .map_err(|e| StorageError::OperationFailed(format!("spawn_blocking: {}", e)))?
+        .map_err(|e| StorageError::OperationFailed(format!("spawn_blocking: {e}")))?
     }
 
     async fn list_subscriptions(&self) -> StorageResult<Vec<PersistedSubscription>> {
@@ -940,27 +915,27 @@ impl EventStore for RedbEventStore {
         tokio::task::spawn_blocking(move || {
             let read_txn = db
                 .begin_read()
-                .map_err(|e| StorageError::DatabaseError(format!("begin read: {}", e)))?;
+                .map_err(|e| StorageError::DatabaseError(format!("begin read: {e}")))?;
             let table = read_txn
                 .open_table(SUBSCRIPTIONS_TABLE)
-                .map_err(|e| StorageError::DatabaseError(format!("open subscriptions: {}", e)))?;
+                .map_err(|e| StorageError::DatabaseError(format!("open subscriptions: {e}")))?;
             let mut results = Vec::new();
             let iter = table
                 .iter()
-                .map_err(|e| StorageError::DatabaseError(format!("iterate: {}", e)))?;
+                .map_err(|e| StorageError::DatabaseError(format!("iterate: {e}")))?;
             for item in iter {
                 let (_, value) =
-                    item.map_err(|e| StorageError::DatabaseError(format!("iterate row: {}", e)))?;
+                    item.map_err(|e| StorageError::DatabaseError(format!("iterate row: {e}")))?;
                 let bytes = value.value().to_vec();
                 let sub: PersistedSubscription = serde_json::from_slice(&bytes).map_err(|e| {
-                    StorageError::OperationFailed(format!("deserialize subscription: {}", e))
+                    StorageError::OperationFailed(format!("deserialize subscription: {e}"))
                 })?;
                 results.push(sub);
             }
             Ok(results)
         })
         .await
-        .map_err(|e| StorageError::OperationFailed(format!("spawn_blocking: {}", e)))?
+        .map_err(|e| StorageError::OperationFailed(format!("spawn_blocking: {e}")))?
     }
 
     async fn delete_subscription(&self, persisted_id: &str) -> StorageResult<()> {
@@ -969,19 +944,19 @@ impl EventStore for RedbEventStore {
         tokio::task::spawn_blocking(move || {
             let write_txn = db
                 .begin_write()
-                .map_err(|e| StorageError::DatabaseError(format!("begin write: {}", e)))?;
+                .map_err(|e| StorageError::DatabaseError(format!("begin write: {e}")))?;
             {
                 let mut t = write_txn.open_table(SUBSCRIPTIONS_TABLE).map_err(|e| {
-                    StorageError::DatabaseError(format!("open subscriptions table: {}", e))
+                    StorageError::DatabaseError(format!("open subscriptions table: {e}"))
                 })?;
                 let _ = t.remove(persisted_id.as_str());
             }
             write_txn
                 .commit()
-                .map_err(|e| StorageError::DatabaseError(format!("commit: {}", e)))
+                .map_err(|e| StorageError::DatabaseError(format!("commit: {e}")))
         })
         .await
-        .map_err(|e| StorageError::OperationFailed(format!("spawn_blocking: {}", e)))?
+        .map_err(|e| StorageError::OperationFailed(format!("spawn_blocking: {e}")))?
     }
 }
 
@@ -1141,8 +1116,8 @@ mod tests {
                 for i in 0..5 {
                     let event = StoredEvent {
                         seq: 0,
-                        subject: format!("test.task.{}", task_id),
-                        payload: format!("event-{}-{}", task_id, i).into_bytes(),
+                        subject: format!("test.task.{task_id}"),
+                        payload: format!("event-{task_id}-{i}").into_bytes(),
                         stored_at: 0,
                         status: EventStatus::Pending,
                         deliveries: vec![],
@@ -1170,7 +1145,7 @@ mod tests {
         // Every event is readable via get(seq).
         for seq in &all_seqs {
             let event = store.get(*seq).await.unwrap();
-            assert!(event.is_some(), "event seq={} should be readable", seq);
+            assert!(event.is_some(), "event seq={seq} should be readable");
         }
     }
 
@@ -1352,9 +1327,9 @@ mod tests {
         for i in 0..5 {
             store
                 .save_subscription(&PersistedSubscription {
-                    persisted_id: format!("id-{}", i),
-                    pattern: format!("subject.{}", i),
-                    url: format!("https://hook{}.example.com", i),
+                    persisted_id: format!("id-{i}"),
+                    pattern: format!("subject.{i}"),
+                    url: format!("https://hook{i}.example.com"),
                     headers: std::collections::HashMap::new(),
                     priority: i as u32,
                     created_at: 1000 + i as u64,

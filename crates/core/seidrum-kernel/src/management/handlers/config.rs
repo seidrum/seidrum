@@ -134,7 +134,7 @@ pub async fn set_env(
     let mut found = false;
     for line in &mut lines {
         let line_trimmed = line.trim();
-        if line_trimmed.starts_with(&format!("{}=", key)) {
+        if line_trimmed.starts_with(&format!("{key}=")) {
             // Replace existing key with properly escaped value
             *line = format!("{}={}", key, escape_env_value(&req.value));
             found = true;

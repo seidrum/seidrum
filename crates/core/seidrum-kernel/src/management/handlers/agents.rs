@@ -105,7 +105,7 @@ pub async fn get_agent(
 ) -> Result<Json<AgentDetailResponse>, (StatusCode, String)> {
     let agent_path = find_agent_file(&state.agents_dir, &id)
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
-        .ok_or((StatusCode::NOT_FOUND, format!("Agent '{}' not found", id)))?;
+        .ok_or((StatusCode::NOT_FOUND, format!("Agent '{id}' not found")))?;
 
     let agent = load_agent_definition(&agent_path)
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
@@ -223,7 +223,7 @@ pub fn find_agent_file(agents_dir: &PathBuf, id: &str) -> anyhow::Result<Option<
 
 async fn set_agent_enabled(state: &ManagementState, id: &str, enabled: bool) -> anyhow::Result<()> {
     let agent_path = find_agent_file(&state.agents_dir, id)?
-        .ok_or_else(|| anyhow::anyhow!("Agent '{}' not found", id))?;
+        .ok_or_else(|| anyhow::anyhow!("Agent '{id}' not found"))?;
 
     let mut agent = load_agent_definition(&agent_path)?;
     agent.enabled = enabled;

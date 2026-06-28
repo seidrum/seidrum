@@ -119,7 +119,7 @@ pub async fn handle_subscribe_events(
                     origin: None,
                 };
 
-                let consciousness_subject = format!("agent.{}.consciousness", agent_id_clone);
+                let consciousness_subject = format!("agent.{agent_id_clone}.consciousness");
                 if let Ok(bytes) = serde_json::to_vec(&event) {
                     if let Err(e) = nats_clone.publish_bytes(consciousness_subject, bytes).await {
                         warn!(%e, "Failed to publish consciousness event");
@@ -337,7 +337,7 @@ pub async fn handle_schedule_wake(
             origin: None,
         };
 
-        let subject = format!("agent.{}.consciousness", agent_id_clone);
+        let subject = format!("agent.{agent_id_clone}.consciousness");
         if let Ok(bytes) = serde_json::to_vec(&event) {
             let _ = nats_clone.publish_bytes(subject, bytes).await;
         }

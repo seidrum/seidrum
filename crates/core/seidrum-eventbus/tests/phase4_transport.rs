@@ -136,7 +136,7 @@ mod tests {
                 );
             }
             other => {
-                panic!("Expected Webhook config, got {:?}", other);
+                panic!("Expected Webhook config, got {other:?}");
             }
         }
     }
@@ -210,7 +210,7 @@ mod tests {
 
         let client = reqwest::Client::new();
         let resp = client
-            .post(format!("http://{}/subscribe", addr))
+            .post(format!("http://{addr}/subscribe"))
             .json(&serde_json::json!({
                 "pattern": "persist.test",
                 "url": "http://127.0.0.1:1/never-called",
@@ -296,7 +296,7 @@ mod tests {
 
         let client = reqwest::Client::new();
         let resp = client
-            .post(format!("http://{}/subscribe", addr))
+            .post(format!("http://{addr}/subscribe"))
             .json(&serde_json::json!({
                 "pattern": "persist.delete",
                 "url": "http://127.0.0.1:1/never-called",
@@ -313,7 +313,7 @@ mod tests {
 
         // Now DELETE it.
         let resp = client
-            .delete(format!("http://{}/subscribe/{}", addr, bus_id))
+            .delete(format!("http://{addr}/subscribe/{bus_id}"))
             .send()
             .await
             .unwrap();
@@ -554,7 +554,7 @@ mod tests {
 
         let client = reqwest::Client::new();
         let resp = client
-            .get(format!("http://{}/dead-letter?subject=dl.http", http_addr))
+            .get(format!("http://{http_addr}/dead-letter?subject=dl.http"))
             .send()
             .await
             .unwrap();
@@ -564,7 +564,7 @@ mod tests {
         assert_eq!(body["events"][0]["seq"].as_u64(), Some(seq));
 
         let resp = client
-            .post(format!("http://{}/dead-letter/{}/replay", http_addr, seq))
+            .post(format!("http://{http_addr}/dead-letter/{seq}/replay"))
             .send()
             .await
             .unwrap();
@@ -586,7 +586,7 @@ mod tests {
             .await
             .unwrap();
         let resp = client
-            .delete(format!("http://{}/dead-letter/{}", http_addr, seq))
+            .delete(format!("http://{http_addr}/dead-letter/{seq}"))
             .send()
             .await
             .unwrap();
@@ -1003,7 +1003,7 @@ mod tests {
         wait_for_http_ready(env.http_addr).await;
 
         // Register the webhook sync interceptor via the new endpoint.
-        let webhook_url = format!("http://{}/intercept", interceptor_addr);
+        let webhook_url = format!("http://{interceptor_addr}/intercept");
         let resp = reqwest::Client::new()
             .post(format!("http://{}/interceptors", env.http_addr))
             .json(&serde_json::json!({
@@ -1089,7 +1089,7 @@ mod tests {
         let env = test_bus_with_transports().await;
         wait_for_http_ready(env.http_addr).await;
 
-        let webhook_url = format!("http://{}/intercept", interceptor_addr);
+        let webhook_url = format!("http://{interceptor_addr}/intercept");
         let resp = reqwest::Client::new()
             .post(format!("http://{}/interceptors", env.http_addr))
             .json(&serde_json::json!({
@@ -1154,7 +1154,7 @@ mod tests {
                 .send()
                 .await
                 .unwrap();
-            assert_eq!(resp.status(), 400, "pattern {:?} must be rejected", pattern);
+            assert_eq!(resp.status(), 400, "pattern {pattern:?} must be rejected");
             let body: serde_json::Value = resp.json().await.unwrap();
             assert_eq!(body["code"], "INVALID_INTERCEPTOR_PATTERN");
         }
@@ -1185,7 +1185,7 @@ mod tests {
         wait_for_http_ready(addr).await;
 
         let resp = reqwest::Client::new()
-            .post(format!("http://{}/interceptors", addr))
+            .post(format!("http://{addr}/interceptors"))
             .json(&serde_json::json!({
                 "pattern": "events.audit",
                 "url": "http://127.0.0.1:1/never-called",
@@ -1233,7 +1233,7 @@ mod tests {
                 .send()
                 .await
                 .unwrap();
-            assert_eq!(resp.status(), 200, "request {} should succeed", i);
+            assert_eq!(resp.status(), 200, "request {i} should succeed");
         }
         // The 65th must fail.
         let resp = client
@@ -1274,7 +1274,7 @@ mod tests {
         wait_for_http_ready(addr).await;
 
         let resp = reqwest::Client::new()
-            .post(format!("http://{}/interceptors", addr))
+            .post(format!("http://{addr}/interceptors"))
             .json(&serde_json::json!({
                 "pattern": "events.foo",
                 "url": "http://127.0.0.1:1/never-called",
@@ -1289,7 +1289,7 @@ mod tests {
 
         // Same for POST /subscribe.
         let resp = reqwest::Client::new()
-            .post(format!("http://{}/subscribe", addr))
+            .post(format!("http://{addr}/subscribe"))
             .json(&serde_json::json!({
                 "pattern": "events.foo",
                 "url": "http://127.0.0.1:1/never-called",
@@ -1326,7 +1326,7 @@ mod tests {
         wait_for_http_ready(addr).await;
 
         let resp = reqwest::Client::new()
-            .post(format!("http://{}/subscribe", addr))
+            .post(format!("http://{addr}/subscribe"))
             .json(&serde_json::json!({
                 "pattern": "events.foo",
                 "url": "http://127.0.0.1/hook",
@@ -1376,7 +1376,7 @@ mod tests {
         wait_for_http_ready(addr).await;
 
         let resp = reqwest::Client::new()
-            .post(format!("http://{}/interceptors", addr))
+            .post(format!("http://{addr}/interceptors"))
             .json(&serde_json::json!({
                 "pattern": "events.persisted",
                 "url": "http://127.0.0.1:1/never-called",
@@ -1503,14 +1503,14 @@ mod tests {
                 .send()
                 .await
                 .unwrap();
-            assert_eq!(resp.status(), 200, "register {} should succeed", suffix);
+            assert_eq!(resp.status(), 200, "register {suffix} should succeed");
         }
 
         // Subscribe to each subject and publish — the original payload
         // should always reach the subscriber because every fallback
         // path returns Pass.
         for suffix in ["five_hundred", "garbage", "invalid_b64"] {
-            let subject = format!("e2e.fallback.{}", suffix);
+            let subject = format!("e2e.fallback.{suffix}");
             let opts = SubscribeOpts {
                 priority: 200,
                 mode: SubscriptionMode::Async,
@@ -1530,8 +1530,7 @@ mod tests {
                 .expect("rx not closed");
             assert_eq!(
                 received.payload, b"original",
-                "fallback {} should leave payload unchanged",
-                suffix
+                "fallback {suffix} should leave payload unchanged"
             );
         }
 
@@ -1660,8 +1659,7 @@ mod tests {
             assert_eq!(
                 resp.status(),
                 400,
-                "subscribe pattern {:?} must be rejected",
-                pattern
+                "subscribe pattern {pattern:?} must be rejected"
             );
             let body: serde_json::Value = resp.json().await.unwrap();
             assert_eq!(body["code"], "INVALID_SUBSCRIBE_PATTERN");
@@ -1706,8 +1704,7 @@ mod tests {
             let parsed: serde_json::Value = serde_json::from_str(msg.to_text().unwrap()).unwrap();
             assert_eq!(
                 parsed["op"], "error",
-                "WS subscribe with pattern {:?} must error",
-                pattern
+                "WS subscribe with pattern {pattern:?} must error"
             );
         }
 
@@ -1737,7 +1734,7 @@ mod tests {
             .unwrap();
         wait_for_ws_ready(ws_addr).await;
 
-        let url = format!("ws://{}", ws_addr);
+        let url = format!("ws://{ws_addr}");
         let (ws_stream, _) = tokio_tungstenite::connect_async(&url).await.unwrap();
         let (mut write, mut read) = ws_stream.split();
 
@@ -1764,8 +1761,7 @@ mod tests {
                 .as_str()
                 .unwrap_or("")
                 .contains("AUTH_REQUIRED"),
-            "expected AUTH_REQUIRED, got {:?}",
-            parsed
+            "expected AUTH_REQUIRED, got {parsed:?}"
         );
 
         // register_channel_type should also be refused.
@@ -1830,8 +1826,7 @@ mod tests {
             let parsed: serde_json::Value = serde_json::from_str(msg.to_text().unwrap()).unwrap();
             assert_eq!(
                 parsed["op"], "error",
-                "channel name {:?} must be rejected",
-                name
+                "channel name {name:?} must be rejected"
             );
         }
 
@@ -1926,8 +1921,7 @@ mod tests {
         // Must be Permanent so the retry task doesn't keep trying.
         assert!(
             matches!(result, Err(DeliveryError::Permanent(_))),
-            "expected Permanent, got {:?}",
-            result
+            "expected Permanent, got {result:?}"
         );
     }
 
@@ -2044,7 +2038,7 @@ mod tests {
 
         // POST /subscribe returns 500 because save_subscription errors.
         let resp = reqwest::Client::new()
-            .post(format!("http://{}/subscribe", addr))
+            .post(format!("http://{addr}/subscribe"))
             .json(&serde_json::json!({
                 "pattern": "any.subject",
                 "url": "http://127.0.0.1:1/hook",

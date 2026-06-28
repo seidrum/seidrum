@@ -249,11 +249,11 @@ pub fn set_enabled(paths: &SeidrumPaths, name: &str, enabled: bool) -> Result<()
             entry.enabled = enabled;
             save_plugins_config(&yaml_path, &config)?;
             let state = if enabled { "enabled" } else { "disabled" };
-            println!("Plugin '{}' {}", name, state);
+            println!("Plugin '{name}' {state}");
             Ok(())
         }
         None => {
-            anyhow::bail!("Plugin '{}' not found in plugins.yaml", name);
+            anyhow::bail!("Plugin '{name}' not found in plugins.yaml");
         }
     }
 }

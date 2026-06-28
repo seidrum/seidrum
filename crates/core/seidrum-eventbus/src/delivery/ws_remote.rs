@@ -145,10 +145,7 @@ impl DeliveryChannel for WsRemoteChannel {
             Ok(s) => s,
             Err(e) => {
                 self.pending_replies.lock().await.remove(&request_id);
-                return Err(DeliveryError::Failed(format!(
-                    "encode deliver frame: {}",
-                    e
-                )));
+                return Err(DeliveryError::Failed(format!("encode deliver frame: {e}")));
             }
         };
 
@@ -246,7 +243,7 @@ mod tests {
         let result = channel
             .deliver(b"hello", "test.subject", &ChannelConfig::InProcess)
             .await;
-        assert!(result.is_ok(), "deliver should succeed: {:?}", result);
+        assert!(result.is_ok(), "deliver should succeed: {result:?}");
     }
 
     #[tokio::test]
@@ -274,7 +271,7 @@ mod tests {
             .await;
         assert!(result.is_err());
         let err = format!("{}", result.unwrap_err());
-        assert!(err.contains("client rejected"), "got: {}", err);
+        assert!(err.contains("client rejected"), "got: {err}");
     }
 
     #[tokio::test]
@@ -289,7 +286,7 @@ mod tests {
             .await;
         assert!(result.is_err());
         let err = format!("{}", result.unwrap_err());
-        assert!(err.contains("timed out"), "got: {}", err);
+        assert!(err.contains("timed out"), "got: {err}");
     }
 
     #[tokio::test]
@@ -314,7 +311,7 @@ mod tests {
         let result = deliver_task.await.unwrap();
         assert!(result.is_err());
         let err = format!("{}", result.unwrap_err());
-        assert!(err.contains("disconnect"), "got: {}", err);
+        assert!(err.contains("disconnect"), "got: {err}");
     }
 
     #[tokio::test]

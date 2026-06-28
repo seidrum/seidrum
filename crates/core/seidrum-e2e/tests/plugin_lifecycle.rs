@@ -39,7 +39,7 @@ async fn test_plugin_register_and_query() {
         description: "Plugin created by E2E tests".into(),
         consumes: vec![],
         produces: vec![],
-        health_subject: format!("plugin.{}.health", plugin_id),
+        health_subject: format!("plugin.{plugin_id}.health"),
         consumed_event_types: vec![],
         produced_event_types: vec![],
         config_schema: None,

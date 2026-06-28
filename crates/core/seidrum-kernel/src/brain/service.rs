@@ -506,7 +506,7 @@ async fn publish_response<T: serde::Serialize>(
     let bytes = serde_json::to_vec(&envelope).context("failed to serialize response")?;
     nats.publish_bytes(subject.to_string(), bytes)
         .await
-        .with_context(|| format!("failed to publish to {}", subject))?;
+        .with_context(|| format!("failed to publish to {subject}"))?;
     debug!(subject, "published response event");
     Ok(())
 }
@@ -530,7 +530,7 @@ async fn reply_with<T: serde::Serialize>(
     let bytes = serde_json::to_vec(&envelope).context("failed to serialize reply")?;
     nats.publish_bytes(reply_subject.to_string(), bytes)
         .await
-        .with_context(|| format!("failed to reply to {}", reply_subject))?;
+        .with_context(|| format!("failed to reply to {reply_subject}"))?;
     debug!(reply_subject, "sent reply");
     Ok(())
 }
@@ -549,7 +549,7 @@ fn generate_entity_key(name: &str) -> String {
         .chars()
         .map(|c| if c.is_alphanumeric() { c } else { '_' })
         .collect();
-    format!("entity_{}", slug)
+    format!("entity_{slug}")
 }
 
 /// Generate a fact key.
@@ -745,8 +745,8 @@ async fn handle_entity_upsert(
         let edge_data = serde_json::json!({
             "mention_type": mention_type,
         });
-        let from = format!("content/{}", content_key);
-        let to = format!("entities/{}", entity_key);
+        let from = format!("content/{content_key}");
+        let to = format!("entities/{entity_key}");
         if let Err(e) = arango.insert_edge("mentions", &from, &to, &edge_data).await {
             warn!(error = %e, "failed to create mentions edge (may already exist)");
         }
@@ -882,8 +882,8 @@ async fn handle_fact_upsert(
                 "reason": "updated via brain.fact.upsert",
                 "superseded_at": now,
             });
-            let from = format!("facts/{}", fact_key);
-            let to = format!("facts/{}", old_key);
+            let from = format!("facts/{fact_key}");
+            let to = format!("facts/{old_key}");
             let _ = arango
                 .insert_edge("supersedes", &from, &to, &edge_data)
                 .await;
@@ -916,7 +916,7 @@ async fn handle_fact_upsert(
                 "extraction_confidence": req.confidence,
                 "extracted_at": now,
             });
-            let from = format!("facts/{}", fact_key);
+            let from = format!("facts/{fact_key}");
             let to = format!("content/{}", req.source_content);
             let _ = arango
                 .insert_edge("derived_from", &from, &to, &derived_edge)
@@ -954,7 +954,7 @@ async fn handle_fact_upsert(
             "extraction_confidence": req.confidence,
             "extracted_at": now,
         });
-        let from = format!("facts/{}", fact_key);
+        let from = format!("facts/{fact_key}");
         let to = format!("content/{}", req.source_content);
         let _ = arango
             .insert_edge("derived_from", &from, &to, &derived_edge)
@@ -1044,12 +1044,12 @@ async fn detect_collection_id(arango: &ArangoClient, key: &str) -> Result<String
     // Try common collections in order
     for collection in &["entities", "content", "facts", "tasks"] {
         if let Ok(Some(_)) = arango.get_document(collection, key).await {
-            return Ok(format!("{}/{}", collection, key));
+            return Ok(format!("{collection}/{key}"));
         }
     }
     // Default to entities if not found (the insert might fail, but that is
     // the caller's problem).
-    Ok(format!("entities/{}", key))
+    Ok(format!("entities/{key}"))
 }
 
 /// Handle `brain.task.upsert` — create or update a task.
@@ -1355,8 +1355,7 @@ async fn handle_vector_search(
                 FILTER LENGTH(INTERSECTION(doc_scopes, @allowed_scopes)) > 0
                 SORT distance DESC
                 LIMIT @limit
-                RETURN MERGE(doc, {{ _similarity: distance }})"#,
-            collection = collection
+                RETURN MERGE(doc, {{ _similarity: distance }})"#
         )
     } else {
         format!(
@@ -1365,8 +1364,7 @@ async fn handle_vector_search(
                 FILTER distance != null
                 SORT distance DESC
                 LIMIT @limit
-                RETURN MERGE(doc, {{ _similarity: distance }})"#,
-            collection = collection
+                RETURN MERGE(doc, {{ _similarity: distance }})"#
         )
     };
 
@@ -1482,8 +1480,7 @@ async fn handle_hybrid_search(
                 FILTER LENGTH(INTERSECTION(doc_scopes, @allowed_scopes)) > 0
                 SORT distance DESC
                 LIMIT @limit
-                RETURN {{ doc, distance, source: "vector_match" }}"#,
-            safe_collection = safe_collection
+                RETURN {{ doc, distance, source: "vector_match" }}"#
         )
     } else {
         format!(
@@ -1492,8 +1489,7 @@ async fn handle_hybrid_search(
                 FILTER distance != null
                 SORT distance DESC
                 LIMIT @limit
-                RETURN {{ doc, distance, source: "vector_match" }}"#,
-            safe_collection = safe_collection
+                RETURN {{ doc, distance, source: "vector_match" }}"#
         )
     };
 
@@ -1589,10 +1585,9 @@ async fn handle_graph_traverse(
     };
 
     let aql = format!(
-        r#"FOR v, e, p IN 1..@depth {direction} @start
+        r#"FOR v, e, p IN 1..@depth {direction_keyword} @start
              GRAPH "brain"
              RETURN {{ vertex: v, edge: e }}"#,
-        direction = direction_keyword,
     );
 
     let bind_vars = serde_json::json!({
@@ -1625,7 +1620,7 @@ async fn handle_get_facts(
     let entity_id = if start_vertex.contains('/') {
         start_vertex.to_string()
     } else {
-        format!("entities/{}", start_vertex)
+        format!("entities/{start_vertex}")
     };
 
     let aql = r#"
@@ -1690,7 +1685,7 @@ async fn handle_get_context(
     let scope_id = if scope.contains('/') {
         scope.to_string()
     } else {
-        format!("scopes/{}", scope)
+        format!("scopes/{scope}")
     };
 
     let bind_vars = serde_json::json!({
@@ -1744,13 +1739,13 @@ async fn handle_conversation_create(
 
     // Create scoped_to edge linking conversation to user's scope
     if let Some(user_id) = &req.user_id {
-        let user_scope = format!("scopes/scope_{}", user_id);
+        let user_scope = format!("scopes/scope_{user_id}");
         let edge_data = serde_json::json!({
             "relevance": 1.0,
             "added_at": now,
             "added_by": "kernel",
         });
-        let from = format!("conversations/{}", conv_id);
+        let from = format!("conversations/{conv_id}");
         let _ = arango
             .insert_edge("scoped_to", &from, &user_scope, &edge_data)
             .await;
@@ -1915,12 +1910,11 @@ async fn handle_conversation_find(
             FILTER conv.platform == @platform
             FILTER conv.metadata[@meta_key] == @meta_value
             FILTER conv.state == "active"
-            {}
+            {user_filter}
             SORT conv.updated_at DESC
             LIMIT 1
             RETURN MERGE(conv, {{ id: conv._key }})
-    "#,
-        user_filter
+    "#
     );
 
     let mut bind_vars = serde_json::json!({
@@ -2003,7 +1997,7 @@ async fn handle_conversation_list(
     let query = format!(
         r#"
             FOR conv IN conversations
-                {}
+                {filter_clause}
                 SORT conv.updated_at DESC
                 LIMIT @limit
                 RETURN {{
@@ -2014,8 +2008,7 @@ async fn handle_conversation_list(
                     state: conv.state,
                     updated_at: conv.updated_at
                 }}
-        "#,
-        filter_clause
+        "#
     );
 
     let bind_vars = Value::Object(bind_vars);
@@ -2512,7 +2505,7 @@ async fn handle_user_create(
     }
 
     // Create the user scope
-    let user_scope_key = format!("scope_{}", user_id);
+    let user_scope_key = format!("scope_{user_id}");
     let scope_doc = serde_json::json!({
         "_key": user_scope_key,
         "name": format!("{}'s scope", req.username),
@@ -2957,11 +2950,10 @@ async fn handle_audit_query(
 
     let query = format!(
         r#"
-        LET total = LENGTH(FOR a IN audit_log {} RETURN 1)
-        LET entries = (FOR a IN audit_log {} SORT a.timestamp DESC LIMIT @limit RETURN a)
+        LET total = LENGTH(FOR a IN audit_log {filter_clause} RETURN 1)
+        LET entries = (FOR a IN audit_log {filter_clause} SORT a.timestamp DESC LIMIT @limit RETURN a)
         RETURN {{ total: total, entries: entries }}
-    "#,
-        filter_clause, filter_clause
+    "#
     );
 
     let result = arango

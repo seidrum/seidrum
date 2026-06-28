@@ -159,7 +159,7 @@ impl ScopeService {
                 if s.contains('/') {
                     s.clone()
                 } else {
-                    format!("scopes/{}", s)
+                    format!("scopes/{s}")
                 }
             })
             .collect();
@@ -243,7 +243,7 @@ FOR __scope_doc IN __scope_candidates
                 if s.contains('/') {
                     s.clone()
                 } else {
-                    format!("scopes/{}", s)
+                    format!("scopes/{s}")
                 }
             })
             .collect();
@@ -332,8 +332,7 @@ mod tests {
             let s = entry.as_str().unwrap();
             assert!(
                 s.starts_with("scopes/"),
-                "scope ID '{}' should start with 'scopes/'",
-                s
+                "scope ID '{s}' should start with 'scopes/'"
             );
         }
     }
@@ -420,7 +419,7 @@ mod tests {
         // All should start with "scopes/".
         for entry in arr {
             let s = entry.as_str().unwrap();
-            assert!(s.starts_with("scopes/"), "expected scopes/ prefix: {}", s);
+            assert!(s.starts_with("scopes/"), "expected scopes/ prefix: {s}");
         }
 
         // The one that already had "scopes/" should not be double-prefixed.

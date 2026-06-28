@@ -86,15 +86,15 @@ async fn run_serve() -> anyhow::Result<()> {
         std::env::var("EVENTBUS_WS_ADDR").unwrap_or_else(|_| "0.0.0.0:9000".to_string());
     let ws_addr: std::net::SocketAddr = ws_addr_str
         .parse()
-        .map_err(|e| anyhow::anyhow!("invalid EVENTBUS_WS_ADDR '{}': {}", ws_addr_str, e))?;
+        .map_err(|e| anyhow::anyhow!("invalid EVENTBUS_WS_ADDR '{ws_addr_str}': {e}"))?;
 
     let data_dir = std::env::var("EVENTBUS_DATA_DIR").unwrap_or_else(|_| "data".to_string());
     std::fs::create_dir_all(&data_dir)?;
-    let db_path = format!("{}/eventbus.redb", data_dir);
+    let db_path = format!("{data_dir}/eventbus.redb");
 
     let store = std::sync::Arc::new(
         seidrum_eventbus::storage::redb_store::RedbEventStore::open(&db_path)
-            .map_err(|e| anyhow::anyhow!("failed to open eventbus store at {}: {}", db_path, e))?,
+            .map_err(|e| anyhow::anyhow!("failed to open eventbus store at {db_path}: {e}"))?,
     );
 
     let bus_handles = seidrum_eventbus::EventBusBuilder::new()
@@ -104,7 +104,7 @@ async fn run_serve() -> anyhow::Result<()> {
         .unsafe_allow_ws_dev_mode()
         .build_with_handles()
         .await
-        .map_err(|e| anyhow::anyhow!("failed to build eventbus: {}", e))?;
+        .map_err(|e| anyhow::anyhow!("failed to build eventbus: {e}"))?;
 
     info!("eventbus started (WS transport on {})", ws_addr);
 
@@ -213,7 +213,6 @@ async fn run_serve() -> anyhow::Result<()> {
     // 9. Spawn the management HTTP server.
     let config_dir_path = std::path::PathBuf::from("config/");
     let agents_dir_path = std::path::PathBuf::from(&agents_dir);
-    let workflows_dir_path = std::path::PathBuf::from(&workflows_dir);
     let env_file = std::path::PathBuf::from(".env");
     let mgmt_listen_addr =
         std::env::var("MGMT_LISTEN_ADDR").unwrap_or_else(|_| "127.0.0.1:3030".to_string());
@@ -222,7 +221,6 @@ async fn run_serve() -> anyhow::Result<()> {
         nats_client.clone(),
         config_dir_path,
         agents_dir_path,
-        workflows_dir_path,
         env_file,
     );
     let management_handle = management_server.spawn(&mgmt_listen_addr).await?;
@@ -330,7 +328,7 @@ fn run_validate(config_path: &str) -> bool {
             Some(cfg)
         }
         Err(e) => {
-            errors.push(format!("Platform config: {}", e));
+            errors.push(format!("Platform config: {e}"));
             None
         }
     };
@@ -355,7 +353,7 @@ fn run_validate(config_path: &str) -> bool {
     let entries = match std::fs::read_dir(agents_path) {
         Ok(entries) => entries,
         Err(e) => {
-            errors.push(format!("Cannot read agents directory: {}", e));
+            errors.push(format!("Cannot read agents directory: {e}"));
             print_validation_summary(&ok_checks, &warnings, &errors);
             return false;
         }
@@ -367,7 +365,7 @@ fn run_validate(config_path: &str) -> bool {
         let entry = match entry {
             Ok(e) => e,
             Err(e) => {
-                errors.push(format!("Error reading directory entry: {}", e));
+                errors.push(format!("Error reading directory entry: {e}"));
                 continue;
             }
         };
@@ -402,8 +400,7 @@ fn run_validate(config_path: &str) -> bool {
             let agent_id = &agent_file.agent.id;
             if let Some(first_path) = seen_ids.get(agent_id) {
                 errors.push(format!(
-                    "Duplicate agent ID '{}': found in both '{}' and '{}'",
-                    agent_id, first_path, source_path
+                    "Duplicate agent ID '{agent_id}': found in both '{first_path}' and '{source_path}'"
                 ));
             } else {
                 seen_ids.insert(agent_id.clone(), source_path.clone());

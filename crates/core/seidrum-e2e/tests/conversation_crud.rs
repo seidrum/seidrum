@@ -132,7 +132,7 @@ async fn test_conversation_get_with_max_messages() {
             conversation_id: conv_id.clone(),
             message: ConversationMessage {
                 role: "user".into(),
-                content: Some(format!("Message {}", i)),
+                content: Some(format!("Message {i}")),
                 tool_calls: vec![],
                 tool_results: vec![],
                 media: vec![],

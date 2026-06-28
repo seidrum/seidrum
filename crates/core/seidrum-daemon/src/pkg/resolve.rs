@@ -1,7 +1,7 @@
 use super::{PackageManifest, PackageSource, ResolvedPackage};
 use crate::paths::SeidrumPaths;
 use anyhow::{anyhow, Result};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use tracing::{debug, info};
 
 /// Resolve a package reference: name, name@version, or URL
@@ -45,13 +45,12 @@ fn resolve_from_url(url: &str) -> Result<ResolvedPackage> {
     // This is a placeholder - in real implementation, would fetch from HTTP
     // For now, return an error indicating we need to implement HTTP fetching
     Err(anyhow!(
-        "HTTP package resolution not yet implemented. URL: {}",
-        url
+        "HTTP package resolution not yet implemented. URL: {url}"
     ))
 }
 
 /// Resolve from a local directory
-fn resolve_from_local(path: &PathBuf) -> Result<ResolvedPackage> {
+fn resolve_from_local(path: &Path) -> Result<ResolvedPackage> {
     info!("Resolving package from local directory: {}", path.display());
 
     let manifest_path = path.join("seidrum-pkg.yaml");
@@ -59,8 +58,7 @@ fn resolve_from_local(path: &PathBuf) -> Result<ResolvedPackage> {
     let manifest: PackageManifest = serde_yaml::from_str(&manifest_content)?;
 
     Ok(ResolvedPackage {
-        source: PackageSource::Local(path.clone()),
-        manifest_url: manifest_path.to_string_lossy().to_string(),
+        source: PackageSource::Local(path.to_path_buf()),
         manifest,
     })
 }

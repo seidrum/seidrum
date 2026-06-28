@@ -78,8 +78,7 @@ async fn test_skill_search() {
         common::bus_request(&bus, "brain.skill.search", &search_req).await;
     assert!(
         search_resp.skills.iter().any(|s| s.id == skill_id),
-        "Expected to find skill {} in search results",
-        skill_id
+        "Expected to find skill {skill_id} in search results"
     );
 
     // Cleanup

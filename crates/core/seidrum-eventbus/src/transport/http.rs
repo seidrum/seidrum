@@ -552,7 +552,7 @@ impl HttpServer {
 
         let listener = tokio::net::TcpListener::bind(addr)
             .await
-            .map_err(|e| crate::EventBusError::Internal(format!("Failed to bind: {}", e)))?;
+            .map_err(|e| crate::EventBusError::Internal(format!("Failed to bind: {e}")))?;
 
         info!("HTTP server listening on {}", addr);
 
@@ -562,7 +562,7 @@ impl HttpServer {
                 let _ = shutdown_rx.wait_for(|&v| v).await;
             })
             .await
-            .map_err(|e| crate::EventBusError::Internal(format!("Server error: {}", e)))?;
+            .map_err(|e| crate::EventBusError::Internal(format!("Server error: {e}")))?;
 
         Ok(())
     }
@@ -601,7 +601,7 @@ async fn publish_event(
         .await
         .map_err(|e| {
             warn!("Publish failed for subject {}: {}", req.subject, e);
-            http_error(StatusCode::INTERNAL_SERVER_ERROR, format!("{}", e))
+            http_error(StatusCode::INTERNAL_SERVER_ERROR, format!("{e}"))
         })?;
 
     debug!("Published event to {}: seq={}", req.subject, seq);
@@ -629,7 +629,7 @@ async fn make_request(
             ),
             _ => {
                 warn!("Request failed for subject {}: {}", req.subject, e);
-                http_error(StatusCode::INTERNAL_SERVER_ERROR, format!("{}", e))
+                http_error(StatusCode::INTERNAL_SERVER_ERROR, format!("{e}"))
             }
         })?;
 
@@ -726,7 +726,7 @@ async fn recreate_persisted_subscription(
     // Re-validate the URL — operator may have tightened the SSRF policy
     // since the entry was persisted.
     if let Err(e) = crate::delivery::validate_webhook_url_with_policy(&entry.url, policy) {
-        return RecreateOutcome::PermanentFailure(format!("URL no longer valid: {}", e));
+        return RecreateOutcome::PermanentFailure(format!("URL no longer valid: {e}"));
     }
 
     // Branch on the entry kind: AsyncWebhook subscriptions go through
@@ -771,8 +771,7 @@ async fn recreate_persisted_async_webhook(
     if prev >= MAX_HTTP_SUBSCRIPTIONS {
         subscription_count.fetch_sub(1, Ordering::Relaxed);
         return RecreateOutcome::TransientFailure(format!(
-            "subscription limit reached ({} max)",
-            MAX_HTTP_SUBSCRIPTIONS
+            "subscription limit reached ({MAX_HTTP_SUBSCRIPTIONS} max)"
         ));
     }
 
@@ -792,11 +791,11 @@ async fn recreate_persisted_async_webhook(
         Ok(sub) => sub,
         Err(crate::EventBusError::InvalidSubject(msg)) => {
             subscription_count.fetch_sub(1, Ordering::Relaxed);
-            return RecreateOutcome::PermanentFailure(format!("invalid pattern: {}", msg));
+            return RecreateOutcome::PermanentFailure(format!("invalid pattern: {msg}"));
         }
         Err(e) => {
             subscription_count.fetch_sub(1, Ordering::Relaxed);
-            return RecreateOutcome::TransientFailure(format!("{}", e));
+            return RecreateOutcome::TransientFailure(format!("{e}"));
         }
     };
     let bus_id = sub.id.clone();
@@ -832,7 +831,7 @@ async fn recreate_persisted_sync_interceptor(
     // entries persisted under the older policy.
 
     if let Err(e) = crate::transport::validate_remote_pattern(&entry.pattern) {
-        return RecreateOutcome::PermanentFailure(format!("pattern no longer permitted: {}", e));
+        return RecreateOutcome::PermanentFailure(format!("pattern no longer permitted: {e}"));
     }
     let effective_priority = crate::transport::clamp_remote_interceptor_priority(entry.priority);
     let clamped_timeout_ms = crate::transport::clamp_remote_interceptor_timeout(entry.timeout_ms);
@@ -844,8 +843,7 @@ async fn recreate_persisted_sync_interceptor(
     if prev >= MAX_HTTP_INTERCEPTORS {
         interceptor_count.fetch_sub(1, Ordering::Relaxed);
         return RecreateOutcome::TransientFailure(format!(
-            "interceptor cap reached ({} max)",
-            MAX_HTTP_INTERCEPTORS
+            "interceptor cap reached ({MAX_HTTP_INTERCEPTORS} max)"
         ));
     }
 
@@ -873,11 +871,11 @@ async fn recreate_persisted_sync_interceptor(
         Ok(id) => id,
         Err(crate::EventBusError::InvalidSubject(msg)) => {
             interceptor_count.fetch_sub(1, Ordering::Relaxed);
-            return RecreateOutcome::PermanentFailure(format!("invalid pattern: {}", msg));
+            return RecreateOutcome::PermanentFailure(format!("invalid pattern: {msg}"));
         }
         Err(e) => {
             interceptor_count.fetch_sub(1, Ordering::Relaxed);
-            return RecreateOutcome::TransientFailure(format!("{}", e));
+            return RecreateOutcome::TransientFailure(format!("{e}"));
         }
     };
 
@@ -940,10 +938,7 @@ async fn create_subscription(
         count.fetch_sub(1, Ordering::Relaxed);
         return Err(http_error_with_code(
             StatusCode::TOO_MANY_REQUESTS,
-            format!(
-                "Subscription limit reached ({} max)",
-                MAX_HTTP_SUBSCRIPTIONS
-            ),
+            format!("Subscription limit reached ({MAX_HTTP_SUBSCRIPTIONS} max)"),
             "SUBSCRIPTION_LIMIT",
         ));
     }
@@ -971,7 +966,7 @@ async fn create_subscription(
             );
             return Err(http_error(
                 StatusCode::INTERNAL_SERVER_ERROR,
-                format!("{}", e),
+                format!("{e}"),
             ));
         }
     };
@@ -1026,7 +1021,7 @@ async fn create_subscription(
             );
             return Err(http_error(
                 StatusCode::INTERNAL_SERVER_ERROR,
-                format!("failed to persist subscription: {}", e),
+                format!("failed to persist subscription: {e}"),
             ));
         }
     } else {
@@ -1071,14 +1066,14 @@ async fn remove_subscription(
     if !was_present {
         return Err(http_error_with_code(
             StatusCode::NOT_FOUND,
-            format!("subscription {} not found", id),
+            format!("subscription {id} not found"),
             "SUBSCRIPTION_NOT_FOUND",
         ));
     }
 
     state.bus.unsubscribe(&id).await.map_err(|e| {
         warn!("Unsubscribe failed for id {}: {}", id, e);
-        http_error(StatusCode::INTERNAL_SERVER_ERROR, format!("{}", e))
+        http_error(StatusCode::INTERNAL_SERVER_ERROR, format!("{e}"))
     })?;
 
     // If this was a persisted subscription, drop the persisted entry too.
@@ -1131,8 +1126,7 @@ fn refuse_if_unauth_state_changing(state: &AppState, op_name: &str) -> Result<()
         return Err(http_error_with_code(
             StatusCode::UNAUTHORIZED,
             format!(
-                "{} requires a real authenticator (or HttpServer::unsafe_allow_http_dev_mode() for tests)",
-                op_name
+                "{op_name} requires a real authenticator (or HttpServer::unsafe_allow_http_dev_mode() for tests)"
             ),
             "AUTH_REQUIRED",
         ));
@@ -1178,8 +1172,7 @@ fn check_registration_rate_limit(state: &AppState) -> Result<(), HttpError> {
         return Err(http_error_with_code(
             StatusCode::TOO_MANY_REQUESTS,
             format!(
-                "registration rate limit reached ({} req/{}s)",
-                WEBHOOK_REGISTRATION_RATE_LIMIT, WEBHOOK_REGISTRATION_RATE_WINDOW_SECS
+                "registration rate limit reached ({WEBHOOK_REGISTRATION_RATE_LIMIT} req/{WEBHOOK_REGISTRATION_RATE_WINDOW_SECS}s)"
             ),
             "REGISTRATION_RATE_LIMIT",
         ));
@@ -1240,7 +1233,7 @@ async fn create_interceptor(
         icount.fetch_sub(1, Ordering::Relaxed);
         return Err(http_error_with_code(
             StatusCode::TOO_MANY_REQUESTS,
-            format!("Interceptor limit reached ({} max)", MAX_HTTP_INTERCEPTORS),
+            format!("Interceptor limit reached ({MAX_HTTP_INTERCEPTORS} max)"),
             "INTERCEPTOR_LIMIT",
         ));
     }
@@ -1271,7 +1264,7 @@ async fn create_interceptor(
             );
             return Err(http_error(
                 StatusCode::INTERNAL_SERVER_ERROR,
-                format!("{}", e),
+                format!("{e}"),
             ));
         }
     };
@@ -1323,7 +1316,7 @@ async fn create_interceptor(
             );
             return Err(http_error(
                 StatusCode::INTERNAL_SERVER_ERROR,
-                format!("failed to persist interceptor: {}", e),
+                format!("failed to persist interceptor: {e}"),
             ));
         }
     } else {
@@ -1356,7 +1349,7 @@ async fn remove_interceptor(
     if !was_present {
         return Err(http_error_with_code(
             StatusCode::NOT_FOUND,
-            format!("interceptor {} not found", id),
+            format!("interceptor {id} not found"),
             "INTERCEPTOR_NOT_FOUND",
         ));
     }
@@ -1368,7 +1361,7 @@ async fn remove_interceptor(
         warn!("Interceptor unsubscribe failed for id {}: {}", id, e);
         return Err(http_error(
             StatusCode::INTERNAL_SERVER_ERROR,
-            format!("{}", e),
+            format!("{e}"),
         ));
     }
 
@@ -1415,14 +1408,14 @@ async fn get_event(
 
     let event = state.bus.get_event(seq).await.map_err(|e| {
         warn!("get_event failed for seq {}: {}", seq, e);
-        http_error(StatusCode::INTERNAL_SERVER_ERROR, format!("{}", e))
+        http_error(StatusCode::INTERNAL_SERVER_ERROR, format!("{e}"))
     })?;
     let event = match event {
         Some(e) => e,
         None => {
             return Err(http_error_with_code(
                 StatusCode::NOT_FOUND,
-                format!("event {} not found", seq),
+                format!("event {seq} not found"),
                 "EVENT_NOT_FOUND",
             ));
         }
@@ -1471,7 +1464,7 @@ async fn list_dead_lettered(
         .await
         .map_err(|e| {
             warn!("query dead-lettered failed: {}", e);
-            http_error(StatusCode::INTERNAL_SERVER_ERROR, format!("{}", e))
+            http_error(StatusCode::INTERNAL_SERVER_ERROR, format!("{e}"))
         })?;
     let body: Vec<Value> = events.into_iter().map(stored_event_json).collect();
     Ok(Json(json!({ "events": body })))

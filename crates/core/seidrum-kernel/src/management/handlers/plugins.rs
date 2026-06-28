@@ -167,10 +167,10 @@ pub async fn plugin_config_schema(
     let config = load_plugins_config(&state.plugins_yaml())
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
 
-    let entry = config.plugins.get(&name).ok_or((
-        StatusCode::NOT_FOUND,
-        format!("Plugin '{}' not found", name),
-    ))?;
+    let entry = config
+        .plugins
+        .get(&name)
+        .ok_or((StatusCode::NOT_FOUND, format!("Plugin '{name}' not found")))?;
 
     let schema: Vec<PluginConfigSchemaItem> = entry
         .env
@@ -211,7 +211,7 @@ async fn set_plugin_enabled(
     config
         .plugins
         .get_mut(name)
-        .ok_or_else(|| anyhow::anyhow!("Plugin '{}' not found", name))?
+        .ok_or_else(|| anyhow::anyhow!("Plugin '{name}' not found"))?
         .enabled = enabled;
 
     save_plugins_config(&yaml_path, &config)?;
@@ -227,7 +227,7 @@ async fn get_plugin_detail(
     let entry = config
         .plugins
         .get(name)
-        .ok_or_else(|| anyhow::anyhow!("Plugin '{}' not found", name))?;
+        .ok_or_else(|| anyhow::anyhow!("Plugin '{name}' not found"))?;
 
     let running_plugins = query_running_plugins(state).await.unwrap_or_default();
     let running = running_plugins.contains(name);

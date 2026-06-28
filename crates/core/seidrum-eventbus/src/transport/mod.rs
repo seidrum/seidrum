@@ -177,7 +177,7 @@ pub fn validate_and_decode_payload(payload: &str) -> Result<Vec<u8>, String> {
     }
     base64::engine::general_purpose::STANDARD
         .decode(payload)
-        .map_err(|e| format!("Base64 decode failed: {}", e))
+        .map_err(|e| format!("Base64 decode failed: {e}"))
 }
 
 #[cfg(test)]

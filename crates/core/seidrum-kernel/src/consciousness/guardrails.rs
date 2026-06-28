@@ -52,7 +52,7 @@ impl GuardrailState {
         }
 
         // Loop detection
-        let key = format!("{}:{}", tool_name, arguments_hash);
+        let key = format!("{tool_name}:{arguments_hash}");
         let count = self.tool_call_history.entry(key).or_insert(0);
         *count += 1;
         if *count >= self.config.loop_detection_threshold {

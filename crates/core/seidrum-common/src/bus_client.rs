@@ -91,8 +91,7 @@ impl BusClient {
                 Err(e) => {
                     if attempt >= Self::CONNECT_MAX_ATTEMPTS {
                         return Err(e.context(format!(
-                            "failed to connect to bus at {} after {} attempts",
-                            url, attempt
+                            "failed to connect to bus at {url} after {attempt} attempts"
                         )));
                     }
                     debug!(
@@ -140,7 +139,7 @@ impl BusClient {
             BackendHandle::InProcess(bus) => {
                 bus.publish(subject_str, &bytes)
                     .await
-                    .map_err(|e| anyhow::anyhow!("publish failed: {}", e))?;
+                    .map_err(|e| anyhow::anyhow!("publish failed: {e}"))?;
                 debug!(subject = subject_str, "published message (in-process)");
             }
         }
@@ -188,7 +187,7 @@ impl BusClient {
                 let reply = bus
                     .request(subject_str, &bytes, Duration::from_secs(5))
                     .await
-                    .map_err(|e| anyhow::anyhow!("request failed: {}", e))?;
+                    .map_err(|e| anyhow::anyhow!("request failed: {e}"))?;
                 Ok(reply)
             }
         }
@@ -210,7 +209,7 @@ impl BusClient {
                 let sub = bus
                     .subscribe(subject_str, opts)
                     .await
-                    .map_err(|e| anyhow::anyhow!("subscribe failed: {}", e))?;
+                    .map_err(|e| anyhow::anyhow!("subscribe failed: {e}"))?;
                 let sub_id = sub.id.clone();
 
                 // Bridge: DispatchedEvent → WsMessage

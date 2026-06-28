@@ -28,7 +28,7 @@ async fn start_bus_with_ws() -> (seidrum_eventbus::BusHandles, std::net::SocketA
 #[tokio::test]
 async fn test_ws_client_publish_and_subscribe() {
     let (handles, ws_addr) = start_bus_with_ws().await;
-    let url = format!("ws://{}", ws_addr);
+    let url = format!("ws://{ws_addr}");
 
     let client = WsClient::connect(&url, "test-plugin").await.unwrap();
     assert!(client.is_connected());
@@ -62,7 +62,7 @@ async fn test_ws_client_publish_and_subscribe() {
 #[tokio::test]
 async fn test_ws_client_request_reply() {
     let (handles, ws_addr) = start_bus_with_ws().await;
-    let url = format!("ws://{}", ws_addr);
+    let url = format!("ws://{ws_addr}");
 
     // Set up a request handler on the bus directly (in-process).
     let req_sub = handles
@@ -90,7 +90,7 @@ async fn test_ws_client_request_reply() {
 #[tokio::test]
 async fn test_ws_client_publish_envelope() {
     let (handles, ws_addr) = start_bus_with_ws().await;
-    let url = format!("ws://{}", ws_addr);
+    let url = format!("ws://{ws_addr}");
 
     let client = WsClient::connect(&url, "envelope-test").await.unwrap();
     let mut sub = client.subscribe("envelope.subject").await.unwrap();
@@ -136,7 +136,7 @@ async fn test_ws_client_typed_request() {
     }
 
     let (handles, ws_addr) = start_bus_with_ws().await;
-    let url = format!("ws://{}", ws_addr);
+    let url = format!("ws://{ws_addr}");
 
     // Echo handler that wraps the payload.
     let req_sub = handles
@@ -171,7 +171,7 @@ async fn test_ws_client_typed_request() {
 #[tokio::test]
 async fn test_ws_client_multiple_subscriptions() {
     let (handles, ws_addr) = start_bus_with_ws().await;
-    let url = format!("ws://{}", ws_addr);
+    let url = format!("ws://{ws_addr}");
     let client = WsClient::connect(&url, "multi-sub").await.unwrap();
 
     let mut sub_a = client.subscribe("multi.a").await.unwrap();
@@ -212,7 +212,7 @@ async fn test_ws_client_multiple_subscriptions() {
 #[tokio::test]
 async fn test_ws_client_unsubscribe_stops_delivery() {
     let (handles, ws_addr) = start_bus_with_ws().await;
-    let url = format!("ws://{}", ws_addr);
+    let url = format!("ws://{ws_addr}");
     let client = WsClient::connect(&url, "unsub-test").await.unwrap();
 
     let mut sub = client.subscribe("unsub.subject").await.unwrap();
@@ -258,8 +258,7 @@ async fn test_ws_client_connect_refused() {
     let err = format!("{}", result.err().unwrap());
     assert!(
         err.contains("failed to connect"),
-        "error should mention connection failure, got: {}",
-        err
+        "error should mention connection failure, got: {err}"
     );
 }
 
@@ -272,7 +271,7 @@ async fn test_ws_client_connect_refused() {
 #[tokio::test]
 async fn test_ws_client_operations_after_server_shutdown_do_not_hang() {
     let (handles, ws_addr) = start_bus_with_ws().await;
-    let url = format!("ws://{}", ws_addr);
+    let url = format!("ws://{ws_addr}");
     let client = WsClient::connect(&url, "disconnect-test").await.unwrap();
     assert!(client.is_connected());
 
@@ -306,7 +305,7 @@ async fn test_bus_client_connect_retries_until_server_ready() {
     use seidrum_eventbus::test_utils::pick_ephemeral_addr;
 
     let ws_addr = pick_ephemeral_addr();
-    let url = format!("ws://{}", ws_addr);
+    let url = format!("ws://{ws_addr}");
 
     // Start the connect in a background task BEFORE the server is up.
     let url_clone = url.clone();
@@ -344,7 +343,7 @@ async fn test_bus_client_connect_retries_until_server_ready() {
 #[tokio::test]
 async fn test_ws_client_request_timeout_configurable() {
     let (handles, ws_addr) = start_bus_with_ws().await;
-    let url = format!("ws://{}", ws_addr);
+    let url = format!("ws://{ws_addr}");
     let client = WsClient::connect(&url, "timeout-test")
         .await
         .unwrap()
@@ -360,8 +359,7 @@ async fn test_ws_client_request_timeout_configurable() {
     assert!(result.is_err(), "request with no handler should time out");
     assert!(
         elapsed < Duration::from_secs(2),
-        "should time out in ~200ms, not wait 5s (elapsed: {:?})",
-        elapsed
+        "should time out in ~200ms, not wait 5s (elapsed: {elapsed:?})"
     );
 
     handles.shutdown_and_join().await;

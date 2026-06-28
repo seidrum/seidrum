@@ -87,22 +87,22 @@ impl SeidrumPaths {
 
     /// Path to a plugin's PID file.
     pub fn plugin_pid_file(&self, name: &str) -> PathBuf {
-        self.pid_dir.join(format!("{}.pid", name))
+        self.pid_dir.join(format!("{name}.pid"))
     }
 
     /// Path to a plugin's metadata file.
     pub fn plugin_meta_file(&self, name: &str) -> PathBuf {
-        self.pid_dir.join(format!("{}.meta", name))
+        self.pid_dir.join(format!("{name}.meta"))
     }
 
     /// Path to a plugin's stopped marker file.
     pub fn plugin_stopped_file(&self, name: &str) -> PathBuf {
-        self.pid_dir.join(format!("{}.stopped", name))
+        self.pid_dir.join(format!("{name}.stopped"))
     }
 
     /// Path to a plugin's log file.
     pub fn plugin_log_file(&self, name: &str) -> PathBuf {
-        self.log_dir.join(format!("{}.log", name))
+        self.log_dir.join(format!("{name}.log"))
     }
 
     /// Resolve a plugin binary path. Checks the daemon's own directory first

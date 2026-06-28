@@ -200,7 +200,7 @@ impl RegistryService {
                     plugin_ids: None,
                     config_schema: schema,
                     error: if plugin.is_none() {
-                        Some(format!("Plugin '{}' not found", plugin_id))
+                        Some(format!("Plugin '{plugin_id}' not found"))
                     } else {
                         None
                     },

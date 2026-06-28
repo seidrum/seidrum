@@ -21,7 +21,7 @@ pub struct ProcessMeta {
 pub async fn show(paths: &SeidrumPaths) -> Result<()> {
     let daemon_pid = check_pid_file(&paths.daemon_pid_file());
     match daemon_pid {
-        Some(pid) => println!("Seidrum daemon: running (PID {})\n", pid),
+        Some(pid) => println!("Seidrum daemon: running (PID {pid})\n"),
         None => println!("Seidrum daemon: not running\n"),
     }
 
@@ -137,16 +137,16 @@ fn format_uptime(started_at: DateTime<Utc>) -> String {
     let total_secs = duration.num_seconds().max(0) as u64;
 
     if total_secs < 60 {
-        format!("{}s", total_secs)
+        format!("{total_secs}s")
     } else if total_secs < 3600 {
         format!("{}m", total_secs / 60)
     } else if total_secs < 86400 {
         let hours = total_secs / 3600;
         let mins = (total_secs % 3600) / 60;
-        format!("{}h {}m", hours, mins)
+        format!("{hours}h {mins}m")
     } else {
         let days = total_secs / 86400;
         let hours = (total_secs % 86400) / 3600;
-        format!("{}d {}h", days, hours)
+        format!("{days}d {hours}h")
     }
 }

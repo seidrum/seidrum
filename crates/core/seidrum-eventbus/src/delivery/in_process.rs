@@ -85,7 +85,7 @@ mod tests {
         let (channel, mut rx) = InProcessChannel::new();
 
         for i in 0..5 {
-            let payload = format!("message {}", i).into_bytes();
+            let payload = format!("message {i}").into_bytes();
             channel
                 .deliver(&payload, "test", &ChannelConfig::InProcess)
                 .await
@@ -94,7 +94,7 @@ mod tests {
 
         for i in 0..5 {
             let received = rx.recv().await.unwrap();
-            assert_eq!(received, format!("message {}", i).into_bytes());
+            assert_eq!(received, format!("message {i}").into_bytes());
         }
     }
 

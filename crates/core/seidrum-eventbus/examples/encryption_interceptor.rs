@@ -91,14 +91,14 @@ async fn main() -> anyhow::Result<()> {
     // Simulate: publish an "encrypted" inbound message
     let plaintext = b"Hello from Telegram!";
     let encrypted = xor_cipher(plaintext, key);
-    println!("Publishing encrypted payload: {:?}", encrypted);
+    println!("Publishing encrypted payload: {encrypted:?}");
 
     bus.publish("channel.telegram.inbound", &encrypted).await?;
 
     // The subscriber should receive the decrypted plaintext
     if let Some(event) = sub.rx.recv().await {
         let decrypted = String::from_utf8_lossy(&event.payload);
-        println!("Subscriber received (decrypted): {}", decrypted);
+        println!("Subscriber received (decrypted): {decrypted}");
         assert_eq!(event.payload, plaintext);
         println!("✓ Encryption interceptor works!");
     }
