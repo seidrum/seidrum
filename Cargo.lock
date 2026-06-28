@@ -3494,9 +3494,11 @@ name = "seidrum-agent-runtime"
 version = "0.1.0"
 dependencies = [
  "async-trait",
+ "redb",
  "seidrum-common",
  "serde",
  "serde_json",
+ "tempfile",
  "thiserror 2.0.18",
  "tokio",
  "ulid",

@@ -1,7 +1,9 @@
 use std::collections::HashMap;
+use std::path::Path;
 use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
+use redb::{Database, ReadableTable};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
@@ -235,6 +237,174 @@ impl RuntimeStore for InMemoryTurnStore {
             .get(session_id)
             .cloned()
             .unwrap_or_default())
+    }
+}
+
+const RUNTIME_RECORDS_TABLE: redb::TableDefinition<u64, &[u8]> =
+    redb::TableDefinition::new("runtime_records");
+
+#[derive(Debug, Clone)]
+pub struct RedbTurnStore {
+    db: Arc<Database>,
+}
+
+impl RedbTurnStore {
+    pub fn open(path: impl AsRef<Path>) -> Result<Self, RuntimeError> {
+        let path = path.as_ref();
+        let db = Database::create(path)
+            .map_err(|error| RuntimeError::Store(format!("failed to open redb store: {error}")))?;
+
+        let write_txn = db.begin_write().map_err(|error| {
+            RuntimeError::Store(format!("failed to begin redb initialization: {error}"))
+        })?;
+        {
+            write_txn
+                .open_table(RUNTIME_RECORDS_TABLE)
+                .map_err(|error| {
+                    RuntimeError::Store(format!("failed to open runtime records table: {error}"))
+                })?;
+        }
+        write_txn.commit().map_err(|error| {
+            RuntimeError::Store(format!("failed to commit redb initialization: {error}"))
+        })?;
+
+        Ok(Self { db: Arc::new(db) })
+    }
+}
+
+#[async_trait]
+impl RuntimeStore for RedbTurnStore {
+    async fn append(&self, record: StoredTurnRecord) -> Result<(), RuntimeError> {
+        let serialized = serde_json::to_vec(&record).map_err(|error| {
+            RuntimeError::Store(format!("failed to serialize turn record: {error}"))
+        })?;
+        let write_txn = self
+            .db
+            .begin_write()
+            .map_err(|error| RuntimeError::Store(format!("failed to begin redb write: {error}")))?;
+        {
+            let mut records_table =
+                write_txn
+                    .open_table(RUNTIME_RECORDS_TABLE)
+                    .map_err(|error| {
+                        RuntimeError::Store(format!(
+                            "failed to open runtime records table: {error}"
+                        ))
+                    })?;
+            let store_sequence = records_table
+                .last()
+                .map_err(|error| {
+                    RuntimeError::Store(format!("failed to read last record: {error}"))
+                })?
+                .map(|(key, _)| key.value())
+                .unwrap_or(0)
+                + 1;
+            records_table
+                .insert(store_sequence, serialized.as_slice())
+                .map_err(|error| {
+                    RuntimeError::Store(format!("failed to insert record: {error}"))
+                })?;
+        }
+        write_txn
+            .commit()
+            .map_err(|error| RuntimeError::Store(format!("failed to commit record: {error}")))?;
+        Ok(())
+    }
+
+    async fn records(&self, session_id: &str) -> Result<Vec<StoredTurnRecord>, RuntimeError> {
+        let read_txn = self
+            .db
+            .begin_read()
+            .map_err(|error| RuntimeError::Store(format!("failed to begin redb read: {error}")))?;
+        let records_table = read_txn
+            .open_table(RUNTIME_RECORDS_TABLE)
+            .map_err(|error| {
+                RuntimeError::Store(format!("failed to open runtime records table: {error}"))
+            })?;
+        let mut records = Vec::new();
+
+        for entry in records_table.iter().map_err(|error| {
+            RuntimeError::Store(format!("failed to iterate runtime records: {error}"))
+        })? {
+            let (_, data) = entry
+                .map_err(|error| RuntimeError::Store(format!("failed to read record: {error}")))?;
+            let record: StoredTurnRecord =
+                serde_json::from_slice(data.value()).map_err(|error| {
+                    RuntimeError::Store(format!("failed to deserialize turn record: {error}"))
+                })?;
+            if record.session_id() == session_id {
+                records.push(record);
+            }
+        }
+
+        records.sort_by_key(|record| record.sequence());
+        Ok(records)
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct RuntimeTrace {
+    pub session_id: String,
+    pub agent_id: String,
+    pub records: Vec<StoredTurnRecord>,
+    pub outbound_events: Vec<RuntimeEvent>,
+}
+
+pub async fn replay_session_trace<S>(
+    store: &S,
+    session_id: &str,
+) -> Result<RuntimeTrace, RuntimeError>
+where
+    S: RuntimeStore,
+{
+    let records = store.records(session_id).await?;
+    let agent_id = records
+        .first()
+        .map(|record| record.agent_id().to_string())
+        .unwrap_or_default();
+    Ok(build_trace(session_id, agent_id, records))
+}
+
+pub async fn replay_agent_session_trace<S>(
+    store: &S,
+    session_id: &str,
+    agent_id: &str,
+) -> Result<RuntimeTrace, RuntimeError>
+where
+    S: RuntimeStore,
+{
+    let records = store
+        .records(session_id)
+        .await?
+        .into_iter()
+        .filter(|record| record.agent_id() == agent_id)
+        .collect();
+    Ok(build_trace(session_id, agent_id.to_string(), records))
+}
+
+fn build_trace(session_id: &str, agent_id: String, records: Vec<StoredTurnRecord>) -> RuntimeTrace {
+    let outbound_events = records
+        .iter()
+        .filter_map(|record| match record {
+            StoredTurnRecord::AssistantMessage {
+                session_id,
+                agent_id,
+                content,
+                ..
+            } => Some(RuntimeEvent::OutboundResponse {
+                session_id: session_id.clone(),
+                agent_id: agent_id.clone(),
+                text: content.clone(),
+            }),
+            _ => None,
+        })
+        .collect();
+
+    RuntimeTrace {
+        session_id: session_id.to_string(),
+        agent_id,
+        records,
+        outbound_events,
     }
 }
 
