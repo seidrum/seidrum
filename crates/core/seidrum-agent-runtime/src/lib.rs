@@ -201,6 +201,60 @@ impl StoredTurnRecord {
     }
 }
 
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct JobDefinition {
+    pub job_id: String,
+    pub agent_id: String,
+    /// Explicit continuation session for the job. When omitted, force-run
+    /// creates a durable per-run session id.
+    pub session_id: Option<String>,
+    pub prompt: String,
+    /// Opaque schedule text for future daemon scheduling. M2C only stores it
+    /// and supports manual force-run.
+    pub schedule_spec: Option<String>,
+    pub enabled: bool,
+    pub metadata: serde_json::Value,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum JobRunStatus {
+    Queued,
+    Running,
+    Succeeded,
+    Failed,
+    Cancelled,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct JobRunRecord {
+    pub run_id: String,
+    pub job_id: String,
+    pub session_id: String,
+    pub status: JobRunStatus,
+    pub started_sequence: u64,
+    pub completed_sequence: Option<u64>,
+    pub output_summary: Option<String>,
+    pub final_text: Option<String>,
+    pub error: Option<String>,
+    pub trace_session_id: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct JobRunReplay {
+    pub run: JobRunRecord,
+    pub trace: RuntimeTrace,
+}
+
+#[async_trait]
+pub trait DurableJobStore: RuntimeStore {
+    async fn put_job_definition(&self, definition: JobDefinition) -> Result<(), RuntimeError>;
+    async fn job_definition(&self, job_id: &str) -> Result<Option<JobDefinition>, RuntimeError>;
+    async fn list_job_definitions(&self) -> Result<Vec<JobDefinition>, RuntimeError>;
+    async fn put_job_run(&self, run: JobRunRecord) -> Result<(), RuntimeError>;
+    async fn job_run(&self, run_id: &str) -> Result<Option<JobRunRecord>, RuntimeError>;
+    async fn list_job_runs(&self, job_id: &str) -> Result<Vec<JobRunRecord>, RuntimeError>;
+}
+
 #[derive(Debug, Clone, Default)]
 pub struct InMemoryTurnStore {
     inner: Arc<Mutex<InMemoryTurnStoreInner>>,
@@ -242,6 +296,9 @@ impl RuntimeStore for InMemoryTurnStore {
 
 const RUNTIME_RECORDS_TABLE: redb::TableDefinition<u64, &[u8]> =
     redb::TableDefinition::new("runtime_records");
+const JOB_DEFINITIONS_TABLE: redb::TableDefinition<&str, &[u8]> =
+    redb::TableDefinition::new("job_definitions");
+const JOB_RUNS_TABLE: redb::TableDefinition<&str, &[u8]> = redb::TableDefinition::new("job_runs");
 
 #[derive(Debug, Clone)]
 pub struct RedbTurnStore {
@@ -263,6 +320,14 @@ impl RedbTurnStore {
                 .map_err(|error| {
                     RuntimeError::Store(format!("failed to open runtime records table: {error}"))
                 })?;
+            write_txn
+                .open_table(JOB_DEFINITIONS_TABLE)
+                .map_err(|error| {
+                    RuntimeError::Store(format!("failed to open job definitions table: {error}"))
+                })?;
+            write_txn.open_table(JOB_RUNS_TABLE).map_err(|error| {
+                RuntimeError::Store(format!("failed to open job runs table: {error}"))
+            })?;
         }
         write_txn.commit().map_err(|error| {
             RuntimeError::Store(format!("failed to commit redb initialization: {error}"))
@@ -339,6 +404,152 @@ impl RuntimeStore for RedbTurnStore {
 
         records.sort_by_key(|record| record.sequence());
         Ok(records)
+    }
+}
+
+#[async_trait]
+impl DurableJobStore for RedbTurnStore {
+    async fn put_job_definition(&self, definition: JobDefinition) -> Result<(), RuntimeError> {
+        let serialized = serde_json::to_vec(&definition).map_err(|error| {
+            RuntimeError::Store(format!("failed to serialize job definition: {error}"))
+        })?;
+        let write_txn = self
+            .db
+            .begin_write()
+            .map_err(|error| RuntimeError::Store(format!("failed to begin redb write: {error}")))?;
+        {
+            let mut table = write_txn
+                .open_table(JOB_DEFINITIONS_TABLE)
+                .map_err(|error| {
+                    RuntimeError::Store(format!("failed to open job definitions table: {error}"))
+                })?;
+            table
+                .insert(definition.job_id.as_str(), serialized.as_slice())
+                .map_err(|error| {
+                    RuntimeError::Store(format!("failed to insert job definition: {error}"))
+                })?;
+        }
+        write_txn.commit().map_err(|error| {
+            RuntimeError::Store(format!("failed to commit job definition: {error}"))
+        })?;
+        Ok(())
+    }
+
+    async fn job_definition(&self, job_id: &str) -> Result<Option<JobDefinition>, RuntimeError> {
+        let read_txn = self
+            .db
+            .begin_read()
+            .map_err(|error| RuntimeError::Store(format!("failed to begin redb read: {error}")))?;
+        let table = read_txn
+            .open_table(JOB_DEFINITIONS_TABLE)
+            .map_err(|error| {
+                RuntimeError::Store(format!("failed to open job definitions table: {error}"))
+            })?;
+        table
+            .get(job_id)
+            .map_err(|error| {
+                RuntimeError::Store(format!("failed to read job definition: {error}"))
+            })?
+            .map(|data| {
+                serde_json::from_slice(data.value()).map_err(|error| {
+                    RuntimeError::Store(format!("failed to deserialize job definition: {error}"))
+                })
+            })
+            .transpose()
+    }
+
+    async fn list_job_definitions(&self) -> Result<Vec<JobDefinition>, RuntimeError> {
+        let read_txn = self
+            .db
+            .begin_read()
+            .map_err(|error| RuntimeError::Store(format!("failed to begin redb read: {error}")))?;
+        let table = read_txn
+            .open_table(JOB_DEFINITIONS_TABLE)
+            .map_err(|error| {
+                RuntimeError::Store(format!("failed to open job definitions table: {error}"))
+            })?;
+        let mut definitions = Vec::new();
+        for entry in table.iter().map_err(|error| {
+            RuntimeError::Store(format!("failed to iterate job definitions: {error}"))
+        })? {
+            let (_, data) = entry.map_err(|error| {
+                RuntimeError::Store(format!("failed to read job definition: {error}"))
+            })?;
+            definitions.push(serde_json::from_slice(data.value()).map_err(|error| {
+                RuntimeError::Store(format!("failed to deserialize job definition: {error}"))
+            })?);
+        }
+        definitions.sort_by(|left: &JobDefinition, right| left.job_id.cmp(&right.job_id));
+        Ok(definitions)
+    }
+
+    async fn put_job_run(&self, run: JobRunRecord) -> Result<(), RuntimeError> {
+        let serialized = serde_json::to_vec(&run).map_err(|error| {
+            RuntimeError::Store(format!("failed to serialize job run: {error}"))
+        })?;
+        let write_txn = self
+            .db
+            .begin_write()
+            .map_err(|error| RuntimeError::Store(format!("failed to begin redb write: {error}")))?;
+        {
+            let mut table = write_txn.open_table(JOB_RUNS_TABLE).map_err(|error| {
+                RuntimeError::Store(format!("failed to open job runs table: {error}"))
+            })?;
+            table
+                .insert(run.run_id.as_str(), serialized.as_slice())
+                .map_err(|error| {
+                    RuntimeError::Store(format!("failed to insert job run: {error}"))
+                })?;
+        }
+        write_txn
+            .commit()
+            .map_err(|error| RuntimeError::Store(format!("failed to commit job run: {error}")))?;
+        Ok(())
+    }
+
+    async fn job_run(&self, run_id: &str) -> Result<Option<JobRunRecord>, RuntimeError> {
+        let read_txn = self
+            .db
+            .begin_read()
+            .map_err(|error| RuntimeError::Store(format!("failed to begin redb read: {error}")))?;
+        let table = read_txn.open_table(JOB_RUNS_TABLE).map_err(|error| {
+            RuntimeError::Store(format!("failed to open job runs table: {error}"))
+        })?;
+        table
+            .get(run_id)
+            .map_err(|error| RuntimeError::Store(format!("failed to read job run: {error}")))?
+            .map(|data| {
+                serde_json::from_slice(data.value()).map_err(|error| {
+                    RuntimeError::Store(format!("failed to deserialize job run: {error}"))
+                })
+            })
+            .transpose()
+    }
+
+    async fn list_job_runs(&self, job_id: &str) -> Result<Vec<JobRunRecord>, RuntimeError> {
+        let read_txn = self
+            .db
+            .begin_read()
+            .map_err(|error| RuntimeError::Store(format!("failed to begin redb read: {error}")))?;
+        let table = read_txn.open_table(JOB_RUNS_TABLE).map_err(|error| {
+            RuntimeError::Store(format!("failed to open job runs table: {error}"))
+        })?;
+        let mut runs = Vec::new();
+        for entry in table
+            .iter()
+            .map_err(|error| RuntimeError::Store(format!("failed to iterate job runs: {error}")))?
+        {
+            let (_, data) = entry
+                .map_err(|error| RuntimeError::Store(format!("failed to read job run: {error}")))?;
+            let run: JobRunRecord = serde_json::from_slice(data.value()).map_err(|error| {
+                RuntimeError::Store(format!("failed to deserialize job run: {error}"))
+            })?;
+            if run.job_id == job_id {
+                runs.push(run);
+            }
+        }
+        runs.sort_by_key(|run| run.started_sequence);
+        Ok(runs)
     }
 }
 
@@ -558,6 +769,96 @@ where
     async fn next_sequence(&self, session_id: &str) -> Result<u64, RuntimeError> {
         Ok(self.store.records(session_id).await?.len() as u64 + 1)
     }
+}
+
+pub struct ForceRunJobExecutor<P, S> {
+    runtime: AgentRuntime<P, S>,
+    store: S,
+}
+
+impl<P, S> ForceRunJobExecutor<P, S>
+where
+    P: AgentProvider,
+    S: DurableJobStore,
+{
+    pub fn new(runtime: AgentRuntime<P, S>, store: S) -> Self {
+        Self { runtime, store }
+    }
+
+    pub async fn force_run_job(&self, job_id: &str) -> Result<JobRunRecord, RuntimeError> {
+        let definition = self
+            .store
+            .job_definition(job_id)
+            .await?
+            .ok_or_else(|| RuntimeError::Store(format!("job `{job_id}` is not defined")))?;
+
+        if !definition.enabled {
+            return Err(RuntimeError::Store(format!("job `{job_id}` is disabled")));
+        }
+
+        let run_id = new_record_id();
+        let session_id = definition
+            .session_id
+            .clone()
+            .unwrap_or_else(|| format!("job:{}:run:{}", definition.job_id, run_id));
+        let started_sequence = self.store.records(&session_id).await?.len() as u64 + 1;
+        let mut run = JobRunRecord {
+            run_id,
+            job_id: definition.job_id.clone(),
+            session_id: session_id.clone(),
+            status: JobRunStatus::Queued,
+            started_sequence,
+            completed_sequence: None,
+            output_summary: None,
+            final_text: None,
+            error: None,
+            trace_session_id: session_id.clone(),
+        };
+        self.store.put_job_run(run.clone()).await?;
+
+        run.status = JobRunStatus::Running;
+        self.store.put_job_run(run.clone()).await?;
+
+        let result = self
+            .runtime
+            .run_turn(TurnInput {
+                session_id: session_id.clone(),
+                agent_id: definition.agent_id,
+                user_message: definition.prompt,
+            })
+            .await;
+
+        run.completed_sequence = Some(self.store.records(&session_id).await?.len() as u64);
+        match result {
+            Ok(output) => {
+                run.status = JobRunStatus::Succeeded;
+                run.output_summary = Some(output.final_text.clone());
+                run.final_text = Some(output.final_text);
+                run.error = None;
+            }
+            Err(error) => {
+                run.status = JobRunStatus::Failed;
+                run.output_summary = None;
+                run.final_text = None;
+                run.error = Some(error.to_string());
+            }
+        }
+        self.store.put_job_run(run.clone()).await?;
+
+        Ok(run)
+    }
+}
+
+pub async fn replay_job_run<S>(store: &S, run_id: &str) -> Result<JobRunReplay, RuntimeError>
+where
+    S: DurableJobStore,
+{
+    let run = store
+        .job_run(run_id)
+        .await?
+        .ok_or_else(|| RuntimeError::Store(format!("job run `{run_id}` is not defined")))?;
+    let trace = replay_session_trace(store, &run.trace_session_id).await?;
+    Ok(JobRunReplay { run, trace })
 }
 
 fn new_record_id() -> String {
