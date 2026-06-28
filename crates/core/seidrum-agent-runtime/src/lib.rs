@@ -88,6 +88,37 @@ pub struct ChannelTurnInput {
     pub user_message: String,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TelegramInboundMessage {
+    pub chat_id: String,
+    pub thread_id: Option<String>,
+    pub user_id: Option<String>,
+    pub message_id: String,
+    pub correlation_id: Option<String>,
+    pub text: String,
+}
+
+impl TelegramInboundMessage {
+    pub fn channel_identity(&self) -> ChannelContinuationIdentity {
+        ChannelContinuationIdentity {
+            provider: ChannelKind::Telegram,
+            chat_id: self.chat_id.clone(),
+            thread_id: self.thread_id.clone(),
+            user_id: self.user_id.clone(),
+            message_id: Some(self.message_id.clone()),
+            correlation_id: self.correlation_id.clone(),
+        }
+    }
+
+    pub fn into_channel_turn(self, agent_id: impl Into<String>) -> ChannelTurnInput {
+        ChannelTurnInput {
+            origin: self.channel_identity(),
+            agent_id: agent_id.into(),
+            user_message: self.text,
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ToolCall {
     pub id: String,
@@ -183,6 +214,239 @@ pub trait ToolAuthorizationBoundary: Send + Sync + 'static {
     async fn authorize(&self, request: ToolAuthorizationRequest) -> ToolPermissionDecision;
 }
 
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct AuthorizationAuditRecord {
+    pub audit_id: String,
+    pub sequence: u64,
+    pub decision: ToolPermissionDecision,
+    pub tool_name: String,
+    pub call_id: String,
+    pub session_id: Option<String>,
+    pub channel_origin: Option<ChannelContinuationIdentity>,
+    pub reason: Option<String>,
+}
+
+impl AuthorizationAuditRecord {
+    pub fn new(
+        sequence: u64,
+        decision: ToolPermissionDecision,
+        request: &ToolAuthorizationRequest,
+    ) -> Self {
+        Self {
+            audit_id: new_record_id(),
+            sequence,
+            reason: permission_decision_reason(&decision),
+            decision,
+            tool_name: request.tool_name.clone(),
+            call_id: request.call_id.clone(),
+            session_id: request.session_id.clone(),
+            channel_origin: request.channel_origin.clone(),
+        }
+    }
+}
+
+#[async_trait]
+pub trait AuthorizationAuditStore: Send + Sync + Clone + 'static {
+    async fn append_authorization_audit(
+        &self,
+        record: AuthorizationAuditRecord,
+    ) -> Result<(), RuntimeError>;
+
+    async fn list_authorization_audits(
+        &self,
+    ) -> Result<Vec<AuthorizationAuditRecord>, RuntimeError>;
+
+    async fn authorization_audits_for_session(
+        &self,
+        session_id: &str,
+    ) -> Result<Vec<AuthorizationAuditRecord>, RuntimeError> {
+        Ok(self
+            .list_authorization_audits()
+            .await?
+            .into_iter()
+            .filter(|record| record.session_id.as_deref() == Some(session_id))
+            .collect())
+    }
+
+    async fn authorization_audits_for_tool(
+        &self,
+        tool_name: &str,
+    ) -> Result<Vec<AuthorizationAuditRecord>, RuntimeError> {
+        Ok(self
+            .list_authorization_audits()
+            .await?
+            .into_iter()
+            .filter(|record| record.tool_name == tool_name)
+            .collect())
+    }
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct InMemoryAuthorizationAuditStore {
+    inner: Arc<Mutex<Vec<AuthorizationAuditRecord>>>,
+}
+
+#[async_trait]
+impl AuthorizationAuditStore for InMemoryAuthorizationAuditStore {
+    async fn append_authorization_audit(
+        &self,
+        record: AuthorizationAuditRecord,
+    ) -> Result<(), RuntimeError> {
+        self.inner
+            .lock()
+            .map_err(|_| RuntimeError::Store("in-memory audit store lock poisoned".to_string()))?
+            .push(record);
+        Ok(())
+    }
+
+    async fn list_authorization_audits(
+        &self,
+    ) -> Result<Vec<AuthorizationAuditRecord>, RuntimeError> {
+        let mut records = self
+            .inner
+            .lock()
+            .map_err(|_| RuntimeError::Store("in-memory audit store lock poisoned".to_string()))?
+            .clone();
+        records.sort_by_key(|record| record.sequence);
+        Ok(records)
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ToolAuthorizationContext {
+    pub session_id: Option<String>,
+    pub channel_origin: Option<ChannelContinuationIdentity>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ToolAuthorizationRule {
+    pub tool_name: String,
+    pub decision: ToolPermissionDecision,
+    pub channel_kind: Option<ChannelKind>,
+    pub user_id: Option<String>,
+    pub session_id: Option<String>,
+}
+
+impl ToolAuthorizationRule {
+    pub fn for_tool(tool_name: impl Into<String>, decision: ToolPermissionDecision) -> Self {
+        Self {
+            tool_name: tool_name.into(),
+            decision,
+            channel_kind: None,
+            user_id: None,
+            session_id: None,
+        }
+    }
+
+    pub fn with_channel_kind(mut self, channel_kind: ChannelKind) -> Self {
+        self.channel_kind = Some(channel_kind);
+        self
+    }
+
+    pub fn with_user_id(mut self, user_id: impl Into<String>) -> Self {
+        self.user_id = Some(user_id.into());
+        self
+    }
+
+    pub fn with_session_id(mut self, session_id: impl Into<String>) -> Self {
+        self.session_id = Some(session_id.into());
+        self
+    }
+
+    fn matches(&self, tool_name: &str, context: &ToolAuthorizationContext) -> bool {
+        if self.tool_name != tool_name {
+            return false;
+        }
+        if let Some(expected) = &self.channel_kind {
+            if context
+                .channel_origin
+                .as_ref()
+                .map(|origin| &origin.provider)
+                != Some(expected)
+            {
+                return false;
+            }
+        }
+        if let Some(expected) = &self.user_id {
+            if context
+                .channel_origin
+                .as_ref()
+                .and_then(|origin| origin.user_id.as_ref())
+                != Some(expected)
+            {
+                return false;
+            }
+        }
+        if let Some(expected) = &self.session_id {
+            if context.session_id.as_ref() != Some(expected) {
+                return false;
+            }
+        }
+        true
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct RuleBasedToolAuthorizationBoundary {
+    rules: Vec<ToolAuthorizationRule>,
+    default_decision: ToolPermissionDecision,
+}
+
+impl RuleBasedToolAuthorizationBoundary {
+    pub fn new(
+        rules: impl IntoIterator<Item = ToolAuthorizationRule>,
+        default_decision: ToolPermissionDecision,
+    ) -> Self {
+        Self {
+            rules: rules.into_iter().collect(),
+            default_decision,
+        }
+    }
+
+    pub fn default_deny(rules: impl IntoIterator<Item = ToolAuthorizationRule>) -> Self {
+        Self::new(
+            rules,
+            ToolPermissionDecision::Deny {
+                reason: "no matching authorization rule".to_string(),
+            },
+        )
+    }
+
+    pub async fn decision_for(
+        &self,
+        tool_name: &str,
+        context: ToolAuthorizationContext,
+    ) -> ToolPermissionDecision {
+        self.rules
+            .iter()
+            .find(|rule| rule.matches(tool_name, &context))
+            .map(|rule| rule.decision.clone())
+            .unwrap_or_else(|| self.default_decision.clone())
+    }
+}
+
+#[async_trait]
+impl ToolAuthorizationBoundary for RuleBasedToolAuthorizationBoundary {
+    async fn authorize(&self, request: ToolAuthorizationRequest) -> ToolPermissionDecision {
+        self.decision_for(
+            &request.tool_name,
+            ToolAuthorizationContext {
+                session_id: request.session_id,
+                channel_origin: request.channel_origin,
+            },
+        )
+        .await
+    }
+}
+
+fn permission_decision_reason(decision: &ToolPermissionDecision) -> Option<String> {
+    match decision {
+        ToolPermissionDecision::Allow => None,
+        ToolPermissionDecision::Deny { reason }
+        | ToolPermissionDecision::RequireApproval { reason } => Some(reason.clone()),
+    }
+}
+
 pub struct SecureToolExecutor<E, B> {
     inner: E,
     boundary: B,
@@ -227,6 +491,79 @@ where
         };
 
         match self.boundary.authorize(request).await {
+            ToolPermissionDecision::Allow => self.inner.execute(call).await,
+            ToolPermissionDecision::Deny { reason } => Ok(ToolResult {
+                call_id: call.id,
+                tool_name: call.name,
+                content: format!("tool authorization denied: {reason}"),
+                is_error: true,
+            }),
+            ToolPermissionDecision::RequireApproval { reason } => Ok(ToolResult {
+                call_id: call.id,
+                tool_name: call.name,
+                content: format!("tool authorization requires approval: {reason}"),
+                is_error: true,
+            }),
+        }
+    }
+}
+
+pub struct AuditedSecureToolExecutor<E, B, S> {
+    inner: E,
+    boundary: B,
+    audit_store: S,
+    session_id: Option<String>,
+    channel_origin: Option<ChannelContinuationIdentity>,
+}
+
+impl<E, B, S> AuditedSecureToolExecutor<E, B, S> {
+    pub fn new(inner: E, boundary: B, audit_store: S) -> Self {
+        Self {
+            inner,
+            boundary,
+            audit_store,
+            session_id: None,
+            channel_origin: None,
+        }
+    }
+
+    pub fn with_session_id(mut self, session_id: impl Into<String>) -> Self {
+        self.session_id = Some(session_id.into());
+        self
+    }
+
+    pub fn with_channel_origin(mut self, origin: ChannelContinuationIdentity) -> Self {
+        self.channel_origin = Some(origin);
+        self
+    }
+}
+
+#[async_trait]
+impl<E, B, S> ToolExecutor for AuditedSecureToolExecutor<E, B, S>
+where
+    E: ToolExecutor,
+    B: ToolAuthorizationBoundary,
+    S: AuthorizationAuditStore,
+{
+    async fn execute(&self, call: ToolCall) -> Result<ToolResult, RuntimeError> {
+        let request = ToolAuthorizationRequest {
+            call_id: call.id.clone(),
+            tool_name: call.name.clone(),
+            arguments: call.arguments.clone(),
+            session_id: self.session_id.clone(),
+            channel_origin: self.channel_origin.clone(),
+        };
+        let decision = self.boundary.authorize(request.clone()).await;
+        let sequence = self.audit_store.list_authorization_audits().await?.len() as u64 + 1;
+        self.audit_store
+            .append_authorization_audit(AuthorizationAuditRecord::new(
+                sequence,
+                decision.clone(),
+                &request,
+            ))
+            .await?;
+
+        match decision {
             ToolPermissionDecision::Allow => self.inner.execute(call).await,
             ToolPermissionDecision::Deny { reason } => Ok(ToolResult {
                 call_id: call.id,
@@ -423,6 +760,8 @@ const RUNTIME_RECORDS_TABLE: redb::TableDefinition<u64, &[u8]> =
 const JOB_DEFINITIONS_TABLE: redb::TableDefinition<&str, &[u8]> =
     redb::TableDefinition::new("job_definitions");
 const JOB_RUNS_TABLE: redb::TableDefinition<&str, &[u8]> = redb::TableDefinition::new("job_runs");
+const AUTHORIZATION_AUDITS_TABLE: redb::TableDefinition<u64, &[u8]> =
+    redb::TableDefinition::new("authorization_audits");
 
 #[derive(Debug, Clone)]
 pub struct RedbTurnStore {
@@ -452,6 +791,13 @@ impl RedbTurnStore {
             write_txn.open_table(JOB_RUNS_TABLE).map_err(|error| {
                 RuntimeError::Store(format!("failed to open job runs table: {error}"))
             })?;
+            write_txn
+                .open_table(AUTHORIZATION_AUDITS_TABLE)
+                .map_err(|error| {
+                    RuntimeError::Store(format!(
+                        "failed to open authorization audits table: {error}"
+                    ))
+                })?;
         }
         write_txn.commit().map_err(|error| {
             RuntimeError::Store(format!("failed to commit redb initialization: {error}"))
@@ -527,6 +873,79 @@ impl RuntimeStore for RedbTurnStore {
         }
 
         records.sort_by_key(|record| record.sequence());
+        Ok(records)
+    }
+}
+
+#[async_trait]
+impl AuthorizationAuditStore for RedbTurnStore {
+    async fn append_authorization_audit(
+        &self,
+        record: AuthorizationAuditRecord,
+    ) -> Result<(), RuntimeError> {
+        let serialized = serde_json::to_vec(&record).map_err(|error| {
+            RuntimeError::Store(format!("failed to serialize authorization audit: {error}"))
+        })?;
+        let write_txn = self
+            .db
+            .begin_write()
+            .map_err(|error| RuntimeError::Store(format!("failed to begin redb write: {error}")))?;
+        {
+            let mut table = write_txn
+                .open_table(AUTHORIZATION_AUDITS_TABLE)
+                .map_err(|error| {
+                    RuntimeError::Store(format!(
+                        "failed to open authorization audits table: {error}"
+                    ))
+                })?;
+            let store_sequence = table
+                .last()
+                .map_err(|error| {
+                    RuntimeError::Store(format!("failed to read last authorization audit: {error}"))
+                })?
+                .map(|(key, _)| key.value())
+                .unwrap_or(0)
+                + 1;
+            table
+                .insert(store_sequence, serialized.as_slice())
+                .map_err(|error| {
+                    RuntimeError::Store(format!("failed to insert authorization audit: {error}"))
+                })?;
+        }
+        write_txn.commit().map_err(|error| {
+            RuntimeError::Store(format!("failed to commit authorization audit: {error}"))
+        })?;
+        Ok(())
+    }
+
+    async fn list_authorization_audits(
+        &self,
+    ) -> Result<Vec<AuthorizationAuditRecord>, RuntimeError> {
+        let read_txn = self
+            .db
+            .begin_read()
+            .map_err(|error| RuntimeError::Store(format!("failed to begin redb read: {error}")))?;
+        let table = read_txn
+            .open_table(AUTHORIZATION_AUDITS_TABLE)
+            .map_err(|error| {
+                RuntimeError::Store(format!(
+                    "failed to open authorization audits table: {error}"
+                ))
+            })?;
+        let mut records = Vec::new();
+        for entry in table.iter().map_err(|error| {
+            RuntimeError::Store(format!("failed to iterate authorization audits: {error}"))
+        })? {
+            let (_, data) = entry.map_err(|error| {
+                RuntimeError::Store(format!("failed to read authorization audit: {error}"))
+            })?;
+            records.push(serde_json::from_slice(data.value()).map_err(|error| {
+                RuntimeError::Store(format!(
+                    "failed to deserialize authorization audit: {error}"
+                ))
+            })?);
+        }
+        records.sort_by_key(|record: &AuthorizationAuditRecord| record.sequence);
         Ok(records)
     }
 }
