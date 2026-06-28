@@ -30,3 +30,6 @@ members = [
     "crates/plugins/seidrum-feedback-extractor",
 ]
 resolver = "2"
+
+[workspace.package]
+rust-version = "1.88"

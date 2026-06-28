@@ -8,14 +8,14 @@ Thank you for your interest in contributing to Seidrum.
 2. Clone your fork
 3. Create a feature branch (`git checkout -b feature/my-feature`)
 4. Make your changes
-5. Run checks: `cargo build --workspace && cargo clippy --workspace && cargo test --workspace`
+5. Run checks: `cargo check --workspace && cargo clippy --workspace --all-targets -- -D warnings && cargo test --workspace`
 6. Commit and push to your fork
 7. Open a pull request
 
 ## Development setup
 
 ```bash
-# Prerequisites: Rust stable, NATS Server, ArangoDB 3.12+
+# Prerequisites: Rust 1.88 or newer, NATS Server, ArangoDB 3.12+
 
 # Start infrastructure
 docker compose up -d nats arangodb
@@ -57,7 +57,7 @@ See [docs/PLUGIN_SPEC.md](docs/PLUGIN_SPEC.md) for the full specification.
 
 - Keep PRs focused on a single change
 - Include tests for new functionality
-- Make sure `cargo clippy --workspace` passes with no new warnings
+- Make sure `cargo clippy --workspace --all-targets -- -D warnings` passes
 - Write a clear description of what changed and why
 
 ## Reporting issues

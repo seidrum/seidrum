@@ -2,7 +2,7 @@
 
 ## Prerequisites
 
-1. **Rust** (stable) — [rustup.rs](https://rustup.rs)
+1. **Rust** 1.88 or newer — [rustup.rs](https://rustup.rs). The repository includes `rust-toolchain.toml`, so `rustup` will select the pinned toolchain automatically.
 2. **Docker** — [docker.com/get-started](https://docker.com/get-started) (required for ArangoDB on macOS; on Linux, Podman also works)
 3. **At least one LLM API key** — Google (Gemini) or OpenAI
 

@@ -83,7 +83,7 @@ There is no architectural distinction between a Telegram adapter, an LLM provide
 
 ### Prerequisites
 
-- [Rust](https://rustup.rs/) (stable)
+- [Rust](https://rustup.rs/) 1.88 or newer. The repository includes `rust-toolchain.toml`, so `rustup` will select the pinned toolchain automatically.
 - [Docker](https://docker.com/get-started) (for ArangoDB)
 
 ### Quick start
