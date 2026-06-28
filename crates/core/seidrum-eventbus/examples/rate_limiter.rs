@@ -111,11 +111,8 @@ async fn main() -> anyhow::Result<()> {
 
     // Collect what got through (with a short timeout for remaining).
     let mut received = 0;
-    loop {
-        match tokio::time::timeout(Duration::from_millis(200), sub.rx.recv()).await {
-            Ok(Some(_)) => received += 1,
-            _ => break,
-        }
+    while let Ok(Some(_)) = tokio::time::timeout(Duration::from_millis(200), sub.rx.recv()).await {
+        received += 1;
     }
 
     println!("Alice sent 5 messages, {} got through (limit: 3)", received);
