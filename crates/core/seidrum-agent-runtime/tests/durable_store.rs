@@ -3,9 +3,11 @@ use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
 use seidrum_agent_runtime::{
-    replay_agent_session_trace, replay_session_trace, AgentProvider, AgentRuntime, ProviderRequest,
-    ProviderResponse, RedbTurnStore, RuntimeConfig, RuntimeError, RuntimeEvent, RuntimeStore,
-    StoredTurnRecord, ToolCall, ToolExecutor, ToolResult, TurnInput,
+    replay_agent_session_trace, replay_session_trace, AgentProvider, AgentRuntime,
+    AuthorizationAuditRecord, AuthorizationAuditStore, ChannelContinuationIdentity, ChannelKind,
+    ProviderRequest, ProviderResponse, RedbTurnStore, RuntimeConfig, RuntimeError, RuntimeEvent,
+    RuntimeStore, StoredTurnRecord, ToolCall, ToolExecutor, ToolPermissionDecision, ToolResult,
+    TurnInput,
 };
 use serde_json::json;
 
@@ -221,4 +223,53 @@ async fn durable_store_reports_corrupt_or_unreadable_data_as_store_error() {
     let error = RedbTurnStore::open(&path).expect_err("corrupt data should not open");
 
     assert!(matches!(error, RuntimeError::Store(message) if message.contains("redb")));
+}
+
+#[tokio::test]
+async fn authorization_audit_records_persist_across_reopen() {
+    let tempdir = tempfile::tempdir().expect("tempdir");
+    let path = tempdir.path().join("runtime.redb");
+    let origin = ChannelContinuationIdentity {
+        provider: ChannelKind::Telegram,
+        chat_id: "chat-42".to_string(),
+        thread_id: Some("topic-3".to_string()),
+        user_id: Some("user-7".to_string()),
+        message_id: Some("msg-99".to_string()),
+        correlation_id: Some("telegram:chat-42:msg-99".to_string()),
+    };
+
+    let store = RedbTurnStore::open(&path).expect("store should open");
+    store
+        .append_authorization_audit(AuthorizationAuditRecord {
+            audit_id: "audit-1".to_string(),
+            sequence: 1,
+            decision: ToolPermissionDecision::Deny {
+                reason: "blocked by test policy".to_string(),
+            },
+            tool_name: "dangerous".to_string(),
+            call_id: "call-1".to_string(),
+            session_id: Some("session-1".to_string()),
+            channel_origin: Some(origin.clone()),
+            reason: Some("blocked by test policy".to_string()),
+        })
+        .await
+        .expect("audit record should persist");
+    drop(store);
+
+    let reopened = RedbTurnStore::open(&path).expect("store should reopen");
+    let by_session = reopened
+        .authorization_audits_for_session("session-1")
+        .await
+        .expect("audit records should load by session");
+    let by_tool = reopened
+        .authorization_audits_for_tool("dangerous")
+        .await
+        .expect("audit records should load by tool");
+
+    assert_eq!(by_session.len(), 1);
+    assert_eq!(by_tool, by_session);
+    assert_eq!(by_session[0].audit_id, "audit-1");
+    assert_eq!(by_session[0].sequence, 1);
+    assert_eq!(by_session[0].session_id.as_deref(), Some("session-1"));
+    assert_eq!(by_session[0].channel_origin.as_ref(), Some(&origin));
 }
