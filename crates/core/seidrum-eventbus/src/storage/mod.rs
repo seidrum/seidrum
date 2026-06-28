@@ -122,9 +122,42 @@ pub trait EventStore: Send + Sync + 'static {
 
     /// Query dead-lettered events for inspection or replay.
     ///
-    /// Convenience wrapper around `query_by_status(EventStatus::DeadLettered, limit)`.
-    async fn query_dead_lettered(&self, limit: usize) -> StorageResult<Vec<StoredEvent>> {
-        self.query_by_status(EventStatus::DeadLettered, limit).await
+    /// If `subject` is set, only exact-subject matches are returned.
+    async fn query_dead_lettered(
+        &self,
+        subject: Option<&str>,
+        limit: usize,
+    ) -> StorageResult<Vec<StoredEvent>> {
+        let events = self
+            .query_by_status(EventStatus::DeadLettered, limit)
+            .await?;
+        Ok(match subject {
+            Some(subject) => events
+                .into_iter()
+                .filter(|event| event.subject == subject)
+                .take(limit)
+                .collect(),
+            None => events,
+        })
+    }
+
+    /// Reset a dead-lettered event so it can be dispatched again in-place.
+    ///
+    /// Implementations clear delivery records, set status to `Pending`, and
+    /// preserve the original seq/subject/payload/reply_subject.
+    async fn requeue_dead_lettered(&self, seq: u64) -> StorageResult<StoredEvent> {
+        let _ = seq;
+        Err(StorageError::OperationFailed(
+            "dead-letter replay not supported by this store".to_string(),
+        ))
+    }
+
+    /// Permanently remove a dead-lettered event from storage.
+    async fn purge_dead_lettered(&self, seq: u64) -> StorageResult<()> {
+        let _ = seq;
+        Err(StorageError::OperationFailed(
+            "dead-letter purge not supported by this store".to_string(),
+        ))
     }
 
     // === Persisted subscriptions (Phase 4) ===

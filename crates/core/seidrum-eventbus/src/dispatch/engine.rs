@@ -322,8 +322,48 @@ impl DispatchEngine {
             self.events_published.fetch_add(1, Ordering::Relaxed);
             s
         };
-        let event_reply_subject = reply_subject;
+        self.dispatch_persisted_event(seq, subject, payload, reply_subject, is_reply)
+            .await
+    }
 
+    /// Replay an existing dead-lettered event using its original sequence number.
+    pub async fn replay_dead_lettered(&self, seq: u64) -> crate::Result<u64> {
+        let event = self
+            .store
+            .get(seq)
+            .await
+            .map_err(EventBusError::Storage)?
+            .ok_or_else(|| EventBusError::Internal(format!("event {} not found", seq)))?;
+        if event.status != EventStatus::DeadLettered {
+            return Err(EventBusError::Internal(format!(
+                "event {} is not dead-lettered",
+                seq
+            )));
+        }
+
+        self.store
+            .requeue_dead_lettered(seq)
+            .await
+            .map_err(EventBusError::Storage)?;
+        self.events_published.fetch_add(1, Ordering::Relaxed);
+        self.dispatch_persisted_event(
+            seq,
+            &event.subject,
+            &event.payload,
+            event.reply_subject,
+            false,
+        )
+        .await
+    }
+
+    async fn dispatch_persisted_event(
+        &self,
+        seq: u64,
+        subject: &str,
+        payload: &[u8],
+        event_reply_subject: Option<String>,
+        is_reply: bool,
+    ) -> crate::Result<u64> {
         // Helper: record delivery only for persisted (non-reply) events.
         // For Failed transitions, computes next_retry from the engine's
         // RetryConfig (this is the *first* failure on this subscriber, so

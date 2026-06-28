@@ -218,6 +218,39 @@ impl EventStore for InMemoryEventStore {
         Ok((original_len - events.len()) as u64)
     }
 
+    async fn requeue_dead_lettered(&self, seq: u64) -> StorageResult<StoredEvent> {
+        let mut events = self.events.write().await;
+        let event = events
+            .iter_mut()
+            .find(|e| e.seq == seq)
+            .ok_or(super::StorageError::NotFound)?;
+        if event.status != EventStatus::DeadLettered {
+            return Err(super::StorageError::OperationFailed(format!(
+                "event {} is not dead-lettered",
+                seq
+            )));
+        }
+        event.status = EventStatus::Pending;
+        event.deliveries.clear();
+        Ok(event.clone())
+    }
+
+    async fn purge_dead_lettered(&self, seq: u64) -> StorageResult<()> {
+        let mut events = self.events.write().await;
+        let idx = events
+            .iter()
+            .position(|e| e.seq == seq)
+            .ok_or(super::StorageError::NotFound)?;
+        if events[idx].status != EventStatus::DeadLettered {
+            return Err(super::StorageError::OperationFailed(format!(
+                "event {} is not dead-lettered",
+                seq
+            )));
+        }
+        events.remove(idx);
+        Ok(())
+    }
+
     async fn save_subscription(&self, sub: &PersistedSubscription) -> StorageResult<()> {
         let mut subs = self.subscriptions.write().await;
         subs.insert(sub.persisted_id.clone(), sub.clone());

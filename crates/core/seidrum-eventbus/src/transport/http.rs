@@ -7,7 +7,7 @@ use crate::bus::{BusMetrics, EventBus, SubscribeOpts};
 use crate::delivery::{ChannelConfig, ChannelRegistry, DeliveryChannel, WebhookChannel};
 use crate::dispatch::SubscriptionMode;
 use axum::{
-    extract::{Path, State},
+    extract::{Path, Query, State},
     http::{HeaderMap, StatusCode},
     routing::{delete, get, post},
     Json, Router,
@@ -237,6 +237,22 @@ pub struct RegisterInterceptorResponse {
     pub id: String,
 }
 
+#[derive(Debug, Deserialize)]
+pub struct DeadLetterQuery {
+    pub subject: Option<String>,
+    #[serde(default = "default_dead_letter_limit")]
+    pub limit: usize,
+}
+
+fn default_dead_letter_limit() -> usize {
+    100
+}
+
+#[derive(Debug, Serialize)]
+pub struct ReplayDeadLetterResponse {
+    pub seq: u64,
+}
+
 /// Validate and decode a base64 payload, mapping errors to HttpError.
 fn validate_and_decode_payload(payload: &str) -> Result<Vec<u8>, HttpError> {
     super::validate_and_decode_payload(payload).map_err(|msg| {
@@ -275,6 +291,9 @@ pub fn create_router(state: AppState) -> Router {
         .route("/interceptors", post(create_interceptor))
         .route("/interceptors/{id}", delete(remove_interceptor))
         .route("/events/{seq}", get(get_event))
+        .route("/dead-letter", get(list_dead_lettered))
+        .route("/dead-letter/{seq}/replay", post(replay_dead_lettered))
+        .route("/dead-letter/{seq}", delete(purge_dead_lettered))
         .layer(axum::middleware::from_fn_with_state(
             state.clone(),
             auth_middleware,
@@ -1423,6 +1442,79 @@ async fn get_event(
         "reply_subject": event.reply_subject,
     });
     Ok(Json(body))
+}
+
+fn stored_event_json(event: crate::storage::StoredEvent) -> Value {
+    use base64::Engine;
+    let payload_b64 = base64::engine::general_purpose::STANDARD.encode(&event.payload);
+    json!({
+        "seq": event.seq,
+        "subject": event.subject,
+        "payload": payload_b64,
+        "stored_at": event.stored_at,
+        "status": event.status,
+        "deliveries": event.deliveries,
+        "reply_subject": event.reply_subject,
+    })
+}
+
+/// List dead-lettered events with optional exact-subject filtering.
+async fn list_dead_lettered(
+    State(state): State<AppState>,
+    Query(query): Query<DeadLetterQuery>,
+) -> Result<Json<Value>, HttpError> {
+    refuse_if_unauth_state_changing(&state, "GET /dead-letter")?;
+    let limit = query.limit.min(1000);
+    let events = state
+        .bus
+        .query_dead_lettered(query.subject.as_deref(), limit)
+        .await
+        .map_err(|e| {
+            warn!("query dead-lettered failed: {}", e);
+            http_error(StatusCode::INTERNAL_SERVER_ERROR, format!("{}", e))
+        })?;
+    let body: Vec<Value> = events.into_iter().map(stored_event_json).collect();
+    Ok(Json(json!({ "events": body })))
+}
+
+/// Replay a dead-lettered event in-place.
+async fn replay_dead_lettered(
+    State(state): State<AppState>,
+    Path(seq): Path<u64>,
+) -> Result<Json<ReplayDeadLetterResponse>, HttpError> {
+    refuse_if_unauth_state_changing(&state, "POST /dead-letter/:seq/replay")?;
+    let seq = state.bus.replay_dead_lettered(seq).await.map_err(|e| {
+        let msg = e.to_string();
+        warn!(seq = seq, error = %msg, "dead-letter replay failed");
+        if msg.contains("not found") {
+            http_error_with_code(StatusCode::NOT_FOUND, msg, "EVENT_NOT_FOUND")
+        } else if msg.contains("not dead-lettered") {
+            http_error_with_code(StatusCode::CONFLICT, msg, "EVENT_NOT_DEAD_LETTERED")
+        } else {
+            http_error(StatusCode::INTERNAL_SERVER_ERROR, msg)
+        }
+    })?;
+    Ok(Json(ReplayDeadLetterResponse { seq }))
+}
+
+/// Purge a single dead-lettered event.
+async fn purge_dead_lettered(
+    State(state): State<AppState>,
+    Path(seq): Path<u64>,
+) -> Result<StatusCode, HttpError> {
+    refuse_if_unauth_state_changing(&state, "DELETE /dead-letter/:seq")?;
+    state.bus.purge_dead_lettered(seq).await.map_err(|e| {
+        let msg = e.to_string();
+        warn!(seq = seq, error = %msg, "dead-letter purge failed");
+        if msg.contains("event not found") {
+            http_error_with_code(StatusCode::NOT_FOUND, msg, "EVENT_NOT_FOUND")
+        } else if msg.contains("not dead-lettered") {
+            http_error_with_code(StatusCode::CONFLICT, msg, "EVENT_NOT_DEAD_LETTERED")
+        } else {
+            http_error(StatusCode::INTERNAL_SERVER_ERROR, msg)
+        }
+    })?;
+    Ok(StatusCode::NO_CONTENT)
 }
 
 #[cfg(test)]

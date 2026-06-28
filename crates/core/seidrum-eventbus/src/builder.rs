@@ -73,6 +73,19 @@ impl EventBus for OwnedBus {
     async fn get_event(&self, seq: u64) -> crate::Result<Option<crate::storage::StoredEvent>> {
         self.inner.get_event(seq).await
     }
+    async fn query_dead_lettered(
+        &self,
+        subject: Option<&str>,
+        limit: usize,
+    ) -> crate::Result<Vec<crate::storage::StoredEvent>> {
+        self.inner.query_dead_lettered(subject, limit).await
+    }
+    async fn replay_dead_lettered(&self, seq: u64) -> crate::Result<u64> {
+        self.inner.replay_dead_lettered(seq).await
+    }
+    async fn purge_dead_lettered(&self, seq: u64) -> crate::Result<()> {
+        self.inner.purge_dead_lettered(seq).await
+    }
     async fn register_channel_type(
         &self,
         channel_type: &str,

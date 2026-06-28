@@ -148,6 +148,19 @@ pub trait EventBus: Send + Sync + 'static {
     /// scanning by status.
     async fn get_event(&self, seq: u64) -> crate::Result<Option<StoredEvent>>;
 
+    /// List dead-lettered events, optionally filtered by exact subject.
+    async fn query_dead_lettered(
+        &self,
+        subject: Option<&str>,
+        limit: usize,
+    ) -> crate::Result<Vec<StoredEvent>>;
+
+    /// Replay a dead-lettered event in-place using its original sequence.
+    async fn replay_dead_lettered(&self, seq: u64) -> crate::Result<u64>;
+
+    /// Permanently remove a single dead-lettered event.
+    async fn purge_dead_lettered(&self, seq: u64) -> crate::Result<()>;
+
     /// Register a custom delivery channel type at runtime.
     ///
     /// Subscriptions that use `ChannelConfig::Custom { channel_type, .. }`
@@ -314,6 +327,30 @@ impl EventBus for EventBusImpl {
         self.engine
             .store
             .get(seq)
+            .await
+            .map_err(crate::EventBusError::Storage)
+    }
+
+    async fn query_dead_lettered(
+        &self,
+        subject: Option<&str>,
+        limit: usize,
+    ) -> crate::Result<Vec<StoredEvent>> {
+        self.engine
+            .store
+            .query_dead_lettered(subject, limit)
+            .await
+            .map_err(crate::EventBusError::Storage)
+    }
+
+    async fn replay_dead_lettered(&self, seq: u64) -> crate::Result<u64> {
+        self.engine.replay_dead_lettered(seq).await
+    }
+
+    async fn purge_dead_lettered(&self, seq: u64) -> crate::Result<()> {
+        self.engine
+            .store
+            .purge_dead_lettered(seq)
             .await
             .map_err(crate::EventBusError::Storage)
     }
