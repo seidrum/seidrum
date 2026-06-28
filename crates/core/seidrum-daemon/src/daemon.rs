@@ -209,10 +209,7 @@ pub async fn start(paths: &SeidrumPaths) -> Result<()> {
     if let Ok(pid_str) = std::fs::read_to_string(&pid_file) {
         if let Ok(pid) = pid_str.trim().parse::<i32>() {
             if is_process_alive(pid) {
-                anyhow::bail!(
-                    "Daemon is already running (PID {}). Use 'seidrum stop' first.",
-                    pid
-                );
+                anyhow::bail!("Daemon is already running (PID {pid}). Use 'seidrum stop' first.");
             }
         }
         // Stale PID file — remove it
@@ -368,7 +365,7 @@ pub async fn start(paths: &SeidrumPaths) -> Result<()> {
 }
 
 /// Monitor processes and restart crashed ones.
-async fn check_processes(processes: &mut Vec<ManagedProcess>, paths: &SeidrumPaths) {
+async fn check_processes(processes: &mut [ManagedProcess], paths: &SeidrumPaths) {
     tokio::time::sleep(Duration::from_secs(1)).await;
 
     for proc in processes.iter_mut() {
@@ -423,7 +420,7 @@ async fn check_processes(processes: &mut Vec<ManagedProcess>, paths: &SeidrumPat
 }
 
 /// Gracefully shut down all processes: SIGTERM plugins first, then kernel.
-async fn shutdown(processes: &mut Vec<ManagedProcess>, paths: &SeidrumPaths) {
+async fn shutdown(processes: &mut [ManagedProcess], paths: &SeidrumPaths) {
     info!("Shutting down all processes...");
 
     // Send SIGTERM to plugins first (not kernel)
@@ -541,7 +538,7 @@ async fn handle_plugin_start(
             if let Some(reply) = &msg.reply {
                 let response = PluginCommandResponse {
                     success: false,
-                    message: format!("Failed to parse command: {}", e),
+                    message: format!("Failed to parse command: {e}"),
                 };
                 let _ = client
                     .reply_to(reply, serde_json::to_vec(&response).unwrap_or_default())
@@ -575,7 +572,7 @@ async fn handle_plugin_start(
         None => {
             let response = PluginCommandResponse {
                 success: false,
-                message: format!("Plugin '{}' not found in plugins.yaml", plugin_name),
+                message: format!("Plugin '{plugin_name}' not found in plugins.yaml"),
             };
             if let Some(reply) = &msg.reply {
                 let _ = client
@@ -592,7 +589,7 @@ async fn handle_plugin_start(
             if is_process_alive(pid) {
                 let response = PluginCommandResponse {
                     success: false,
-                    message: format!("Plugin '{}' is already running (PID {})", plugin_name, pid),
+                    message: format!("Plugin '{plugin_name}' is already running (PID {pid})"),
                 };
                 if let Some(reply) = &msg.reply {
                     let _ = client
@@ -611,7 +608,7 @@ async fn handle_plugin_start(
     if let Err(e) = sync_runtime_env_file() {
         let response = PluginCommandResponse {
             success: false,
-            message: format!("Failed to load .env: {}", e),
+            message: format!("Failed to load .env: {e}"),
         };
         if let Some(reply) = &msg.reply {
             let _ = client
@@ -636,7 +633,7 @@ async fn handle_plugin_start(
             }
             let response = PluginCommandResponse {
                 success: true,
-                message: format!("Plugin '{}' started", plugin_name),
+                message: format!("Plugin '{plugin_name}' started"),
             };
             if let Some(reply) = &msg.reply {
                 let _ = client
@@ -648,7 +645,7 @@ async fn handle_plugin_start(
             error!(name = %plugin_name, error = %e, "Failed to start plugin via bus");
             let response = PluginCommandResponse {
                 success: false,
-                message: format!("Failed to start plugin: {}", e),
+                message: format!("Failed to start plugin: {e}"),
             };
             if let Some(reply) = &msg.reply {
                 let _ = client
@@ -674,7 +671,7 @@ async fn handle_plugin_stop(
             if let Some(reply) = &msg.reply {
                 let response = PluginCommandResponse {
                     success: false,
-                    message: format!("Failed to parse command: {}", e),
+                    message: format!("Failed to parse command: {e}"),
                 };
                 let _ = client
                     .reply_to(reply, serde_json::to_vec(&response).unwrap_or_default())
@@ -693,7 +690,7 @@ async fn handle_plugin_stop(
         Err(_) => {
             let response = PluginCommandResponse {
                 success: false,
-                message: format!("Plugin '{}' does not appear to be running", plugin_name),
+                message: format!("Plugin '{plugin_name}' does not appear to be running"),
             };
             if let Some(reply) = &msg.reply {
                 let _ = client
@@ -724,10 +721,7 @@ async fn handle_plugin_stop(
         let _ = std::fs::remove_file(&pid_file);
         let response = PluginCommandResponse {
             success: false,
-            message: format!(
-                "Plugin '{}' is not running (stale PID file cleaned up)",
-                plugin_name
-            ),
+            message: format!("Plugin '{plugin_name}' is not running (stale PID file cleaned up)"),
         };
         if let Some(reply) = &msg.reply {
             let _ = client
@@ -752,7 +746,7 @@ async fn handle_plugin_stop(
             let _ = std::fs::remove_file(&pid_file);
             let response = PluginCommandResponse {
                 success: true,
-                message: format!("Plugin '{}' stopped", plugin_name),
+                message: format!("Plugin '{plugin_name}' stopped"),
             };
             if let Some(reply) = &msg.reply {
                 let _ = client
@@ -773,7 +767,7 @@ async fn handle_plugin_stop(
 
     let response = PluginCommandResponse {
         success: true,
-        message: format!("Plugin '{}' killed", plugin_name),
+        message: format!("Plugin '{plugin_name}' killed"),
     };
     if let Some(reply) = &msg.reply {
         let _ = client
@@ -813,7 +807,7 @@ pub async fn start_plugin(paths: &SeidrumPaths, name: &str) -> Result<()> {
     let entry = config
         .plugins
         .get(name)
-        .ok_or_else(|| anyhow::anyhow!("Plugin '{}' not found in plugins.yaml", name))?;
+        .ok_or_else(|| anyhow::anyhow!("Plugin '{name}' not found in plugins.yaml"))?;
 
     sync_runtime_env_file()?;
 
@@ -824,7 +818,7 @@ pub async fn start_plugin(paths: &SeidrumPaths, name: &str) -> Result<()> {
     if let Ok(pid_str) = std::fs::read_to_string(paths.plugin_pid_file(name)) {
         if let Ok(pid) = pid_str.trim().parse::<i32>() {
             if is_process_alive(pid) {
-                println!("Plugin '{}' is already running (PID {})", name, pid);
+                println!("Plugin '{name}' is already running (PID {pid})");
                 return Ok(());
             }
         }
@@ -844,7 +838,7 @@ pub async fn start_plugin(paths: &SeidrumPaths, name: &str) -> Result<()> {
         });
     }
 
-    println!("Plugin '{}' started", name);
+    println!("Plugin '{name}' started");
     Ok(())
 }
 
@@ -852,15 +846,12 @@ pub async fn start_plugin(paths: &SeidrumPaths, name: &str) -> Result<()> {
 pub async fn stop_plugin(paths: &SeidrumPaths, name: &str) -> Result<()> {
     let pid_file = paths.plugin_pid_file(name);
     let pid_str = std::fs::read_to_string(&pid_file)
-        .with_context(|| format!("Plugin '{}' does not appear to be running", name))?;
+        .with_context(|| format!("Plugin '{name}' does not appear to be running"))?;
     let pid: i32 = pid_str.trim().parse().context("Invalid PID file")?;
 
     if !is_process_alive(pid) {
         let _ = std::fs::remove_file(&pid_file);
-        println!(
-            "Plugin '{}' is not running (stale PID file cleaned up)",
-            name
-        );
+        println!("Plugin '{name}' is not running (stale PID file cleaned up)");
         return Ok(());
     }
 
@@ -876,7 +867,7 @@ pub async fn stop_plugin(paths: &SeidrumPaths, name: &str) -> Result<()> {
         tokio::time::sleep(Duration::from_millis(500)).await;
         if !is_process_alive(pid) {
             let _ = std::fs::remove_file(&pid_file);
-            println!("Plugin '{}' stopped", name);
+            println!("Plugin '{name}' stopped");
             return Ok(());
         }
     }
@@ -887,7 +878,7 @@ pub async fn stop_plugin(paths: &SeidrumPaths, name: &str) -> Result<()> {
     }
     let _ = std::fs::remove_file(&pid_file);
 
-    println!("Plugin '{}' killed", name);
+    println!("Plugin '{name}' killed");
     Ok(())
 }
 

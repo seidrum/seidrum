@@ -12,7 +12,7 @@ use std::os::unix::fs::PermissionsExt;
 
 /// Main install command
 pub async fn install(package_str: &str, yes: bool, paths: &SeidrumPaths) -> Result<()> {
-    println!("Resolving package: {}", package_str);
+    println!("Resolving package: {package_str}");
 
     // Step 1: Resolve package
     let resolved = resolve::resolve_package(package_str, paths)?;
@@ -22,14 +22,14 @@ pub async fn install(package_str: &str, yes: bool, paths: &SeidrumPaths) -> Resu
     println!("  Name:        {}", manifest.name);
     println!("  Version:     {}", manifest.version);
     if let Some(desc) = &manifest.description {
-        println!("  Description: {}", desc);
+        println!("  Description: {desc}");
     }
     println!("  Kind:        {:?}", manifest.kind);
     println!("  Events:      {:?}", manifest.events);
     if !manifest.env_vars.is_empty() {
         println!("  Environment Variables:");
         for (k, v) in &manifest.env_vars {
-            println!("    {} = {}", k, v);
+            println!("    {k} = {v}");
         }
     }
 
@@ -62,8 +62,6 @@ pub async fn install(package_str: &str, yes: bool, paths: &SeidrumPaths) -> Resu
         kind: manifest.kind.clone(),
         installed_at: Utc::now().to_rfc3339(),
         source: match &resolved.source {
-            super::PackageSource::Registry { name, .. } => name.clone(),
-            super::PackageSource::Url(url) => url.clone(),
             super::PackageSource::Local(path) => path.to_string_lossy().to_string(),
         },
     };
@@ -103,7 +101,7 @@ async fn install_plugin(resolved: &super::ResolvedPackage, paths: &SeidrumPaths)
         .artifacts
         .iter()
         .find(|a| a.target == target)
-        .ok_or_else(|| anyhow::anyhow!("No artifact for target {}", target))?;
+        .ok_or_else(|| anyhow::anyhow!("No artifact for target {target}"))?;
 
     // Verify against the SPECIFIC artifact that was downloaded
     if !verify::verify_sha256(&artifact_path, &artifact.sha256)? {
@@ -281,5 +279,5 @@ fn find_executable(dir: &Path, name: &str) -> Result<PathBuf> {
         }
     }
 
-    anyhow::bail!("Could not find executable for plugin {}", name)
+    anyhow::bail!("Could not find executable for plugin {name}")
 }

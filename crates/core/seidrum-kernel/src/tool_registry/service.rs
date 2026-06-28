@@ -234,7 +234,7 @@ impl ToolRegistryService {
                 }),
             )
             .await
-            .with_context(|| format!("failed to upsert capability '{}'", tool_id))?;
+            .with_context(|| format!("failed to upsert capability '{tool_id}'"))?;
 
         // Cache in memory
         let entry = ToolEntry {
@@ -743,10 +743,10 @@ mod tests {
             tool_id: tool_id.to_string(),
             plugin_id: plugin_id.to_string(),
             name: name.to_string(),
-            summary_md: format!("Summary for {}", name),
-            manual_md: format!("# {}\n\nManual content.", name),
+            summary_md: format!("Summary for {name}"),
+            manual_md: format!("# {name}\n\nManual content."),
             parameters: serde_json::json!({"type": "object"}),
-            call_subject: format!("capability.call.{}", plugin_id),
+            call_subject: format!("capability.call.{plugin_id}"),
             kind: "tool".to_string(),
         }
     }

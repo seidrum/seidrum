@@ -41,35 +41,6 @@ pub struct InstallRequest {
     pub confirm: bool,
 }
 
-#[derive(Serialize, Debug, Clone)]
-pub struct EnvVarInfo {
-    pub key: String,
-    pub label: String,
-    pub help: String,
-    pub required: bool,
-}
-
-#[derive(Serialize, Debug)]
-pub struct InstallPreview {
-    pub name: String,
-    pub version: String,
-    pub kind: String,
-    pub description: Option<String>,
-    pub author: Option<String>,
-    pub plugins_to_install: Vec<String>,
-    pub agents_to_install: Vec<String>,
-    pub env_required: Vec<EnvVarInfo>,
-    pub events_consumed: Vec<String>,
-    pub events_produced: Vec<String>,
-}
-
-#[derive(Serialize, Debug)]
-pub struct InstallResult {
-    pub success: bool,
-    pub message: String,
-    pub installed: Vec<String>,
-}
-
 #[derive(Serialize, Debug)]
 pub struct InstalledPackages {
     pub packages: Vec<InstalledPackageInfo>,
@@ -157,7 +128,7 @@ pub async fn search_packages(
             error!("Failed to load registries: {}", e);
             (
                 StatusCode::INTERNAL_SERVER_ERROR,
-                format!("Failed to load registries: {}", e),
+                format!("Failed to load registries: {e}"),
             )
                 .into_response()
         }
@@ -177,7 +148,7 @@ pub async fn install_package(
             error!("Failed to serialize install request: {}", e);
             return (
                 StatusCode::BAD_REQUEST,
-                format!("Failed to serialize request: {}", e),
+                format!("Failed to serialize request: {e}"),
             )
                 .into_response();
         }
@@ -197,7 +168,7 @@ pub async fn install_package(
             error!("Failed to send install request to daemon: {}", e);
             (
                 StatusCode::INTERNAL_SERVER_ERROR,
-                format!("Install failed: {}", e),
+                format!("Install failed: {e}"),
             )
                 .into_response()
         }
@@ -217,7 +188,7 @@ pub async fn uninstall_package(
             error!("Failed to serialize uninstall request: {}", e);
             return (
                 StatusCode::BAD_REQUEST,
-                format!("Failed to serialize request: {}", e),
+                format!("Failed to serialize request: {e}"),
             )
                 .into_response();
         }
@@ -237,7 +208,7 @@ pub async fn uninstall_package(
             error!("Failed to send uninstall request to daemon: {}", e);
             (
                 StatusCode::INTERNAL_SERVER_ERROR,
-                format!("Uninstall failed: {}", e),
+                format!("Uninstall failed: {e}"),
             )
                 .into_response()
         }

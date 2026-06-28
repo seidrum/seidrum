@@ -15,14 +15,14 @@ struct RegistryRow {
 
 /// Add a custom registry
 pub fn add_registry(name: &str, url: &str, paths: &SeidrumPaths) -> Result<()> {
-    println!("Adding registry: {}", name);
+    println!("Adding registry: {name}");
 
     let registries_yaml = paths.seidrum_home.join("registries.yaml");
     let mut registries: RegistriesConfig = if registries_yaml.exists() {
         let content = fs::read_to_string(&registries_yaml)?;
         serde_yaml::from_str(&content).map_err(|e| {
             tracing::warn!("Failed to parse registries config: {}", e);
-            anyhow::anyhow!("Failed to parse registries config: {}", e)
+            anyhow::anyhow!("Failed to parse registries config: {e}")
         })?
     } else {
         RegistriesConfig::default()
@@ -31,22 +31,22 @@ pub fn add_registry(name: &str, url: &str, paths: &SeidrumPaths) -> Result<()> {
     // Clone the registry git repo
     let registry_path = paths.registries_dir().join(name);
     if registry_path.exists() {
-        anyhow::bail!("Registry '{}' already exists", name);
+        anyhow::bail!("Registry '{name}' already exists");
     }
 
-    println!("Cloning registry from: {}", url);
+    println!("Cloning registry from: {url}");
     fs::create_dir_all(paths.registries_dir())?;
 
     let registry_str = registry_path
         .to_str()
         .ok_or_else(|| anyhow::anyhow!("Invalid registry path: contains non-UTF8 characters"))?;
     let output = Command::new("git")
-        .args(&["clone", url, registry_str])
+        .args(["clone", url, registry_str])
         .output()?;
 
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
-        anyhow::bail!("Failed to clone registry: {}", stderr);
+        anyhow::bail!("Failed to clone registry: {stderr}");
     }
 
     // Add to registries config
@@ -61,7 +61,7 @@ pub fn add_registry(name: &str, url: &str, paths: &SeidrumPaths) -> Result<()> {
     fs::write(&registries_yaml, yaml_content)?;
 
     info!("Added registry {}", name);
-    println!("Successfully added registry '{}'", name);
+    println!("Successfully added registry '{name}'");
 
     Ok(())
 }
@@ -95,14 +95,14 @@ pub fn list_registries(paths: &SeidrumPaths) -> Result<()> {
         .collect();
 
     let table = Table::new(&rows);
-    println!("{}", table);
+    println!("{table}");
 
     Ok(())
 }
 
 /// Remove a custom registry
 pub fn remove_registry(name: &str, paths: &SeidrumPaths) -> Result<()> {
-    println!("Removing registry: {}", name);
+    println!("Removing registry: {name}");
 
     let registries_yaml = paths.seidrum_home.join("registries.yaml");
     if !registries_yaml.exists() {
@@ -113,7 +113,7 @@ pub fn remove_registry(name: &str, paths: &SeidrumPaths) -> Result<()> {
     let mut registries: RegistriesConfig = serde_yaml::from_str(&content)?;
 
     if registries.find(name).is_none() {
-        anyhow::bail!("Registry '{}' not found", name);
+        anyhow::bail!("Registry '{name}' not found");
     }
 
     registries.remove(name);
@@ -127,7 +127,7 @@ pub fn remove_registry(name: &str, paths: &SeidrumPaths) -> Result<()> {
     }
 
     info!("Removed registry {}", name);
-    println!("Successfully removed registry '{}'", name);
+    println!("Successfully removed registry '{name}'");
 
     Ok(())
 }
@@ -142,7 +142,7 @@ pub fn sync_registry(name: Option<&str>, paths: &SeidrumPaths) -> Result<()> {
     let content = fs::read_to_string(&registries_yaml)?;
     let mut registries: RegistriesConfig = serde_yaml::from_str(&content).map_err(|e| {
         tracing::warn!("Failed to parse registries config: {}", e);
-        anyhow::anyhow!("Failed to parse registries config: {}", e)
+        anyhow::anyhow!("Failed to parse registries config: {e}")
     })?;
 
     let registries_to_sync = if let Some(n) = name {
@@ -156,7 +156,7 @@ pub fn sync_registry(name: Option<&str>, paths: &SeidrumPaths) -> Result<()> {
     };
 
     for reg_name in registries_to_sync {
-        println!("Syncing registry: {}", reg_name);
+        println!("Syncing registry: {reg_name}");
 
         let registry_path = paths.registries_dir().join(&reg_name);
         if !registry_path.exists() {
@@ -166,12 +166,12 @@ pub fn sync_registry(name: Option<&str>, paths: &SeidrumPaths) -> Result<()> {
 
         let output = Command::new("git")
             .current_dir(&registry_path)
-            .args(&["pull"])
+            .args(["pull"])
             .output()?;
 
         if !output.status.success() {
             let stderr = String::from_utf8_lossy(&output.stderr);
-            println!("  Warning: git pull failed: {}", stderr);
+            println!("  Warning: git pull failed: {stderr}");
         } else {
             // Update sync timestamp
             if let Some(reg) = registries

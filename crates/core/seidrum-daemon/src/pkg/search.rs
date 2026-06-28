@@ -17,12 +17,12 @@ pub fn search(query: &str, _paths: &SeidrumPaths) -> Result<()> {
 
     // This is a placeholder - in real implementation would search registry index
     // For now, show helpful message
-    println!("Searching registry for: {}", query);
+    println!("Searching registry for: {query}");
     println!();
     println!("Registry search functionality requires a configured registry.");
     println!("Run 'seidrum pkg registry add <name> <url>' to add a registry.");
     println!();
-    println!("No packages found matching: {}", query);
+    println!("No packages found matching: {query}");
 
     Ok(())
 }

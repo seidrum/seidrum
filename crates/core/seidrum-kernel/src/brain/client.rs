@@ -35,9 +35,9 @@ impl ArangoClient {
 
         // ArangoDB uses HTTP basic auth; default user is "root".
         use base64::Engine as _;
-        let credentials = format!("root:{}", password);
+        let credentials = format!("root:{password}");
         let encoded = base64::engine::general_purpose::STANDARD.encode(credentials.as_bytes());
-        let auth_header = format!("Basic {}", encoded);
+        let auth_header = format!("Basic {encoded}");
 
         Ok(Self {
             base_url: base_url.trim_end_matches('/').to_string(),
@@ -71,7 +71,7 @@ impl ArangoClient {
             .json(body)
             .send()
             .await
-            .with_context(|| format!("POST {} failed", url))?;
+            .with_context(|| format!("POST {url} failed"))?;
 
         let status = resp.status();
         let text = resp.text().await.context("failed to read response body")?;
@@ -92,7 +92,7 @@ impl ArangoClient {
             .header("Authorization", &self.auth_header)
             .send()
             .await
-            .with_context(|| format!("GET {} failed", url))?;
+            .with_context(|| format!("GET {url} failed"))?;
 
         let status = resp.status();
         let text = resp.text().await.context("failed to read response body")?;
@@ -217,7 +217,7 @@ impl ArangoClient {
         unique: bool,
         sparse: bool,
     ) -> Result<()> {
-        let url = self.db_url(&format!("/_api/index?collection={}", collection));
+        let url = self.db_url(&format!("/_api/index?collection={collection}"));
         let body = serde_json::json!({
             "type": "persistent",
             "fields": fields,
@@ -247,7 +247,7 @@ impl ArangoClient {
         dimension: u32,
         metric: &str,
     ) -> Result<()> {
-        let url = self.db_url(&format!("/_api/index?collection={}", collection));
+        let url = self.db_url(&format!("/_api/index?collection={collection}"));
         let body = serde_json::json!({
             "type": "mdi-prefixed",
             "fields": [field],
@@ -342,7 +342,7 @@ impl ArangoClient {
 
     /// Insert a document into a collection. Returns the created document metadata.
     pub async fn insert_document(&self, collection: &str, doc: &Value) -> Result<Value> {
-        let url = self.db_url(&format!("/_api/document/{}", collection));
+        let url = self.db_url(&format!("/_api/document/{collection}"));
         let resp = self.post(&url, doc).await?;
 
         if resp.get("error").and_then(|v| v.as_bool()).unwrap_or(false) {
@@ -369,9 +369,8 @@ impl ArangoClient {
             r#"UPSERT {{ _key: @key }}
                INSERT MERGE(@doc, {{ _key: @key }})
                UPDATE MERGE(OLD, @doc)
-               IN {}
-               RETURN {{ doc: NEW, is_new: IS_NULL(OLD) }}"#,
-            collection
+               IN {collection}
+               RETURN {{ doc: NEW, is_new: IS_NULL(OLD) }}"#
         );
         let bind_vars = serde_json::json!({
             "key": key,
@@ -413,7 +412,7 @@ impl ArangoClient {
 
     /// Get a single document by collection and key.
     pub async fn get_document(&self, collection: &str, key: &str) -> Result<Option<Value>> {
-        let url = self.db_url(&format!("/_api/document/{}/{}", collection, key));
+        let url = self.db_url(&format!("/_api/document/{collection}/{key}"));
         trace!("GET {}", url);
         let resp = self
             .http
@@ -421,7 +420,7 @@ impl ArangoClient {
             .header("Authorization", &self.auth_header)
             .send()
             .await
-            .with_context(|| format!("GET {} failed", url))?;
+            .with_context(|| format!("GET {url} failed"))?;
 
         let status = resp.status();
         if status.as_u16() == 404 {

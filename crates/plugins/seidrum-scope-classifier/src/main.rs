@@ -94,7 +94,7 @@ fn resolve_google_api_key(cli_key: &Option<String>) -> Result<String> {
         .map(|h| h.join(".openclaw/agents/main/agent/auth-profiles.json"))
         .ok_or_else(|| anyhow::anyhow!("Could not determine home directory"))?;
     let content = std::fs::read_to_string(&auth_path)
-        .map_err(|e| anyhow::anyhow!("Failed to read OpenClaw auth-profiles.json: {}", e))?;
+        .map_err(|e| anyhow::anyhow!("Failed to read OpenClaw auth-profiles.json: {e}"))?;
     let profiles: serde_json::Value = serde_json::from_str(&content)?;
     let key = profiles
         .get("profiles")
@@ -134,7 +134,7 @@ async fn main() -> Result<()> {
         description: "Classifies content into scopes using LLM".to_string(),
         consumes: vec!["brain.content.stored".to_string()],
         produces: vec!["brain.scope.assign".to_string()],
-        health_subject: format!("plugin.{}.health", PLUGIN_ID),
+        health_subject: format!("plugin.{PLUGIN_ID}.health"),
         consumed_event_types: vec![],
         produced_event_types: vec![],
         config_schema: None,
@@ -405,8 +405,7 @@ Content to classify:
     };
 
     let url = format!(
-        "https://generativelanguage.googleapis.com/v1beta/models/{}:generateContent?key={}",
-        model, api_key
+        "https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent?key={api_key}"
     );
 
     let response = http
@@ -421,7 +420,7 @@ Content to classify:
     if !response.status().is_success() {
         let status = response.status();
         let body = response.text().await.unwrap_or_default();
-        anyhow::bail!("Gemini API returned {}: {}", status, body);
+        anyhow::bail!("Gemini API returned {status}: {body}");
     }
 
     let api_response: GeminiResponse = response

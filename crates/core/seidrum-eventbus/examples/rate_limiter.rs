@@ -106,7 +106,7 @@ async fn main() -> anyhow::Result<()> {
         });
         let bytes = serde_json::to_vec(&payload)?;
         bus.publish("channel.telegram.inbound", &bytes).await?;
-        println!("Published message {} from alice", i);
+        println!("Published message {i} from alice");
     }
 
     // Collect what got through (with a short timeout for remaining).
@@ -115,7 +115,7 @@ async fn main() -> anyhow::Result<()> {
         received += 1;
     }
 
-    println!("Alice sent 5 messages, {} got through (limit: 3)", received);
+    println!("Alice sent 5 messages, {received} got through (limit: 3)");
     assert_eq!(received, 3, "rate limiter should have dropped 2");
     println!("✓ Rate limiter works!");
 

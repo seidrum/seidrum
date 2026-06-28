@@ -146,7 +146,7 @@ async fn main() -> Result<()> {
                     error!(error = %e, "Failed to handle llm.provider.openai request");
                     let err_response = LlmResponse {
                         agent_id: "unknown".to_string(),
-                        content: Some(format!("LLM provider error: {}", e)),
+                        content: Some(format!("LLM provider error: {e}")),
                         tool_calls: None,
                         model_used: model,
                         provider: "openai".to_string(),
@@ -236,7 +236,7 @@ async fn handle_provider_request(
 
         let response = http
             .post("https://api.openai.com/v1/chat/completions")
-            .header("Authorization", format!("Bearer {}", api_key))
+            .header("Authorization", format!("Bearer {api_key}"))
             .header("Content-Type", "application/json")
             .json(&api_request)
             .send()
@@ -254,9 +254,9 @@ async fn handle_provider_request(
                     .unwrap_or("Unknown error")
                     .to_string(),
                 // Don't log raw body — it may contain sensitive headers or tokens
-                Err(_) => format!("Non-JSON error response (status {})", status),
+                Err(_) => format!("Non-JSON error response (status {status})"),
             };
-            anyhow::bail!("OpenAI API error ({}): {}", status, err_msg);
+            anyhow::bail!("OpenAI API error ({status}): {err_msg}");
         }
 
         let api_response: OpenAiResponse = serde_json::from_slice(&body_bytes)?;

@@ -42,6 +42,12 @@ struct ConnectionManagerInner {
     pending: DashMap<String, PendingRequest>,
 }
 
+impl Default for ConnectionManager {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl ConnectionManager {
     pub fn new() -> Self {
         Self {
@@ -59,7 +65,7 @@ impl ConnectionManager {
         sender: mpsc::UnboundedSender<ServerMessage>,
     ) -> Result<(), String> {
         if self.inner.connections.contains_key(&plugin_id) {
-            return Err(format!("Plugin '{}' is already connected", plugin_id));
+            return Err(format!("Plugin '{plugin_id}' is already connected"));
         }
 
         self.inner.connections.insert(

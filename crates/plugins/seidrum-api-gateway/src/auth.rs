@@ -256,9 +256,7 @@ mod tests {
             .generate_token("user1", "admin", vec!["scope_root".to_string()], None)
             .unwrap();
 
-        let result = handler
-            .authenticate(&format!("Bearer {}", token), None)
-            .await;
+        let result = handler.authenticate(&format!("Bearer {token}"), None).await;
         assert!(result.is_some());
         let auth = result.unwrap();
         assert_eq!(auth.subject, "user1");
@@ -280,9 +278,7 @@ mod tests {
             )
             .unwrap();
 
-        let result = handler
-            .authenticate(&format!("Bearer {}", token), None)
-            .await;
+        let result = handler.authenticate(&format!("Bearer {token}"), None).await;
         assert!(result.is_some());
         let auth = result.unwrap();
         assert_eq!(auth.subject, "alice");

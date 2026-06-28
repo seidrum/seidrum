@@ -82,7 +82,7 @@ impl EmbeddingService {
             .context("failed to read embedding response")?;
 
         if !status.is_success() {
-            anyhow::bail!("embedding API returned {}: {}", status, text_resp);
+            anyhow::bail!("embedding API returned {status}: {text_resp}");
         }
 
         let json: serde_json::Value =

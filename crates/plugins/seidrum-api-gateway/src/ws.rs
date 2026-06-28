@@ -53,7 +53,7 @@ pub async fn handle_ws(socket: WebSocket, nats: BusClient, connections: Connecti
             Ok(m) => m,
             Err(err) => {
                 let _ = tx.send(ServerMessage::Error {
-                    message: format!("Invalid message: {}", err),
+                    message: format!("Invalid message: {err}"),
                 });
                 continue;
             }
@@ -217,7 +217,7 @@ async fn handle_register(
 
     nats.publish_envelope("plugin.register", None, None, &register)
         .await
-        .map_err(|e| format!("Failed to publish plugin.register: {}", e))?;
+        .map_err(|e| format!("Failed to publish plugin.register: {e}"))?;
 
     info!(plugin_id = %plugin.id, "External plugin registered via gateway");
     Ok(())
@@ -227,11 +227,10 @@ async fn handle_register_capability(
     capability: &serde_json::Value,
     nats: &BusClient,
 ) -> Result<(), String> {
-    let bytes =
-        serde_json::to_vec(capability).map_err(|e| format!("Failed to serialize: {}", e))?;
+    let bytes = serde_json::to_vec(capability).map_err(|e| format!("Failed to serialize: {e}"))?;
     nats.publish_bytes("capability.register", bytes)
         .await
-        .map_err(|e| format!("Failed to publish capability.register: {}", e))?;
+        .map_err(|e| format!("Failed to publish capability.register: {e}"))?;
     Ok(())
 }
 
@@ -257,7 +256,7 @@ async fn spawn_capability_listener(
     nats: &BusClient,
     connections: &ConnectionManager,
 ) {
-    let subject = format!("capability.call.{}", plugin_id);
+    let subject = format!("capability.call.{plugin_id}");
     let nats_client = nats.clone();
     let conn_inner = connections.clone();
     let pid = plugin_id.to_string();
@@ -311,7 +310,7 @@ async fn spawn_capability_listener(
 }
 
 async fn spawn_health_listener(plugin_id: &str, nats: &BusClient, connections: &ConnectionManager) {
-    let subject = format!("plugin.{}.health", plugin_id);
+    let subject = format!("plugin.{plugin_id}.health");
     let nats_client = nats.clone();
     let conn_inner = connections.clone();
     let pid = plugin_id.to_string();

@@ -185,7 +185,7 @@ impl InfraManager {
 
     /// Check if a TCP port is in use by attempting to connect.
     pub fn is_port_in_use(port: u16) -> bool {
-        std::net::TcpStream::connect(format!("127.0.0.1:{}", port)).is_ok()
+        std::net::TcpStream::connect(format!("127.0.0.1:{port}")).is_ok()
     }
 
     // -----------------------------------------------------------------------
@@ -213,12 +213,12 @@ impl InfraManager {
                 .template("{spinner:.green} {msg}")
                 .expect("invalid template"),
         );
-        pb.set_message(format!("Downloading NATS v{}...", version));
+        pb.set_message(format!("Downloading NATS v{version}..."));
         pb.enable_steady_tick(Duration::from_millis(120));
 
         let response = reqwest::get(&url)
             .await
-            .with_context(|| format!("Failed to download NATS from {}", url))?;
+            .with_context(|| format!("Failed to download NATS from {url}"))?;
 
         if !response.status().is_success() {
             anyhow::bail!(
@@ -371,7 +371,7 @@ impl InfraManager {
         let status = std::process::Command::new(runtime)
             .args(["pull", &self.config.arango.image])
             .status()
-            .with_context(|| format!("Failed to run '{} pull'", runtime))?;
+            .with_context(|| format!("Failed to run '{runtime} pull'"))?;
 
         if !status.success() {
             anyhow::bail!("Failed to pull ArangoDB image");
@@ -418,7 +418,7 @@ impl InfraManager {
                 &self.config.arango.image,
             ])
             .output()
-            .with_context(|| format!("Failed to run '{} run'", runtime))?;
+            .with_context(|| format!("Failed to run '{runtime} run'"))?;
 
         if !output.status.success() {
             let stderr = String::from_utf8_lossy(&output.stderr);
@@ -532,13 +532,13 @@ fn platform_pair() -> Result<(&'static str, &'static str)> {
     let os = match std::env::consts::OS {
         "macos" => "darwin",
         "linux" => "linux",
-        other => anyhow::bail!("Unsupported OS for NATS download: {}", other),
+        other => anyhow::bail!("Unsupported OS for NATS download: {other}"),
     };
 
     let arch = match std::env::consts::ARCH {
         "x86_64" => "amd64",
         "aarch64" => "arm64",
-        other => anyhow::bail!("Unsupported architecture for NATS download: {}", other),
+        other => anyhow::bail!("Unsupported architecture for NATS download: {other}"),
     };
 
     Ok((os, arch))
@@ -572,9 +572,7 @@ async fn wait_for_http(url: &str, name: &str, max_retries: u32, interval: Durati
     }
 
     anyhow::bail!(
-        "{} did not become healthy after {} attempts. Check logs in ~/.seidrum/logs/",
-        name,
-        max_retries
+        "{name} did not become healthy after {max_retries} attempts. Check logs in ~/.seidrum/logs/"
     )
 }
 

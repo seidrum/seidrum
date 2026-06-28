@@ -29,7 +29,7 @@ async fn test_capability_register_and_search() {
                 "input": { "type": "string" }
             }
         }),
-        call_subject: format!("capability.call.{}", plugin_id),
+        call_subject: format!("capability.call.{plugin_id}"),
         kind: "tool".into(),
     };
 
@@ -50,8 +50,7 @@ async fn test_capability_register_and_search() {
         common::bus_request(&bus, "capability.search", &search_req).await;
     assert!(
         search_resp.tools.iter().any(|t| t.tool_id == tool_id),
-        "Tool {} should appear in search results",
-        tool_id
+        "Tool {tool_id} should appear in search results"
     );
 
     // Describe it

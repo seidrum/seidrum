@@ -89,7 +89,7 @@ impl JwtService {
         validation.algorithms = vec![Algorithm::HS256];
 
         let token_data = decode::<Claims>(token, &self.decoding_key, &validation)
-            .map_err(|e| anyhow::anyhow!("JWT validation failed: {}", e))?;
+            .map_err(|e| anyhow::anyhow!("JWT validation failed: {e}"))?;
 
         let claims = token_data.claims;
 

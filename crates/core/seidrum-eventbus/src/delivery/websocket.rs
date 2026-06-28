@@ -53,7 +53,7 @@ impl DeliveryChannel for WebSocketChannel {
         });
 
         let msg_bytes = serde_json::to_vec(&message)
-            .map_err(|e| DeliveryError::Failed(format!("JSON encode error: {}", e)))?;
+            .map_err(|e| DeliveryError::Failed(format!("JSON encode error: {e}")))?;
 
         self.tx
             .send(WebSocketMessage { payload: msg_bytes })

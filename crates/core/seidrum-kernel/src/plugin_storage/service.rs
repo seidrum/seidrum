@@ -25,7 +25,7 @@ impl PluginStorageService {
 
     /// Build the compound document key: `{plugin_id}:{namespace}:{key}`.
     fn doc_key(plugin_id: &str, namespace: &str, key: &str) -> String {
-        format!("{}:{}:{}", plugin_id, namespace, key)
+        format!("{plugin_id}:{namespace}:{key}")
     }
 
     async fn handle_get(&self, req: StorageGetRequest) -> StorageGetResponse {

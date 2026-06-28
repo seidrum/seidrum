@@ -99,7 +99,7 @@ fn resolve_google_api_key(cli_key: &Option<String>) -> Result<String> {
         .map(|h| h.join(".openclaw/agents/main/agent/auth-profiles.json"))
         .ok_or_else(|| anyhow::anyhow!("Could not determine home directory"))?;
     let content = std::fs::read_to_string(&auth_path)
-        .map_err(|e| anyhow::anyhow!("Failed to read OpenClaw auth-profiles.json: {}", e))?;
+        .map_err(|e| anyhow::anyhow!("Failed to read OpenClaw auth-profiles.json: {e}"))?;
     let profiles: serde_json::Value = serde_json::from_str(&content)?;
     let key = profiles
         .get("profiles")
@@ -198,17 +198,16 @@ async fn main() -> Result<()> {
             "Processing LLM response for task detection"
         );
 
-        if let Err(err) = detect_and_publish_tasks(
-            &client,
-            &http_client,
-            &api_key,
-            &args.detection_model,
-            &content,
-            &llm_response.agent_id,
-            &envelope.correlation_id,
-            &envelope.scope,
-        )
-        .await
+        let detection_context = DetectionContext {
+            api_key: &api_key,
+            model: &args.detection_model,
+            agent_id: &llm_response.agent_id,
+            correlation_id: &envelope.correlation_id,
+            scope: &envelope.scope,
+        };
+
+        if let Err(err) =
+            detect_and_publish_tasks(&client, &http_client, &detection_context, &content).await
         {
             error!(
                 agent_id = %llm_response.agent_id,
@@ -221,18 +220,22 @@ async fn main() -> Result<()> {
     Ok(())
 }
 
+struct DetectionContext<'a> {
+    api_key: &'a str,
+    model: &'a str,
+    agent_id: &'a str,
+    correlation_id: &'a Option<String>,
+    scope: &'a Option<String>,
+}
+
 async fn detect_and_publish_tasks(
     nats: &seidrum_common::bus_client::BusClient,
     http: &reqwest::Client,
-    api_key: &str,
-    model: &str,
+    context: &DetectionContext<'_>,
     llm_content: &str,
-    agent_id: &str,
-    correlation_id: &Option<String>,
-    scope: &Option<String>,
 ) -> Result<()> {
     // Step 1: Call LLM to detect tasks
-    let tasks = detect_tasks_via_llm(http, api_key, model, llm_content).await?;
+    let tasks = detect_tasks_via_llm(http, context.api_key, context.model, llm_content).await?;
 
     if tasks.is_empty() {
         info!("No tasks detected in LLM response");
@@ -246,7 +249,7 @@ async fn detect_and_publish_tasks(
         let task_scope = task
             .scope
             .clone()
-            .or_else(|| scope.clone())
+            .or_else(|| context.scope.clone())
             .unwrap_or_else(|| "scope_root".to_string());
 
         let upsert_payload = serde_json::json!({
@@ -254,7 +257,7 @@ async fn detect_and_publish_tasks(
             "description": task.description,
             "status": "open",
             "priority": task.priority,
-            "assigned_agent": agent_id,
+            "assigned_agent": context.agent_id,
             "due_date": task.due_date,
             "context": {
                 "scope": task_scope,
@@ -264,7 +267,7 @@ async fn detect_and_publish_tasks(
         let upsert_envelope = EventEnvelope::new(
             "brain.task.upsert",
             PLUGIN_ID,
-            correlation_id.clone(),
+            context.correlation_id.clone(),
             Some(task_scope.clone()),
             &upsert_payload,
         )?;
@@ -329,8 +332,7 @@ Text to analyze:
     };
 
     let url = format!(
-        "https://generativelanguage.googleapis.com/v1beta/models/{}:generateContent?key={}",
-        model, api_key
+        "https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent?key={api_key}"
     );
 
     let response = http
@@ -345,7 +347,7 @@ Text to analyze:
     if !response.status().is_success() {
         let status = response.status();
         let body = response.text().await.unwrap_or_default();
-        anyhow::bail!("Gemini API returned {}: {}", status, body);
+        anyhow::bail!("Gemini API returned {status}: {body}");
     }
 
     let api_response: GeminiResponse = response

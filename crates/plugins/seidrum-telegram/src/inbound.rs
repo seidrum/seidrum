@@ -53,21 +53,19 @@ pub async fn handle_message(
             let cmd_name = parts[0].trim_start_matches('/');
             let args = parts.get(1).copied().unwrap_or("");
             let uid = msg.from.as_ref().map(|u| u.id.0).unwrap_or(0);
-            return crate::commands::execute_command(
-                cmd_name,
-                args,
-                msg.chat.id.0,
-                msg.thread_id,
-                uid,
+            let context = crate::commands::CommandExecutionContext {
+                chat_id: msg.chat.id.0,
+                thread_id: msg.thread_id,
+                user_id: uid,
                 registry,
                 bot,
                 nats,
-            )
-            .await;
+            };
+            return crate::commands::execute_command(cmd_name, args, &context).await;
         }
 
         let display_text = if is_edited {
-            format!("[The user edited their previous message to:]\n{}", text)
+            format!("[The user edited their previous message to:]\n{text}")
         } else {
             text.to_string()
         };
@@ -93,8 +91,7 @@ pub async fn handle_message(
         {
             Ok(Some(transcript)) => {
                 format!(
-                    "[Voice message transcription \u{2014} some words may be mistranscribed]\n{}",
-                    transcript
+                    "[Voice message transcription \u{2014} some words may be mistranscribed]\n{transcript}"
                 )
             }
             Ok(None) => "[Voice message received but transcript was empty]".to_string(),
@@ -105,10 +102,7 @@ pub async fn handle_message(
         };
 
         let display_text = if is_edited {
-            format!(
-                "[The user edited their previous message to:]\n{}",
-                transcript
-            )
+            format!("[The user edited their previous message to:]\n{transcript}")
         } else {
             transcript
         };
@@ -135,7 +129,7 @@ pub async fn handle_message(
 
             let caption = msg.caption().unwrap_or("The user sent an image.");
             let display_text = if is_edited {
-                format!("[The user edited their previous message to:]\n{}", caption)
+                format!("[The user edited their previous message to:]\n{caption}")
             } else {
                 caption.to_string()
             };
@@ -171,10 +165,10 @@ pub async fn handle_message(
         let caption = msg
             .caption()
             .map(|c| c.to_string())
-            .unwrap_or_else(|| format!("Document: {}", file_name));
+            .unwrap_or_else(|| format!("Document: {file_name}"));
 
         let display_text = if is_edited {
-            format!("[The user edited their previous message to:]\n{}", caption)
+            format!("[The user edited their previous message to:]\n{caption}")
         } else {
             caption
         };

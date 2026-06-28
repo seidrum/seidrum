@@ -98,7 +98,7 @@ async fn main() -> Result<()> {
         description: "Run Claude Code CLI for agentic coding tasks".to_string(),
         consumes: vec!["capability.call.claude-code".to_string()],
         produces: vec![],
-        health_subject: format!("plugin.{}.health", PLUGIN_ID),
+        health_subject: format!("plugin.{PLUGIN_ID}.health"),
         consumed_event_types: vec![],
         produced_event_types: vec![],
         config_schema: Some(serde_json::json!({
@@ -370,7 +370,7 @@ async fn run_claude_code(
         Err(err) => {
             error!(%err, "Failed to spawn claude CLI");
             return ClaudeCodeResponse {
-                result: format!("Failed to start Claude Code CLI: {}", err),
+                result: format!("Failed to start Claude Code CLI: {err}"),
                 session_id: None,
                 model: None,
                 usage: None,
@@ -427,7 +427,7 @@ async fn run_claude_code(
             }
         }
         Ok(Err(err)) => ClaudeCodeResponse {
-            result: format!("Process error: {}", err),
+            result: format!("Process error: {err}"),
             session_id: None,
             model: None,
             usage: None,

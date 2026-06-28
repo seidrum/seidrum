@@ -320,7 +320,7 @@ impl WorkflowEngine {
             let sub = nats_client
                 .subscribe(subject.clone())
                 .await
-                .with_context(|| format!("failed to subscribe to trigger subject: {}", subject))?;
+                .with_context(|| format!("failed to subscribe to trigger subject: {subject}"))?;
             info!(subject = %subject, workflows = contexts.len(), "subscribed to trigger");
             trigger_subs.push((sub, contexts.clone()));
         }
@@ -748,8 +748,7 @@ mod tests {
         let warnings = engine.validate_pipeline(&agent);
         assert!(
             warnings.is_empty(),
-            "expected no warnings, got: {:?}",
-            warnings
+            "expected no warnings, got: {warnings:?}"
         );
     }
 
@@ -845,8 +844,7 @@ mod tests {
         let warnings = engine.validate_pipeline(&agent);
         assert!(
             warnings.is_empty(),
-            "expected no warnings, got: {:?}",
-            warnings
+            "expected no warnings, got: {warnings:?}"
         );
     }
 
@@ -941,8 +939,7 @@ mod tests {
         let warnings = engine.validate_pipeline(&agent);
         assert!(
             warnings.is_empty(),
-            "expected no warnings, got: {:?}",
-            warnings
+            "expected no warnings, got: {warnings:?}"
         );
     }
 }

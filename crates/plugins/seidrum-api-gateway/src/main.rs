@@ -108,7 +108,7 @@ async fn main() -> Result<()> {
         description: "HTTP/WebSocket gateway for external plugins".to_string(),
         consumes: vec![],
         produces: vec![],
-        health_subject: format!("plugin.{}.health", PLUGIN_ID),
+        health_subject: format!("plugin.{PLUGIN_ID}.health"),
         consumed_event_types: vec![],
         produced_event_types: vec![],
         config_schema: None,
@@ -421,7 +421,7 @@ async fn auth_rate_limit_middleware(
                     .method(&method)
                     .path(&path)
                     .status(429)
-                    .details(&format!("retry_after: {}s", retry_after_secs))
+                    .details(&format!("retry_after: {retry_after_secs}s"))
                     .build(),
             )
             .await;
@@ -1196,7 +1196,7 @@ async fn update_user_role_handler(
                 .log(
                     audit::AuditEntryBuilder::new("user.role_updated", &auth.subject, &user_id)
                         .method("PUT")
-                        .path(&format!("/api/v1/users/{}/role", user_id))
+                        .path(&format!("/api/v1/users/{user_id}/role"))
                         .status(200)
                         .user_id(auth.user_id)
                         .build(),
@@ -1258,7 +1258,7 @@ async fn delete_user_handler(
                 .log(
                     audit::AuditEntryBuilder::new("user.deleted", &auth.subject, &user_id)
                         .method("DELETE")
-                        .path(&format!("/api/v1/users/{}", user_id))
+                        .path(&format!("/api/v1/users/{user_id}"))
                         .status(200)
                         .user_id(auth.user_id)
                         .build(),
@@ -1515,7 +1515,7 @@ async fn revoke_apikey_handler(
                 .log(
                     audit::AuditEntryBuilder::new("apikey.revoked", &auth.subject, &key_id)
                         .method("DELETE")
-                        .path(&format!("/api/v1/apikeys/{}", key_id))
+                        .path(&format!("/api/v1/apikeys/{key_id}"))
                         .status(200)
                         .user_id(Some(user_id))
                         .build(),

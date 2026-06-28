@@ -63,17 +63,6 @@ pub struct EnvRequirement {
 // ============================================================================
 
 #[derive(Debug, Serialize)]
-pub struct PresetListItem {
-    pub id: String,
-    pub name: String,
-    pub description: String,
-    pub icon: String,
-    pub required_plugins: usize,
-    pub recommended_plugins: usize,
-    pub required_agents: usize,
-}
-
-#[derive(Debug, Serialize)]
 pub struct ApplyPresetResponse {
     pub enabled_plugins: Vec<String>,
     pub enabled_agents: Vec<String>,
@@ -90,68 +79,6 @@ pub struct ApplyPresetRequest {
 // Handlers
 // ============================================================================
 
-/// List all presets from config/presets/ directory.
-pub async fn list_presets(
-    State(state): State<ManagementState>,
-) -> Result<Json<Vec<PresetListItem>>, (StatusCode, String)> {
-    let presets_dir = &state.presets_dir;
-
-    // Create directory if it doesn't exist
-    if !presets_dir.exists() {
-        std::fs::create_dir_all(presets_dir)
-            .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
-    }
-
-    let entries = std::fs::read_dir(presets_dir)
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
-
-    let mut presets = Vec::new();
-
-    for entry in entries {
-        let entry = match entry {
-            Ok(e) => e,
-            Err(e) => {
-                error!("Error reading presets directory entry: {}", e);
-                continue;
-            }
-        };
-
-        let path = entry.path();
-        if !path.is_file() {
-            continue;
-        }
-
-        if let Some(ext) = path.extension() {
-            if ext != "yaml" && ext != "yml" {
-                continue;
-            }
-        } else {
-            continue;
-        }
-
-        match load_preset(&path) {
-            Ok(preset_file) => {
-                let preset = &preset_file.preset;
-                presets.push(PresetListItem {
-                    id: preset.id.clone(),
-                    name: preset.name.clone(),
-                    description: preset.description.clone(),
-                    icon: preset.icon.clone(),
-                    required_plugins: preset.plugins.required.len(),
-                    recommended_plugins: preset.plugins.recommended.len(),
-                    required_agents: preset.agents.required.len(),
-                });
-            }
-            Err(e) => {
-                error!("Error loading preset from {:?}: {}", path, e);
-            }
-        }
-    }
-
-    presets.sort_by(|a, b| a.id.cmp(&b.id));
-    Ok(Json(presets))
-}
-
 /// Apply a preset by id.
 pub async fn apply_preset(
     State(state): State<ManagementState>,
@@ -160,7 +87,7 @@ pub async fn apply_preset(
 ) -> Result<Json<ApplyPresetResponse>, (StatusCode, String)> {
     let preset_path = find_preset_file(&state.presets_dir, &id)
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
-        .ok_or((StatusCode::NOT_FOUND, format!("Preset '{}' not found", id)))?;
+        .ok_or((StatusCode::NOT_FOUND, format!("Preset '{id}' not found")))?;
 
     let preset_file = load_preset(&preset_path)
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
@@ -322,7 +249,7 @@ pub fn find_preset_file(presets_dir: &PathBuf, id: &str) -> anyhow::Result<Optio
 
 async fn set_agent_enabled(state: &ManagementState, id: &str, enabled: bool) -> anyhow::Result<()> {
     let agent_path = super::agents::find_agent_file(&state.agents_dir, id)?
-        .ok_or_else(|| anyhow::anyhow!("Agent '{}' not found", id))?;
+        .ok_or_else(|| anyhow::anyhow!("Agent '{id}' not found"))?;
 
     let mut agent = super::agents::load_agent_definition(&agent_path)?;
     agent.enabled = enabled;

@@ -43,7 +43,7 @@ pub fn list_packages(paths: &SeidrumPaths) -> Result<()> {
         .collect();
 
     let table = Table::new(&rows);
-    println!("{}", table);
+    println!("{table}");
 
     Ok(())
 }
@@ -69,7 +69,7 @@ pub fn show_package_info(name: &str, paths: &SeidrumPaths) -> Result<()> {
             println!("  Installed At: {}", pkg.installed_at);
         }
         None => {
-            println!("Package '{}' not found.", name);
+            println!("Package '{name}' not found.");
         }
     }
 

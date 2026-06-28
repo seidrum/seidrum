@@ -53,7 +53,7 @@ impl DeliveryChannel for FlakyChannel {
     ) -> DeliveryResult<DeliveryReceipt> {
         let call = self.call_count.fetch_add(1, Ordering::SeqCst) + 1;
         if call <= self.fail_attempts {
-            Err(DeliveryError::Failed(format!("flaky failure #{}", call)))
+            Err(DeliveryError::Failed(format!("flaky failure #{call}")))
         } else {
             Ok(DeliveryReceipt {
                 delivered_at: 0,
@@ -423,8 +423,7 @@ async fn test_with_retry_poll_interval_order_independent() {
 
     assert!(
         calls >= 3,
-        "expected at least 3 retry calls with 30ms poll interval, got {}",
-        calls
+        "expected at least 3 retry calls with 30ms poll interval, got {calls}"
     );
 }
 

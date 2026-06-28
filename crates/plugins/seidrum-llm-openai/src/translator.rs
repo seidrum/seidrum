@@ -72,16 +72,16 @@ pub fn unified_to_openai_tools(tools: &[ToolSchema]) -> Vec<OpenAiTool> {
 pub fn openai_tool_calls_to_unified(tool_calls: &[OpenAiToolCall]) -> Vec<UnifiedToolCall> {
     tool_calls
         .iter()
-        .filter_map(|tc| {
+        .map(|tc| {
             // Parse arguments from JSON string
             let args = serde_json::from_str(&tc.function.arguments)
                 .unwrap_or_else(|_| serde_json::json!({}));
 
-            Some(UnifiedToolCall {
+            UnifiedToolCall {
                 id: tc.id.clone(),
                 name: tc.function.name.clone(),
                 arguments: args,
-            })
+            }
         })
         .collect()
 }

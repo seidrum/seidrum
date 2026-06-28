@@ -162,7 +162,7 @@ async fn poll_imap(cli: &Cli, nats: &seidrum_common::bus_client::BusClient) -> R
         let combined_text = if subject.is_empty() {
             text_body.clone()
         } else {
-            format!("{}\n\n{}", subject, text_body)
+            format!("{subject}\n\n{text_body}")
         };
 
         let mut metadata = HashMap::new();
@@ -233,44 +233,49 @@ fn send_email(cli: &Cli, outbound: &ChannelOutbound) -> Result<()> {
     Ok(())
 }
 
+struct SmtpSettings<'a> {
+    host: &'a str,
+    port: u16,
+    user: &'a str,
+    password: &'a str,
+    from: &'a str,
+}
+
+struct EmailToolMessage<'a> {
+    to: &'a str,
+    subject: &'a str,
+    body: &'a str,
+    in_reply_to: Option<&'a str>,
+}
+
 /// Send an email via SMTP, used by the tool.call.email handler.
-fn send_email_tool_impl(
-    smtp_host: &str,
-    smtp_port: u16,
-    smtp_user: &str,
-    smtp_password: &str,
-    smtp_from: &str,
-    to: &str,
-    subject: &str,
-    body: &str,
-    in_reply_to: Option<&str>,
-) -> Result<()> {
+fn send_email_tool_impl(settings: &SmtpSettings<'_>, message: &EmailToolMessage<'_>) -> Result<()> {
     use lettre::message::header::ContentType;
     use lettre::transport::smtp::authentication::Credentials;
     use lettre::{Message, SmtpTransport, Transport};
 
     let mut builder = Message::builder()
-        .from(smtp_from.parse().context("Invalid from address")?)
-        .to(to.parse().context("Invalid to address")?)
-        .subject(subject)
+        .from(settings.from.parse().context("Invalid from address")?)
+        .to(message.to.parse().context("Invalid to address")?)
+        .subject(message.subject)
         .header(ContentType::TEXT_PLAIN);
 
-    if let Some(reply_id) = in_reply_to {
+    if let Some(reply_id) = message.in_reply_to {
         builder = builder.in_reply_to(reply_id.to_string());
     }
 
-    let email = builder.body(body.to_string())?;
+    let email = builder.body(message.body.to_string())?;
 
-    let creds = Credentials::new(smtp_user.to_string(), smtp_password.to_string());
+    let creds = Credentials::new(settings.user.to_string(), settings.password.to_string());
 
-    let mailer = SmtpTransport::starttls_relay(smtp_host)?
-        .port(smtp_port)
+    let mailer = SmtpTransport::starttls_relay(settings.host)?
+        .port(settings.port)
         .credentials(creds)
         .build();
 
     mailer.send(&email)?;
 
-    info!(to = %to, subject = %subject, "Sent email via SMTP (tool call)");
+    info!(to = %message.to, subject = %message.subject, "Sent email via SMTP (tool call)");
     Ok(())
 }
 
@@ -500,17 +505,21 @@ async fn main() -> Result<()> {
 
                     info!(to = %to, subject = %subject, "Sending email via tool");
 
-                    match send_email_tool_impl(
-                        &tool_smtp_host,
-                        tool_smtp_port,
-                        &tool_smtp_user,
-                        &tool_smtp_password,
-                        &tool_smtp_from,
-                        &to,
-                        &subject,
-                        &body,
-                        in_reply_to.as_deref(),
-                    ) {
+                    let smtp_settings = SmtpSettings {
+                        host: &tool_smtp_host,
+                        port: tool_smtp_port,
+                        user: &tool_smtp_user,
+                        password: &tool_smtp_password,
+                        from: &tool_smtp_from,
+                    };
+                    let email_message = EmailToolMessage {
+                        to: &to,
+                        subject: &subject,
+                        body: &body,
+                        in_reply_to: in_reply_to.as_deref(),
+                    };
+
+                    match send_email_tool_impl(&smtp_settings, &email_message) {
                         Ok(()) => ToolCallResponse {
                             tool_id: tool_request.tool_id,
                             result: serde_json::json!({"status": "sent", "to": to, "subject": subject}),

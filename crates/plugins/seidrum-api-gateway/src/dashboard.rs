@@ -155,7 +155,7 @@ pub async fn plugin_health(
     State(state): State<AppState>,
     Path(plugin_id): Path<String>,
 ) -> impl IntoResponse {
-    let health_subject = format!("plugin.{}.health", plugin_id);
+    let health_subject = format!("plugin.{plugin_id}.health");
     let req = PluginHealthRequest {};
 
     match tokio::time::timeout(
@@ -315,7 +315,7 @@ pub async fn update_plugin_config(
         timestamp: Utc::now(),
     };
 
-    let subject = format!("plugin.{}.config.update", plugin_id);
+    let subject = format!("plugin.{plugin_id}.config.update");
     if let Ok(bytes) = serde_json::to_vec(&update) {
         let _ = state.nats.publish_bytes(&subject, bytes).await;
     }

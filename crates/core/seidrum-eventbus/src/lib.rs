@@ -242,7 +242,7 @@ pub mod test_utils {
         let deadline = tokio::time::Instant::now() + Duration::from_secs(2);
         loop {
             if tokio::time::Instant::now() >= deadline {
-                panic!("TCP server at {} did not become ready in time", addr);
+                panic!("TCP server at {addr} did not become ready in time");
             }
             match tokio::time::timeout(
                 Duration::from_millis(200),
@@ -270,10 +270,10 @@ pub mod test_utils {
         let deadline = tokio::time::Instant::now() + Duration::from_secs(2);
         loop {
             if tokio::time::Instant::now() >= deadline {
-                panic!("HTTP server at {} did not become ready in time", addr);
+                panic!("HTTP server at {addr} did not become ready in time");
             }
             if let Ok(resp) = client
-                .get(format!("http://{}/health", addr))
+                .get(format!("http://{addr}/health"))
                 .timeout(Duration::from_millis(200))
                 .send()
                 .await
@@ -292,11 +292,11 @@ pub mod test_utils {
     /// throwaway connection — the only signal that the listener is up.
     /// Use after starting a bus configured with `with_websocket(...)`.
     pub async fn wait_for_ws_ready(addr: SocketAddr) {
-        let url = format!("ws://{}", addr);
+        let url = format!("ws://{addr}");
         let deadline = tokio::time::Instant::now() + Duration::from_secs(2);
         loop {
             if tokio::time::Instant::now() >= deadline {
-                panic!("WebSocket server at {} did not become ready in time", addr);
+                panic!("WebSocket server at {addr} did not become ready in time");
             }
             match tokio::time::timeout(
                 Duration::from_millis(200),

@@ -350,7 +350,7 @@ impl WsClient {
         if let Err(e) = self.manager_tx.send(ManagerCommand::Send(frame)).await {
             // Clean up the pending entry so it doesn't leak.
             self.pending.lock().await.remove(cid);
-            return Err(anyhow::anyhow!("WsClient connection manager closed: {}", e));
+            return Err(anyhow::anyhow!("WsClient connection manager closed: {e}"));
         }
 
         let reply = rx
@@ -358,7 +358,7 @@ impl WsClient {
             .map_err(|_| anyhow::anyhow!("WsClient pending reply dropped (connection lost)"))?;
 
         if let PendingReply::Error(msg) = &reply {
-            return Err(anyhow::anyhow!("bus error: {}", msg));
+            return Err(anyhow::anyhow!("bus error: {msg}"));
         }
 
         Ok(reply)

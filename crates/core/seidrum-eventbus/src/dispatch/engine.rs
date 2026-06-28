@@ -216,8 +216,7 @@ impl DispatchEngine {
         }
         if subject.len() > MAX_SUBJECT_LENGTH {
             return Err(EventBusError::InvalidSubject(format!(
-                "subject exceeds maximum length of {} bytes",
-                MAX_SUBJECT_LENGTH
+                "subject exceeds maximum length of {MAX_SUBJECT_LENGTH} bytes"
             )));
         }
         if subject.contains('\0') {
@@ -232,8 +231,7 @@ impl DispatchEngine {
     fn validate_payload(payload: &[u8]) -> crate::Result<()> {
         if payload.len() > MAX_PAYLOAD_SIZE {
             return Err(EventBusError::PayloadTooLarge(format!(
-                "payload exceeds maximum size of {} bytes",
-                MAX_PAYLOAD_SIZE
+                "payload exceeds maximum size of {MAX_PAYLOAD_SIZE} bytes"
             )));
         }
         Ok(())
@@ -292,10 +290,9 @@ impl DispatchEngine {
         if let Ok(intercepting) = INTERCEPTING_SUBJECT.try_with(|s| s.clone()) {
             if intercepting == subject {
                 return Err(EventBusError::Internal(format!(
-                    "re-entrant publish from sync interceptor on subject '{}' \
+                    "re-entrant publish from sync interceptor on subject '{subject}' \
                      would loop; sync interceptors must not publish to \
-                     subjects they intercept",
-                    subject
+                     subjects they intercept"
                 )));
             }
         }
@@ -333,11 +330,10 @@ impl DispatchEngine {
             .get(seq)
             .await
             .map_err(EventBusError::Storage)?
-            .ok_or_else(|| EventBusError::Internal(format!("event {} not found", seq)))?;
+            .ok_or_else(|| EventBusError::Internal(format!("event {seq} not found")))?;
         if event.status != EventStatus::DeadLettered {
             return Err(EventBusError::Internal(format!(
-                "event {} is not dead-lettered",
-                seq
+                "event {seq} is not dead-lettered"
             )));
         }
 
@@ -631,7 +627,7 @@ impl DispatchEngine {
                                 seq,
                                 entry_id,
                                 DeliveryStatus::Failed,
-                                Some(format!("sync channel delivery failed: {}", e)),
+                                Some(format!("sync channel delivery failed: {e}")),
                             )
                             .await;
                         }
@@ -822,8 +818,7 @@ impl DispatchEngine {
             .count();
         if existing_for_pattern >= MAX_INTERCEPTORS_PER_SUBJECT {
             return Err(EventBusError::Internal(format!(
-                "too many interceptors registered for pattern '{}' (max: {})",
-                subject_pattern, MAX_INTERCEPTORS_PER_SUBJECT
+                "too many interceptors registered for pattern '{subject_pattern}' (max: {MAX_INTERCEPTORS_PER_SUBJECT})"
             )));
         }
 
@@ -893,8 +888,7 @@ impl DispatchEngine {
             Some(e) => e,
             None => {
                 return Err(RetryOutcome::Permanent(format!(
-                    "subscriber {} no longer exists",
-                    subscriber_id
+                    "subscriber {subscriber_id} no longer exists"
                 )));
             }
         };
@@ -909,7 +903,7 @@ impl DispatchEngine {
                 {
                     Ok(_) => Ok(()),
                     Err(DeliveryError::Permanent(msg)) => Err(RetryOutcome::Permanent(msg)),
-                    Err(e) => Err(RetryOutcome::Transient(format!("{}", e))),
+                    Err(e) => Err(RetryOutcome::Transient(format!("{e}"))),
                 }
             }
             ChannelConfig::Custom { channel_type, .. } => {
@@ -919,15 +913,14 @@ impl DispatchEngine {
                     Some(c) => c,
                     None => {
                         return Err(RetryOutcome::Permanent(format!(
-                            "no channel registered for type '{}'",
-                            channel_type
+                            "no channel registered for type '{channel_type}'"
                         )));
                     }
                 };
                 match channel.deliver(payload, subject, &entry.channel).await {
                     Ok(_) => Ok(()),
                     Err(DeliveryError::Permanent(msg)) => Err(RetryOutcome::Permanent(msg)),
-                    Err(e) => Err(RetryOutcome::Transient(format!("{}", e))),
+                    Err(e) => Err(RetryOutcome::Transient(format!("{e}"))),
                 }
             }
             ChannelConfig::InProcess => {
@@ -947,7 +940,7 @@ impl DispatchEngine {
                     seq,
                 };
                 tx.try_send(event)
-                    .map_err(|e| RetryOutcome::Transient(format!("{}", e)))
+                    .map_err(|e| RetryOutcome::Transient(format!("{e}")))
             }
             ChannelConfig::WebSocket => {
                 // WebSocket connections are per-session and cannot survive

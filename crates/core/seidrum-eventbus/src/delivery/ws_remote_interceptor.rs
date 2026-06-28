@@ -434,7 +434,7 @@ mod tests {
             let mut guard = pending.lock().await;
             for i in 0..MAX_PENDING_INTERCEPTS {
                 let (tx, _rx) = oneshot::channel::<WsInterceptReply>();
-                guard.insert(format!("dummy-{}", i), tx);
+                guard.insert(format!("dummy-{i}"), tx);
             }
         }
 

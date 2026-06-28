@@ -7,7 +7,7 @@ use tracing::info;
 
 /// Uninstall a package
 pub fn uninstall(name: &str, yes: bool, paths: &SeidrumPaths) -> Result<()> {
-    println!("Looking up installed package: {}", name);
+    println!("Looking up installed package: {name}");
 
     // Load installed packages
     let installed_yaml = paths.installed_yaml();
@@ -21,7 +21,7 @@ pub fn uninstall(name: &str, yes: bool, paths: &SeidrumPaths) -> Result<()> {
     let pkg = registry
         .find(name)
         .cloned()
-        .ok_or_else(|| anyhow!("Package {} not installed", name))?;
+        .ok_or_else(|| anyhow!("Package {name} not installed"))?;
 
     println!("\nPackage Details:");
     println!("  Name:        {}", pkg.name);
@@ -42,7 +42,7 @@ pub fn uninstall(name: &str, yes: bool, paths: &SeidrumPaths) -> Result<()> {
         }
     }
 
-    println!("\nUninstalling {}...", name);
+    println!("\nUninstalling {name}...");
 
     // Remove binary if it's a plugin
     let bin_path = paths.managed_bin_dir().join(name);
@@ -57,7 +57,7 @@ pub fn uninstall(name: &str, yes: bool, paths: &SeidrumPaths) -> Result<()> {
     // Remove agent files if present
     let agents_dir = paths.config_dir.join("agents");
     if agents_dir.exists() {
-        let agent_file = agents_dir.join(format!("{}.yaml", name));
+        let agent_file = agents_dir.join(format!("{name}.yaml"));
         if agent_file.exists() {
             fs::remove_file(&agent_file)?;
             println!("  Removed agent config: {}", agent_file.display());
@@ -70,7 +70,7 @@ pub fn uninstall(name: &str, yes: bool, paths: &SeidrumPaths) -> Result<()> {
     fs::write(&installed_yaml, yaml_content)?;
 
     info!("Uninstalled package {}", name);
-    println!("\nSuccessfully uninstalled {}", name);
+    println!("\nSuccessfully uninstalled {name}");
 
     Ok(())
 }
@@ -87,7 +87,7 @@ fn remove_plugin_from_config(plugin_name: &str, paths: &SeidrumPaths) -> Result<
     if let Some(root) = doc.as_mapping_mut() {
         let plugins_key = serde_yaml::Value::String("plugins".to_string());
         if let Some(plugins_map) = root.get_mut(&plugins_key).and_then(|v| v.as_mapping_mut()) {
-            plugins_map.remove(&serde_yaml::Value::String(plugin_name.to_string()));
+            plugins_map.remove(serde_yaml::Value::String(plugin_name.to_string()));
         }
     }
 

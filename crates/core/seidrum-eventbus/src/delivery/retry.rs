@@ -267,7 +267,7 @@ impl RetryTask {
     async fn dead_letter(&self, delivery: &RetryableDelivery, reason: &str) {
         // Use a single canonical reason format so log/error parsing is
         // consistent across all dead-letter sources.
-        let formatted = format!("dead-lettered: {}", reason);
+        let formatted = format!("dead-lettered: {reason}");
         if let Err(e) = self
             .store
             .record_delivery(

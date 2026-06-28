@@ -117,7 +117,7 @@ pub async fn call_capability(
     Path(capability_id): Path<String>,
     Json(body): Json<CapabilityCallBody>,
 ) -> impl IntoResponse {
-    let call_subject = format!("capability.call.{}", capability_id);
+    let call_subject = format!("capability.call.{capability_id}");
 
     let req = ToolCallRequest {
         tool_id: capability_id.clone(),

@@ -33,7 +33,7 @@ pub fn publish(registry_name: &str, paths: &SeidrumPaths) -> Result<()> {
         let content = fs::read_to_string(&registries_yaml)?;
         serde_yaml::from_str(&content).map_err(|e| {
             tracing::warn!("Failed to parse registries config: {}", e);
-            anyhow::anyhow!("Failed to parse registries config: {}", e)
+            anyhow::anyhow!("Failed to parse registries config: {e}")
         })?
     } else {
         RegistriesConfig::default()
@@ -41,7 +41,7 @@ pub fn publish(registry_name: &str, paths: &SeidrumPaths) -> Result<()> {
 
     let registry = registries_config
         .find(registry_name)
-        .ok_or_else(|| anyhow::anyhow!("Registry '{}' not configured", registry_name))?;
+        .ok_or_else(|| anyhow::anyhow!("Registry '{registry_name}' not configured"))?;
 
     println!("  Registry: {} ({})", registry.name, registry.url);
 

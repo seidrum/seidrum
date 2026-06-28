@@ -102,7 +102,7 @@ fn resolve_google_api_key(cli_key: &Option<String>) -> Result<String> {
         .map(|h| h.join(".openclaw/agents/main/agent/auth-profiles.json"))
         .ok_or_else(|| anyhow::anyhow!("Could not determine home directory"))?;
     let content = std::fs::read_to_string(&auth_path)
-        .map_err(|e| anyhow::anyhow!("Failed to read OpenClaw auth-profiles.json: {}", e))?;
+        .map_err(|e| anyhow::anyhow!("Failed to read OpenClaw auth-profiles.json: {e}"))?;
     let profiles: serde_json::Value = serde_json::from_str(&content)?;
     let key = profiles
         .get("profiles")
@@ -205,15 +205,19 @@ async fn main() -> Result<()> {
             }
         };
 
+        let extraction_context = ExtractionContext {
+            api_key: &api_key,
+            model: &args.extraction_model,
+            correlation_id: &envelope.correlation_id,
+            scope: &envelope.scope,
+        };
+
         if let Err(err) = process_entity(
             &client,
             &http_client,
-            &api_key,
-            &args.extraction_model,
+            &extraction_context,
             &entity_upserted,
             &source_content,
-            &envelope.correlation_id,
-            &envelope.scope,
         )
         .await
         {
@@ -228,15 +232,19 @@ async fn main() -> Result<()> {
     Ok(())
 }
 
+struct ExtractionContext<'a> {
+    api_key: &'a str,
+    model: &'a str,
+    correlation_id: &'a Option<String>,
+    scope: &'a Option<String>,
+}
+
 async fn process_entity(
     nats: &seidrum_common::bus_client::BusClient,
     http: &reqwest::Client,
-    api_key: &str,
-    model: &str,
+    context: &ExtractionContext<'_>,
     entity: &EntityUpserted,
     source_content_key: &str,
-    correlation_id: &Option<String>,
-    scope: &Option<String>,
 ) -> Result<()> {
     // Step 1: Fetch the content text from the kernel via brain.query.request
     let query_req = BrainQueryRequest {
@@ -262,8 +270,8 @@ async fn process_entity(
     let query_envelope = EventEnvelope::new(
         "brain.query.request",
         PLUGIN_ID,
-        correlation_id.clone(),
-        scope.clone(),
+        context.correlation_id.clone(),
+        context.scope.clone(),
         &query_req,
     )?;
 
@@ -299,7 +307,8 @@ async fn process_entity(
     }
 
     // Step 2: Call LLM for fact extraction
-    let facts = extract_facts_via_llm(http, api_key, model, &raw_text, entity).await?;
+    let facts =
+        extract_facts_via_llm(http, context.api_key, context.model, &raw_text, entity).await?;
 
     info!(
         entity_key = %entity.entity_key,
@@ -322,8 +331,8 @@ async fn process_entity(
         let upsert_envelope = EventEnvelope::new(
             "brain.fact.upsert",
             PLUGIN_ID,
-            correlation_id.clone(),
-            scope.clone(),
+            context.correlation_id.clone(),
+            context.scope.clone(),
             &upsert,
         )?;
 
@@ -391,8 +400,7 @@ Text to analyze:
     };
 
     let url = format!(
-        "https://generativelanguage.googleapis.com/v1beta/models/{}:generateContent?key={}",
-        model, api_key
+        "https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent?key={api_key}"
     );
 
     let response = http
@@ -407,7 +415,7 @@ Text to analyze:
     if !response.status().is_success() {
         let status = response.status();
         let body = response.text().await.unwrap_or_default();
-        anyhow::bail!("Gemini API returned {}: {}", status, body);
+        anyhow::bail!("Gemini API returned {status}: {body}");
     }
 
     let api_response: GeminiResponse = response

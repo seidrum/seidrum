@@ -448,15 +448,13 @@ impl DeliveryChannel for WebhookChannel {
                 );
                 self.record_failure(&url);
                 return Err(DeliveryError::Permanent(format!(
-                    "URL no longer passes SSRF policy: {}",
-                    e
+                    "URL no longer passes SSRF policy: {e}"
                 )));
             }
             Err(join_err) => {
                 self.record_failure(&url);
                 return Err(DeliveryError::Failed(format!(
-                    "validation task panicked: {}",
-                    join_err
+                    "validation task panicked: {join_err}"
                 )));
             }
         };
@@ -477,8 +475,7 @@ impl DeliveryChannel for WebhookChannel {
             Err(e) => {
                 self.record_failure(&url);
                 return Err(DeliveryError::Failed(format!(
-                    "failed to build pinned client: {}",
-                    e
+                    "failed to build pinned client: {e}"
                 )));
             }
         };
@@ -501,7 +498,7 @@ impl DeliveryChannel for WebhookChannel {
         // Send the request
         let response = req.json(&body).send().await.map_err(|e| {
             self.record_failure(&url);
-            DeliveryError::Failed(format!("HTTP request failed: {}", e))
+            DeliveryError::Failed(format!("HTTP request failed: {e}"))
         })?;
 
         // Classify status code: 4xx is permanent (auth errors, not-found,
@@ -682,7 +679,7 @@ mod tests {
             },
         );
         let config = ChannelConfig::Webhook {
-            url: format!("http://{}/hook", addr),
+            url: format!("http://{addr}/hook"),
             headers: HashMap::new(),
         };
 
@@ -730,7 +727,7 @@ mod tests {
         match r {
             Ok(_) => {}
             Err(WebhookUrlError::DnsError(_, _)) => {}
-            Err(e) => panic!("unexpected error for example.com: {}", e),
+            Err(e) => panic!("unexpected error for example.com: {e}"),
         }
     }
 
@@ -763,8 +760,7 @@ mod tests {
         let r = validate_webhook_url("https://169.254.169.254/latest/meta-data/");
         assert!(
             matches!(r, Err(WebhookUrlError::PrivateAddress(_, _))),
-            "AWS metadata IP must be rejected, got {:?}",
-            r
+            "AWS metadata IP must be rejected, got {r:?}"
         );
     }
 
@@ -778,9 +774,7 @@ mod tests {
             let r = validate_webhook_url(url);
             assert!(
                 matches!(r, Err(WebhookUrlError::PrivateAddress(_, _))),
-                "{} must be rejected, got {:?}",
-                url,
-                r
+                "{url} must be rejected, got {r:?}"
             );
         }
     }
@@ -820,8 +814,7 @@ mod tests {
             matches!(r, Err(WebhookUrlError::PrivateAddress(_, _)))
                 || matches!(r, Err(WebhookUrlError::DnsError(_, _)))
                 || matches!(r, Err(WebhookUrlError::Parse(_))),
-            "127.1 short-form must NOT be accepted, got {:?}",
-            r
+            "127.1 short-form must NOT be accepted, got {r:?}"
         );
     }
 
@@ -833,8 +826,7 @@ mod tests {
             matches!(r, Err(WebhookUrlError::PrivateAddress(_, _)))
                 || matches!(r, Err(WebhookUrlError::DnsError(_, _)))
                 || matches!(r, Err(WebhookUrlError::Parse(_))),
-            "decimal-encoded loopback must NOT be accepted, got {:?}",
-            r
+            "decimal-encoded loopback must NOT be accepted, got {r:?}"
         );
     }
 
@@ -863,14 +855,13 @@ mod tests {
     fn test_ssrf_permissive_accepts_loopback_but_rejects_unspecified() {
         let r =
             validate_webhook_url_with_policy("http://127.0.0.1/hook", WebhookUrlPolicy::Permissive);
-        assert!(r.is_ok(), "Permissive should accept loopback, got {:?}", r);
+        assert!(r.is_ok(), "Permissive should accept loopback, got {r:?}");
 
         let r =
             validate_webhook_url_with_policy("http://0.0.0.0/hook", WebhookUrlPolicy::Permissive);
         assert!(
             matches!(r, Err(WebhookUrlError::PrivateAddress(_, _))),
-            "Permissive must still reject 0.0.0.0, got {:?}",
-            r
+            "Permissive must still reject 0.0.0.0, got {r:?}"
         );
     }
 

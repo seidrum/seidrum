@@ -226,8 +226,7 @@ impl EventStore for InMemoryEventStore {
             .ok_or(super::StorageError::NotFound)?;
         if event.status != EventStatus::DeadLettered {
             return Err(super::StorageError::OperationFailed(format!(
-                "event {} is not dead-lettered",
-                seq
+                "event {seq} is not dead-lettered"
             )));
         }
         event.status = EventStatus::Pending;
@@ -243,8 +242,7 @@ impl EventStore for InMemoryEventStore {
             .ok_or(super::StorageError::NotFound)?;
         if events[idx].status != EventStatus::DeadLettered {
             return Err(super::StorageError::OperationFailed(format!(
-                "event {} is not dead-lettered",
-                seq
+                "event {seq} is not dead-lettered"
             )));
         }
         events.remove(idx);
@@ -300,7 +298,7 @@ mod tests {
             let handle = tokio::spawn(async move {
                 let event = StoredEvent {
                     seq: 0,
-                    subject: format!("test.{}", i),
+                    subject: format!("test.{i}"),
                     payload: vec![i as u8],
                     stored_at: 1000 + i as u64,
                     status: EventStatus::Pending,

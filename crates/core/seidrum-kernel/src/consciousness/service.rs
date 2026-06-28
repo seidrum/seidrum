@@ -142,7 +142,7 @@ impl ConsciousnessService {
                             origin: None,
                         };
 
-                        let subject = format!("agent.{}.consciousness", agent_id);
+                        let subject = format!("agent.{agent_id}.consciousness");
                         if let Ok(bytes) = serde_json::to_vec(&event) {
                             let _ = nats.publish_bytes(subject, bytes).await;
                         }
@@ -167,7 +167,7 @@ impl ConsciousnessService {
             let agent_id_sub = agent_id.clone();
             let tx_clone = tx.clone();
             tokio::spawn(async move {
-                let subject = format!("agent.{}.consciousness", agent_id_sub);
+                let subject = format!("agent.{agent_id_sub}.consciousness");
                 let mut sub = match nats_sub.subscribe(subject.clone()).await {
                     Ok(s) => s,
                     Err(e) => {
@@ -761,7 +761,7 @@ async fn process_consciousness_event(
 
     // C1: Use configurable LLM provider instead of hardcoded "google"
     let llm_provider = std::env::var("LLM_PROVIDER").unwrap_or_else(|_| "google".to_string());
-    let llm_subject = format!("llm.provider.{}", llm_provider);
+    let llm_subject = format!("llm.provider.{llm_provider}");
 
     // 7. Dispatch to LLM provider (120s timeout)
     let llm_response: LlmResponse = match tokio::time::timeout(
@@ -803,19 +803,16 @@ async fn process_consciousness_event(
                 );
                 guardrail_msg = match violation {
                     guardrails::GuardrailViolation::TurnLimitReached(n) => {
-                        format!("Tool call limit reached ({} turns). Stopping.", n)
+                        format!("Tool call limit reached ({n} turns). Stopping.")
                     }
                     guardrails::GuardrailViolation::TimeLimitReached(s) => {
-                        format!("Time limit reached ({}s). Stopping.", s)
+                        format!("Time limit reached ({s}s). Stopping.")
                     }
                     guardrails::GuardrailViolation::LoopDetected { tool_name, count } => {
-                        format!(
-                            "Loop detected: {} called {} times with same args.",
-                            tool_name, count
-                        )
+                        format!("Loop detected: {tool_name} called {count} times with same args.")
                     }
                     guardrails::GuardrailViolation::HitlRequired(n) => {
-                        format!("Human approval needed after {} turns.", n)
+                        format!("Human approval needed after {n} turns.")
                     }
                 };
                 guardrail_triggered = true;
@@ -1066,12 +1063,12 @@ fn build_full_system_prompt(
 
     // S1+S2: Use cached identity prompt instead of reading from disk each time
     if !cached_identity.is_empty() {
-        parts.push(format!("## Agent Identity\n\n{}", cached_identity));
+        parts.push(format!("## Agent Identity\n\n{cached_identity}"));
     }
 
     // Agent description
     if let Some(ref desc) = agent_def.description {
-        parts.push(format!("## Agent Description\n\n{}", desc));
+        parts.push(format!("## Agent Description\n\n{desc}"));
     }
 
     // Skill snippets
@@ -1082,7 +1079,7 @@ fn build_full_system_prompt(
             .map(|(i, s)| format!("### Skill {}\n{}", i + 1, s))
             .collect::<Vec<_>>()
             .join("\n\n");
-        parts.push(format!("## Active Skills\n\n{}", skills_section));
+        parts.push(format!("## Active Skills\n\n{skills_section}"));
     }
 
     parts.join("\n\n---\n\n")
@@ -1105,12 +1102,12 @@ fn build_full_system_prompt_with_preferences(
 
     // S1+S2: Use cached identity prompt instead of reading from disk each time
     if !cached_identity.is_empty() {
-        parts.push(format!("## Agent Identity\n\n{}", cached_identity));
+        parts.push(format!("## Agent Identity\n\n{cached_identity}"));
     }
 
     // Agent description
     if let Some(ref desc) = agent_def.description {
-        parts.push(format!("## Agent Description\n\n{}", desc));
+        parts.push(format!("## Agent Description\n\n{desc}"));
     }
 
     // Skill snippets
@@ -1121,7 +1118,7 @@ fn build_full_system_prompt_with_preferences(
             .map(|(i, s)| format!("### Skill {}\n{}", i + 1, s))
             .collect::<Vec<_>>()
             .join("\n\n");
-        parts.push(format!("## Active Skills\n\n{}", skills_section));
+        parts.push(format!("## Active Skills\n\n{skills_section}"));
     }
 
     // User preferences (Phase 2.3)
@@ -1139,8 +1136,7 @@ fn build_full_system_prompt_with_preferences(
             .collect::<Vec<_>>()
             .join("\n");
         parts.push(format!(
-            "## User Preferences\nThe following preferences have been learned from past interactions. Apply them:\n{}",
-            prefs_section
+            "## User Preferences\nThe following preferences have been learned from past interactions. Apply them:\n{prefs_section}"
         ));
     }
 
@@ -1221,7 +1217,7 @@ async fn store_preference_fact(
     preference_value: &str,
     confidence: f64,
 ) -> Result<()> {
-    let predicate = format!("user_prefers_{}", preference_key);
+    let predicate = format!("user_prefers_{preference_key}");
 
     let fact_request = FactUpsertRequest {
         subject: agent_id.to_string(),
@@ -1229,7 +1225,7 @@ async fn store_preference_fact(
         object: None,
         value: Some(preference_value.to_string()),
         confidence,
-        source_content: format!("User preference: {} = {}", preference_key, preference_value),
+        source_content: format!("User preference: {preference_key} = {preference_value}"),
         valid_from: Some(Utc::now()),
     };
 
@@ -1276,7 +1272,7 @@ async fn store_preference_fact(
                 return Ok(());
             }
             Ok(Err(e)) => {
-                last_error = format!("NATS request failed: {}", e);
+                last_error = format!("NATS request failed: {e}");
                 warn!(
                     agent_id = %agent_id,
                     key = %preference_key,
@@ -1304,9 +1300,7 @@ async fn store_preference_fact(
         "All preference fact upsert attempts failed"
     );
     Err(anyhow::anyhow!(
-        "Preference fact upsert failed after {} retries: {}",
-        max_retries,
-        last_error
+        "Preference fact upsert failed after {max_retries} retries: {last_error}"
     ))
 }
 

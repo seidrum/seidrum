@@ -58,13 +58,10 @@ pub struct PackageDependency {
 pub struct ResolvedPackage {
     pub manifest: PackageManifest,
     pub source: PackageSource,
-    pub manifest_url: String,
 }
 
 #[derive(Debug, Clone)]
 pub enum PackageSource {
-    Registry { name: String, version: String },
-    Url(String),
     Local(PathBuf),
 }
 

@@ -299,7 +299,7 @@ impl TraceCollectorService {
                             })
                             .collect();
 
-                        summaries.sort_by(|a, b| b.started_at.cmp(&a.started_at));
+                        summaries.sort_by_key(|summary| std::cmp::Reverse(summary.started_at));
                         summaries.truncate(limit);
 
                         let response = TraceListResponse { traces: summaries };

@@ -388,7 +388,7 @@ impl WebSocketServer {
     pub async fn start(&self, addr: SocketAddr) -> crate::Result<()> {
         let listener = TcpListener::bind(addr)
             .await
-            .map_err(|e| crate::EventBusError::Internal(format!("Failed to bind: {}", e)))?;
+            .map_err(|e| crate::EventBusError::Internal(format!("Failed to bind: {e}")))?;
 
         info!("WebSocket server listening on {}", addr);
 
@@ -398,7 +398,7 @@ impl WebSocketServer {
             tokio::select! {
                 accept_result = listener.accept() => {
                     let (socket, peer_addr) = accept_result
-                        .map_err(|e| crate::EventBusError::Internal(format!("Accept failed: {}", e)))?;
+                        .map_err(|e| crate::EventBusError::Internal(format!("Accept failed: {e}")))?;
 
                     let bus = Arc::clone(&self.bus);
                     let auth = Arc::clone(&self.authenticator);
@@ -571,7 +571,7 @@ async fn serve_connection(
                 // Validate frame size
                 if text.len() > MAX_FRAME_SIZE {
                     let err = ServerMessage::Error {
-                        message: format!("Message too large (max {} bytes)", MAX_FRAME_SIZE),
+                        message: format!("Message too large (max {MAX_FRAME_SIZE} bytes)"),
                         correlation_id: None,
                     };
                     if let Ok(json) = serde_json::to_string(&err) {
@@ -594,7 +594,7 @@ async fn serve_connection(
                             dev_mode,
                         ).await {
                             let error_msg = ServerMessage::Error {
-                                message: format!("{}", e),
+                                message: format!("{e}"),
                                 correlation_id: None,
                             };
                             if let Ok(json) = serde_json::to_string(&error_msg) {
@@ -605,7 +605,7 @@ async fn serve_connection(
                     Err(e) => {
                         warn!("Invalid operation from {}: {}", peer_addr, e);
                         let error_msg = ServerMessage::Error {
-                            message: format!("Invalid operation: {}", e),
+                            message: format!("Invalid operation: {e}"),
                             correlation_id: None,
                         };
                         if let Ok(json) = serde_json::to_string(&error_msg) {
@@ -711,7 +711,7 @@ async fn ws_send(
     sender
         .send(tokio_tungstenite::tungstenite::Message::text(text))
         .await
-        .map_err(|e| crate::EventBusError::Internal(format!("WebSocket send failed: {}", e)))
+        .map_err(|e| crate::EventBusError::Internal(format!("WebSocket send failed: {e}")))
 }
 
 /// Validate and decode a base64 payload, mapping to our error type.
@@ -744,8 +744,7 @@ async fn handle_operation(
     let refuse_if_open = |op_name: &str| -> crate::Result<()> {
         if auth_open && !dev_mode {
             return Err(crate::EventBusError::Internal(format!(
-                "{} requires a real Authenticator (or WebSocketServer::unsafe_allow_ws_dev_mode() for tests) — AUTH_REQUIRED",
-                op_name
+                "{op_name} requires a real Authenticator (or WebSocketServer::unsafe_allow_ws_dev_mode() for tests) — AUTH_REQUIRED"
             )));
         }
         Ok(())
@@ -785,8 +784,7 @@ async fn handle_operation(
             // Enforce per-connection subscription limit
             if subscriptions.len() >= MAX_SUBSCRIPTIONS_PER_CONNECTION {
                 return Err(crate::EventBusError::Internal(format!(
-                    "Subscription limit reached ({} max per connection)",
-                    MAX_SUBSCRIPTIONS_PER_CONNECTION
+                    "Subscription limit reached ({MAX_SUBSCRIPTIONS_PER_CONNECTION} max per connection)"
                 )));
             }
 
@@ -896,7 +894,7 @@ async fn handle_operation(
                 }
                 Err(e) => {
                     let response = ServerMessage::Error {
-                        message: format!("{}", e),
+                        message: format!("{e}"),
                         correlation_id,
                     };
                     if let Ok(json) = serde_json::to_string(&response) {
@@ -937,16 +935,14 @@ async fn handle_operation(
             }
             if RESERVED_CHANNEL_TYPE_NAMES.contains(&channel_type.as_str()) {
                 return Err(crate::EventBusError::InvalidSubject(format!(
-                    "channel_type '{}' is reserved",
-                    channel_type
+                    "channel_type '{channel_type}' is reserved"
                 )));
             }
 
             // F3: per-connection cap.
             if remote_channels.len() >= MAX_CHANNEL_TYPES_PER_CONNECTION {
                 return Err(crate::EventBusError::Internal(format!(
-                    "channel type limit reached ({} max per WS connection)",
-                    MAX_CHANNEL_TYPES_PER_CONNECTION
+                    "channel type limit reached ({MAX_CHANNEL_TYPES_PER_CONNECTION} max per WS connection)"
                 )));
             }
 
@@ -954,8 +950,7 @@ async fn handle_operation(
             // per-connection (this map) and globally (the bus registry).
             if remote_channels.contains_key(&channel_type) {
                 return Err(crate::EventBusError::InvalidSubject(format!(
-                    "channel type '{}' is already registered on this connection",
-                    channel_type
+                    "channel type '{channel_type}' is already registered on this connection"
                 )));
             }
             // Best-effort global check via the engine — if a channel
@@ -1049,8 +1044,7 @@ async fn handle_operation(
             // interceptor table for the whole bus.
             if remote_interceptors.len() >= MAX_INTERCEPTORS_PER_CONNECTION {
                 return Err(crate::EventBusError::Internal(format!(
-                    "interceptor limit reached ({} max per WS connection)",
-                    MAX_INTERCEPTORS_PER_CONNECTION
+                    "interceptor limit reached ({MAX_INTERCEPTORS_PER_CONNECTION} max per WS connection)"
                 )));
             }
 

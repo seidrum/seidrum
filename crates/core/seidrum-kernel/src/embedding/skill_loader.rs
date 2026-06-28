@@ -183,25 +183,16 @@ skill:
 
     #[test]
     fn reject_invalid_skill_id() {
-        // Empty ID
-        assert!("".is_empty());
+        fn is_valid_skill_id(id: &str) -> bool {
+            !id.is_empty()
+                && id.len() <= 254
+                && id
+                    .chars()
+                    .all(|c| c.is_alphanumeric() || c == '-' || c == '_')
+        }
 
-        // ID with invalid chars
-        let id = "../../bad";
-        let valid = !id.is_empty()
-            && id.len() <= 254
-            && id
-                .chars()
-                .all(|c| c.is_alphanumeric() || c == '-' || c == '_');
-        assert!(!valid);
-
-        // Valid ID
-        let id = "code-review_v2";
-        let valid = !id.is_empty()
-            && id.len() <= 254
-            && id
-                .chars()
-                .all(|c| c.is_alphanumeric() || c == '-' || c == '_');
-        assert!(valid);
+        assert!(!is_valid_skill_id(""));
+        assert!(!is_valid_skill_id("../../bad"));
+        assert!(is_valid_skill_id("code-review_v2"));
     }
 }

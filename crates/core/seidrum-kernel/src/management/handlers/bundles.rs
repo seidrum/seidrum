@@ -18,10 +18,7 @@ use crate::management::state::ManagementState;
 /// Validate that a filename is safe (no path traversal)
 fn sanitize_filename(name: &str) -> Result<&str, (StatusCode, String)> {
     if name.contains("..") || name.contains('/') || name.contains('\\') || name.starts_with('.') {
-        return Err((
-            StatusCode::BAD_REQUEST,
-            format!("Invalid filename: {}", name),
-        ));
+        return Err((StatusCode::BAD_REQUEST, format!("Invalid filename: {name}")));
     }
     Ok(name)
 }
@@ -98,10 +95,20 @@ pub async fn import_preset(
     match req.source.as_str() {
         "inline" => import_inline(&state, req).await.map(Json),
         "url" => {
-            // URL import would require HTTP client; for now return error
+            if req.url.trim().is_empty() {
+                return Err((
+                    StatusCode::BAD_REQUEST,
+                    "URL import requires a non-empty url field.".to_string(),
+                ));
+            }
+
+            // URL import would require HTTP client; for now return error.
             Err((
                 StatusCode::NOT_IMPLEMENTED,
-                "URL import not yet implemented. Use inline import with preset YAML.".to_string(),
+                format!(
+                    "URL import is not yet implemented for '{}'. Use inline import with preset YAML.",
+                    req.url
+                ),
             ))
         }
         _ => Err((
@@ -118,7 +125,7 @@ pub async fn export_preset(
 ) -> Result<Json<ExportBundleResponse>, (StatusCode, String)> {
     let preset_path = super::presets::find_preset_file(&state.presets_dir, &id)
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
-        .ok_or((StatusCode::NOT_FOUND, format!("Preset '{}' not found", id)))?;
+        .ok_or((StatusCode::NOT_FOUND, format!("Preset '{id}' not found")))?;
 
     let preset_file = load_preset_file(&preset_path)
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
@@ -179,7 +186,7 @@ pub async fn delete_preset(
 ) -> Result<StatusCode, (StatusCode, String)> {
     let preset_path = super::presets::find_preset_file(&state.presets_dir, &id)
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
-        .ok_or((StatusCode::NOT_FOUND, format!("Preset '{}' not found", id)))?;
+        .ok_or((StatusCode::NOT_FOUND, format!("Preset '{id}' not found")))?;
 
     std::fs::remove_file(&preset_path).map_err(|e| {
         error!("Failed to delete preset file: {}", e);
@@ -261,7 +268,7 @@ pub async fn list_presets_with_source(
         }
     }
 
-    presets.sort_by(|a, b| a.id.cmp(&b.id));
+    presets.sort_by_key(|preset| preset.id.clone());
     Ok(Json(presets))
 }
 
@@ -276,10 +283,7 @@ async fn import_inline(
     // Parse preset YAML
     let preset_file: PresetFile = serde_yaml::from_str(&req.preset_yaml).map_err(|e| {
         error!("Failed to parse preset YAML: {}", e);
-        (
-            StatusCode::BAD_REQUEST,
-            format!("Invalid preset YAML: {}", e),
-        )
+        (StatusCode::BAD_REQUEST, format!("Invalid preset YAML: {e}"))
     })?;
 
     let preset = &preset_file.preset;
@@ -298,7 +302,7 @@ async fn import_inline(
             error!("Failed to install bundle: {}", e);
             (
                 StatusCode::INTERNAL_SERVER_ERROR,
-                format!("Failed to install bundle: {}", e),
+                format!("Failed to install bundle: {e}"),
             )
         })
 }
@@ -330,9 +334,8 @@ async fn install_bundle(
                     continue;
                 }
 
-                std::fs::write(&dest, content).map_err(|e| {
-                    anyhow::anyhow!("Failed to write agent file {}: {}", agent_file, e)
-                })?;
+                std::fs::write(&dest, content)
+                    .map_err(|e| anyhow::anyhow!("Failed to write agent file {agent_file}: {e}"))?;
 
                 installed_agents.push(agent_file.clone());
             }
@@ -363,7 +366,7 @@ async fn install_bundle(
                 }
 
                 std::fs::write(&dest, content).map_err(|e| {
-                    anyhow::anyhow!("Failed to write prompt file {}: {}", prompt_file, e)
+                    anyhow::anyhow!("Failed to write prompt file {prompt_file}: {e}")
                 })?;
 
                 installed_prompts.push(prompt_file.clone());

@@ -53,7 +53,7 @@ pub async fn initialize_brain(client: &ArangoClient) -> Result<()> {
         client
             .create_collection(name)
             .await
-            .with_context(|| format!("creating vertex collection '{}'", name))?;
+            .with_context(|| format!("creating vertex collection '{name}'"))?;
         info!("  [OK] {}", name);
     }
 
@@ -63,7 +63,7 @@ pub async fn initialize_brain(client: &ArangoClient) -> Result<()> {
         client
             .create_edge_collection(name)
             .await
-            .with_context(|| format!("creating edge collection '{}'", name))?;
+            .with_context(|| format!("creating edge collection '{name}'"))?;
         info!("  [OK] {}", name);
     }
 

@@ -15,10 +15,7 @@ fn validate_artifact_url(url: &str) -> Result<()> {
         && !url.starts_with("http://localhost")
         && !url.starts_with("http://127.0.0.1")
     {
-        anyhow::bail!(
-            "Artifact URL must use https:// or be localhost for development: {}",
-            url
-        );
+        anyhow::bail!("Artifact URL must use https:// or be localhost for development: {url}");
     }
 
     // Check for private/internal IP ranges (basic string-based check)
@@ -34,8 +31,7 @@ fn validate_artifact_url(url: &str) -> Result<()> {
     for range in &private_ranges {
         if url.contains(range) && !url.contains("localhost") && !url.contains("127.0.0.1") {
             anyhow::bail!(
-                "Artifact URL uses private/internal IP range, which is not allowed: {}",
-                url
+                "Artifact URL uses private/internal IP range, which is not allowed: {url}"
             );
         }
     }
@@ -105,7 +101,11 @@ pub async fn download_artifact(artifacts: &[PackageArtifact], dest_dir: &Path) -
     };
 
     let mut stream = response.bytes_stream();
-    let filename = artifact.url.split('/').last().unwrap_or("package.tar.gz");
+    let filename = artifact
+        .url
+        .split('/')
+        .next_back()
+        .unwrap_or("package.tar.gz");
     let dest_path = dest_dir.join(filename);
 
     let mut file = File::create(&dest_path)?;
