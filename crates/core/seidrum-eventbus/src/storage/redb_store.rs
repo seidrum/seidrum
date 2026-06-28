@@ -780,7 +780,7 @@ impl EventStore for RedbEventStore {
                         StorageError::DatabaseError(format!("failed to get event: {}", e))
                     })?
                     .ok_or(StorageError::NotFound)?;
-                serde_json::from_slice(&data.value()).map_err(|e| {
+                serde_json::from_slice(data.value()).map_err(|e| {
                     StorageError::OperationFailed(format!("failed to deserialize event: {}", e))
                 })?
             };
@@ -858,7 +858,7 @@ impl EventStore for RedbEventStore {
                         StorageError::DatabaseError(format!("failed to get event: {}", e))
                     })?
                     .ok_or(StorageError::NotFound)?;
-                serde_json::from_slice(&data.value()).map_err(|e| {
+                serde_json::from_slice(data.value()).map_err(|e| {
                     StorageError::OperationFailed(format!("failed to deserialize event: {}", e))
                 })?
             };
