@@ -46,6 +46,48 @@ pub enum RuntimeEvent {
     },
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum ChannelKind {
+    Telegram,
+    Other(String),
+}
+
+impl ChannelKind {
+    pub fn as_str(&self) -> &str {
+        match self {
+            Self::Telegram => "telegram",
+            Self::Other(kind) => kind.as_str(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ChannelContinuationIdentity {
+    pub provider: ChannelKind,
+    pub chat_id: String,
+    pub thread_id: Option<String>,
+    pub user_id: Option<String>,
+    pub message_id: Option<String>,
+    pub correlation_id: Option<String>,
+}
+
+impl ChannelContinuationIdentity {
+    pub fn session_id(&self) -> String {
+        let base = format!("channel:{}:chat:{}", self.provider.as_str(), self.chat_id);
+        match &self.thread_id {
+            Some(thread_id) if !thread_id.is_empty() => format!("{base}:thread:{thread_id}"),
+            _ => base,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ChannelTurnInput {
+    pub origin: ChannelContinuationIdentity,
+    pub agent_id: String,
+    pub user_message: String,
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ToolCall {
     pub id: String,
@@ -118,6 +160,88 @@ pub trait AgentProvider: Send + Sync + Clone + 'static {
 #[async_trait]
 pub trait ToolExecutor: Send + Sync + 'static {
     async fn execute(&self, call: ToolCall) -> Result<ToolResult, RuntimeError>;
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum ToolPermissionDecision {
+    Allow,
+    Deny { reason: String },
+    RequireApproval { reason: String },
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ToolAuthorizationRequest {
+    pub call_id: String,
+    pub tool_name: String,
+    pub arguments: serde_json::Value,
+    pub session_id: Option<String>,
+    pub channel_origin: Option<ChannelContinuationIdentity>,
+}
+
+#[async_trait]
+pub trait ToolAuthorizationBoundary: Send + Sync + 'static {
+    async fn authorize(&self, request: ToolAuthorizationRequest) -> ToolPermissionDecision;
+}
+
+pub struct SecureToolExecutor<E, B> {
+    inner: E,
+    boundary: B,
+    session_id: Option<String>,
+    channel_origin: Option<ChannelContinuationIdentity>,
+}
+
+impl<E, B> SecureToolExecutor<E, B> {
+    pub fn new(inner: E, boundary: B) -> Self {
+        Self {
+            inner,
+            boundary,
+            session_id: None,
+            channel_origin: None,
+        }
+    }
+
+    pub fn with_session_id(mut self, session_id: impl Into<String>) -> Self {
+        self.session_id = Some(session_id.into());
+        self
+    }
+
+    pub fn with_channel_origin(mut self, origin: ChannelContinuationIdentity) -> Self {
+        self.channel_origin = Some(origin);
+        self
+    }
+}
+
+#[async_trait]
+impl<E, B> ToolExecutor for SecureToolExecutor<E, B>
+where
+    E: ToolExecutor,
+    B: ToolAuthorizationBoundary,
+{
+    async fn execute(&self, call: ToolCall) -> Result<ToolResult, RuntimeError> {
+        let request = ToolAuthorizationRequest {
+            call_id: call.id.clone(),
+            tool_name: call.name.clone(),
+            arguments: call.arguments.clone(),
+            session_id: self.session_id.clone(),
+            channel_origin: self.channel_origin.clone(),
+        };
+
+        match self.boundary.authorize(request).await {
+            ToolPermissionDecision::Allow => self.inner.execute(call).await,
+            ToolPermissionDecision::Deny { reason } => Ok(ToolResult {
+                call_id: call.id,
+                tool_name: call.name,
+                content: format!("tool authorization denied: {reason}"),
+                is_error: true,
+            }),
+            ToolPermissionDecision::RequireApproval { reason } => Ok(ToolResult {
+                call_id: call.id,
+                tool_name: call.name,
+                content: format!("tool authorization requires approval: {reason}"),
+                is_error: true,
+            }),
+        }
+    }
 }
 
 #[async_trait]
@@ -735,6 +859,18 @@ where
         Err(RuntimeError::IterationLimit(
             self.config.max_tool_iterations,
         ))
+    }
+
+    pub async fn run_channel_turn(
+        &self,
+        input: ChannelTurnInput,
+    ) -> Result<TurnOutput, RuntimeError> {
+        self.run_turn(TurnInput {
+            session_id: input.origin.session_id(),
+            agent_id: input.agent_id,
+            user_message: input.user_message,
+        })
+        .await
     }
 
     async fn execute_tool(&self, call: ToolCall) -> ToolResult {
