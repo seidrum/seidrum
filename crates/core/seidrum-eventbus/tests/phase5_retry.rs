@@ -235,7 +235,7 @@ async fn test_retry_dead_letters_after_max_attempts() {
     let deadline = Instant::now() + Duration::from_secs(10);
     let mut dead = false;
     while Instant::now() < deadline {
-        let events = store.query_dead_lettered(100).await.unwrap();
+        let events = store.query_dead_lettered(None, 100).await.unwrap();
         if events.iter().any(|e| e.seq == seq) {
             dead = true;
             break;
@@ -260,7 +260,7 @@ async fn test_retry_permanent_error_dead_letters_immediately() {
     let deadline = Instant::now() + Duration::from_secs(5);
     let mut dead = false;
     while Instant::now() < deadline {
-        let events = store.query_dead_lettered(100).await.unwrap();
+        let events = store.query_dead_lettered(None, 100).await.unwrap();
         if events.iter().any(|e| e.seq == seq) {
             dead = true;
             break;
@@ -289,7 +289,7 @@ async fn test_retry_dead_letters_when_subscriber_gone() {
     let deadline = Instant::now() + Duration::from_secs(5);
     let mut dead = false;
     while Instant::now() < deadline {
-        let events = store.query_dead_lettered(100).await.unwrap();
+        let events = store.query_dead_lettered(None, 100).await.unwrap();
         if events.iter().any(|e| e.seq == seq) {
             dead = true;
             break;

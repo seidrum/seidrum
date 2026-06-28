@@ -503,6 +503,99 @@ mod tests {
         env.handles.shutdown_and_join().await;
     }
 
+    /// Dead-letter HTTP endpoints list, replay in place, and purge events.
+    #[tokio::test]
+    async fn test_http_dead_letter_list_replay_and_purge_e2e() {
+        use seidrum_eventbus::storage::{DeliveryStatus, EventStatus, EventStore};
+        use seidrum_eventbus::test_utils::{pick_ephemeral_addr, wait_for_http_ready};
+        use std::time::Duration;
+
+        let store = Arc::new(seidrum_eventbus::storage::memory_store::InMemoryEventStore::new());
+        let http_addr = pick_ephemeral_addr();
+        let handles = EventBusBuilder::new()
+            .storage(Arc::clone(&store) as Arc<dyn EventStore>)
+            .with_http(http_addr)
+            .unsafe_allow_http_dev_mode()
+            .build_with_handles()
+            .await
+            .unwrap();
+        wait_for_http_ready(http_addr).await;
+
+        let opts = SubscribeOpts {
+            priority: 10,
+            mode: SubscriptionMode::Async,
+            channel: ChannelConfig::InProcess,
+            timeout: Duration::from_secs(5),
+            filter: None,
+        };
+        let mut sub = handles.bus.subscribe("dl.http", opts).await.unwrap();
+        let seq = handles
+            .bus
+            .publish("dl.http", b"dead payload")
+            .await
+            .unwrap();
+        let _ = tokio::time::timeout(Duration::from_secs(1), sub.rx.recv())
+            .await
+            .unwrap();
+        store
+            .record_delivery(
+                seq,
+                "subscriber-a",
+                DeliveryStatus::DeadLettered,
+                Some("exhausted".to_string()),
+                None,
+            )
+            .await
+            .unwrap();
+        store
+            .update_status(seq, EventStatus::DeadLettered)
+            .await
+            .unwrap();
+
+        let client = reqwest::Client::new();
+        let resp = client
+            .get(format!("http://{}/dead-letter?subject=dl.http", http_addr))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), 200);
+        let body: serde_json::Value = resp.json().await.unwrap();
+        assert_eq!(body["events"].as_array().unwrap().len(), 1);
+        assert_eq!(body["events"][0]["seq"].as_u64(), Some(seq));
+
+        let resp = client
+            .post(format!("http://{}/dead-letter/{}/replay", http_addr, seq))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), 200);
+        let replayed: serde_json::Value = resp.json().await.unwrap();
+        assert_eq!(replayed["seq"].as_u64(), Some(seq));
+        let received = tokio::time::timeout(Duration::from_secs(1), sub.rx.recv())
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(received.seq, seq);
+        assert_eq!(received.payload, b"dead payload");
+        let event = store.get(seq).await.unwrap().unwrap();
+        assert_eq!(event.status, EventStatus::Delivered);
+        assert!(event.deliveries.iter().all(|d| d.attempts == 0));
+
+        store
+            .update_status(seq, EventStatus::DeadLettered)
+            .await
+            .unwrap();
+        let resp = client
+            .delete(format!("http://{}/dead-letter/{}", http_addr, seq))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), 204);
+        assert!(store.get(seq).await.unwrap().is_none());
+
+        handles.shutdown_and_join().await;
+    }
+
     /// Verify the test_utils RecordingInterceptor works end-to-end through
     /// the bus's interceptor chain.
     #[tokio::test]

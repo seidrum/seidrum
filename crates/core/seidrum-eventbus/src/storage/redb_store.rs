@@ -763,6 +763,151 @@ impl EventStore for RedbEventStore {
         .map_err(|e| StorageError::OperationFailed(format!("spawn_blocking error: {}", e)))?
     }
 
+    async fn requeue_dead_lettered(&self, seq: u64) -> StorageResult<StoredEvent> {
+        let db = Arc::clone(&self.db);
+        tokio::task::spawn_blocking(move || {
+            let write_txn = db.begin_write().map_err(|e| {
+                StorageError::DatabaseError(format!("failed to begin write: {}", e))
+            })?;
+
+            let mut event: StoredEvent = {
+                let events_table = write_txn.open_table(EVENTS_TABLE).map_err(|e| {
+                    StorageError::DatabaseError(format!("failed to open events table: {}", e))
+                })?;
+                let data = events_table
+                    .get(seq)
+                    .map_err(|e| {
+                        StorageError::DatabaseError(format!("failed to get event: {}", e))
+                    })?
+                    .ok_or(StorageError::NotFound)?;
+                serde_json::from_slice(data.value()).map_err(|e| {
+                    StorageError::OperationFailed(format!("failed to deserialize event: {}", e))
+                })?
+            };
+
+            if event.status != EventStatus::DeadLettered {
+                return Err(StorageError::OperationFailed(format!(
+                    "event {} is not dead-lettered",
+                    seq
+                )));
+            }
+            let old_status = event.status.as_u8();
+            event.status = EventStatus::Pending;
+            event.deliveries.clear();
+            let serialized = serde_json::to_vec(&event).map_err(|e| {
+                StorageError::OperationFailed(format!("failed to serialize event: {}", e))
+            })?;
+
+            {
+                let mut events_table = write_txn.open_table(EVENTS_TABLE).map_err(|e| {
+                    StorageError::DatabaseError(format!("failed to open events table: {}", e))
+                })?;
+                events_table
+                    .insert(seq, serialized.as_slice())
+                    .map_err(|e| {
+                        StorageError::DatabaseError(format!("failed to update event: {}", e))
+                    })?;
+            }
+            {
+                let mut status_idx = write_txn.open_table(STATUS_IDX_TABLE).map_err(|e| {
+                    StorageError::DatabaseError(format!("failed to open status_idx: {}", e))
+                })?;
+                let _ = status_idx.remove((old_status, seq));
+                status_idx
+                    .insert((EventStatus::Pending.as_u8(), seq), ())
+                    .map_err(|e| {
+                        StorageError::DatabaseError(format!("failed to insert status index: {}", e))
+                    })?;
+            }
+            {
+                let mut failed_idx =
+                    write_txn
+                        .open_table(FAILED_DELIVERIES_IDX_TABLE)
+                        .map_err(|e| {
+                            StorageError::DatabaseError(format!(
+                                "failed to open failed_deliveries_idx: {}",
+                                e
+                            ))
+                        })?;
+                let _ = failed_idx.remove(seq);
+            }
+
+            write_txn
+                .commit()
+                .map_err(|e| StorageError::DatabaseError(format!("failed to commit: {}", e)))?;
+            Ok(event)
+        })
+        .await
+        .map_err(|e| StorageError::OperationFailed(format!("spawn_blocking error: {}", e)))?
+    }
+
+    async fn purge_dead_lettered(&self, seq: u64) -> StorageResult<()> {
+        let db = Arc::clone(&self.db);
+        tokio::task::spawn_blocking(move || {
+            let write_txn = db.begin_write().map_err(|e| {
+                StorageError::DatabaseError(format!("failed to begin write: {}", e))
+            })?;
+
+            let event: StoredEvent = {
+                let events_table = write_txn.open_table(EVENTS_TABLE).map_err(|e| {
+                    StorageError::DatabaseError(format!("failed to open events table: {}", e))
+                })?;
+                let data = events_table
+                    .get(seq)
+                    .map_err(|e| {
+                        StorageError::DatabaseError(format!("failed to get event: {}", e))
+                    })?
+                    .ok_or(StorageError::NotFound)?;
+                serde_json::from_slice(data.value()).map_err(|e| {
+                    StorageError::OperationFailed(format!("failed to deserialize event: {}", e))
+                })?
+            };
+            if event.status != EventStatus::DeadLettered {
+                return Err(StorageError::OperationFailed(format!(
+                    "event {} is not dead-lettered",
+                    seq
+                )));
+            }
+
+            {
+                let mut events_table = write_txn.open_table(EVENTS_TABLE).map_err(|e| {
+                    StorageError::DatabaseError(format!("failed to open events table: {}", e))
+                })?;
+                let _ = events_table.remove(seq);
+            }
+            {
+                let mut subject_idx = write_txn.open_table(SUBJECT_IDX_TABLE).map_err(|e| {
+                    StorageError::DatabaseError(format!("failed to open subject_idx: {}", e))
+                })?;
+                let _ = subject_idx.remove((event.subject.as_str(), seq));
+            }
+            {
+                let mut status_idx = write_txn.open_table(STATUS_IDX_TABLE).map_err(|e| {
+                    StorageError::DatabaseError(format!("failed to open status_idx: {}", e))
+                })?;
+                let _ = status_idx.remove((event.status.as_u8(), seq));
+            }
+            {
+                let mut failed_idx =
+                    write_txn
+                        .open_table(FAILED_DELIVERIES_IDX_TABLE)
+                        .map_err(|e| {
+                            StorageError::DatabaseError(format!(
+                                "failed to open failed_deliveries_idx: {}",
+                                e
+                            ))
+                        })?;
+                let _ = failed_idx.remove(seq);
+            }
+
+            write_txn
+                .commit()
+                .map_err(|e| StorageError::DatabaseError(format!("failed to commit: {}", e)))
+        })
+        .await
+        .map_err(|e| StorageError::OperationFailed(format!("spawn_blocking error: {}", e)))?
+    }
+
     async fn save_subscription(&self, sub: &PersistedSubscription) -> StorageResult<()> {
         let db = Arc::clone(&self.db);
         let sub = sub.clone();
