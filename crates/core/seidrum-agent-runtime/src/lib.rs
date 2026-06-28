@@ -393,3 +393,208 @@ where
 fn new_record_id() -> String {
     ulid::Ulid::new().to_string()
 }
+
+/// Boundary adapters that let the runtime spine talk to Seidrum's existing
+/// provider-router and tool-dispatch request/reply shapes without coupling the
+/// runtime to concrete plugin processes or durable infrastructure.
+pub mod boundaries {
+    use async_trait::async_trait;
+    use seidrum_common::events::{
+        LlmCallConfig, LlmResponse, ToolCallRequest, ToolCallResponse, UnifiedLlmRequest,
+        UnifiedMessage, UnifiedToolResult,
+    };
+
+    use crate::{
+        AgentProvider, ProviderRequest, ProviderResponse, RuntimeError, ToolCall, ToolExecutor,
+        ToolResult,
+    };
+
+    /// Async boundary for a provider-router shaped request/reply endpoint.
+    #[async_trait]
+    pub trait LlmRouterBoundary: Send + Sync + Clone + 'static {
+        async fn complete_unified(&self, request: UnifiedLlmRequest)
+            -> Result<LlmResponse, String>;
+    }
+
+    /// AgentProvider adapter for boundaries that accept UnifiedLlmRequest and
+    /// return LlmResponse, matching the existing llm-router/provider contract.
+    #[derive(Debug, Clone)]
+    pub struct LlmRouterProvider<B> {
+        boundary: B,
+    }
+
+    impl<B> LlmRouterProvider<B> {
+        pub fn new(boundary: B) -> Self {
+            Self { boundary }
+        }
+    }
+
+    #[async_trait]
+    impl<B> AgentProvider for LlmRouterProvider<B>
+    where
+        B: LlmRouterBoundary,
+    {
+        async fn complete(
+            &self,
+            request: ProviderRequest,
+        ) -> Result<ProviderResponse, RuntimeError> {
+            let response = self
+                .boundary
+                .complete_unified(provider_request_to_unified_llm_request(request))
+                .await
+                .map_err(|error| {
+                    RuntimeError::Provider(format!("llm router boundary failed: {error}"))
+                })?;
+
+            ProviderResponse::try_from(response)
+        }
+    }
+
+    /// Async boundary for a tool-dispatcher shaped request/reply endpoint.
+    #[async_trait]
+    pub trait ToolDispatchBoundary: Send + Sync + 'static {
+        async fn call_tool(&self, request: ToolCallRequest) -> Result<ToolCallResponse, String>;
+    }
+
+    /// ToolExecutor adapter for boundaries that accept ToolCallRequest and
+    /// return ToolCallResponse, matching the existing tool-dispatcher contract.
+    #[derive(Debug, Clone)]
+    pub struct ToolDispatchExecutor<B> {
+        boundary: B,
+    }
+
+    impl<B> ToolDispatchExecutor<B> {
+        pub fn new(boundary: B) -> Self {
+            Self { boundary }
+        }
+    }
+
+    #[async_trait]
+    impl<B> ToolExecutor for ToolDispatchExecutor<B>
+    where
+        B: ToolDispatchBoundary,
+    {
+        async fn execute(&self, call: ToolCall) -> Result<ToolResult, RuntimeError> {
+            let tool_name = call.name.clone();
+            let call_id = call.id.clone();
+            let response = self
+                .boundary
+                .call_tool(tool_call_to_dispatch_request(call))
+                .await
+                .map_err(|error| RuntimeError::Tool {
+                    tool_name: tool_name.clone(),
+                    message: format!("tool dispatch boundary failed: {error}"),
+                })?;
+
+            Ok(tool_dispatch_response_to_tool_result(
+                call_id, tool_name, response,
+            ))
+        }
+    }
+
+    pub fn provider_request_to_unified_llm_request(request: ProviderRequest) -> UnifiedLlmRequest {
+        let mut messages: Vec<UnifiedMessage> = request
+            .messages
+            .into_iter()
+            .map(|message| UnifiedMessage {
+                role: message.role,
+                content: Some(message.content),
+                tool_calls: None,
+                tool_results: None,
+            })
+            .collect();
+
+        messages.extend(
+            request
+                .tool_results
+                .into_iter()
+                .map(|result| UnifiedMessage {
+                    role: "tool".to_string(),
+                    content: Some(result.content.clone()),
+                    tool_calls: None,
+                    tool_results: Some(vec![UnifiedToolResult {
+                        tool_call_id: result.call_id,
+                        content: result.content,
+                        is_error: result.is_error,
+                    }]),
+                }),
+        );
+
+        UnifiedLlmRequest {
+            agent_id: request.agent_id,
+            messages,
+            system_prompt: None,
+            tools: Vec::new(),
+            config: LlmCallConfig {
+                temperature: None,
+                max_tokens: None,
+                top_p: None,
+            },
+            routing_strategy: "runtime-boundary".to_string(),
+            model_preferences: Vec::new(),
+            correlation_id: Some(request.session_id),
+            scope: None,
+            user_id: None,
+        }
+    }
+
+    pub fn tool_call_to_dispatch_request(call: ToolCall) -> ToolCallRequest {
+        ToolCallRequest {
+            tool_id: call.name,
+            plugin_id: String::new(),
+            arguments: call.arguments,
+            correlation_id: Some(call.id),
+        }
+    }
+
+    fn tool_dispatch_response_to_tool_result(
+        call_id: String,
+        tool_name: String,
+        response: ToolCallResponse,
+    ) -> ToolResult {
+        ToolResult {
+            call_id,
+            tool_name,
+            content: result_content_to_string(response.result),
+            is_error: response.is_error,
+        }
+    }
+
+    fn result_content_to_string(value: serde_json::Value) -> String {
+        match value {
+            serde_json::Value::String(text) => text,
+            other => other.to_string(),
+        }
+    }
+
+    impl TryFrom<LlmResponse> for ProviderResponse {
+        type Error = RuntimeError;
+
+        fn try_from(response: LlmResponse) -> Result<Self, Self::Error> {
+            let tool_calls = response
+                .tool_calls
+                .unwrap_or_default()
+                .into_iter()
+                .map(|call| {
+                    let arguments = serde_json::from_str(&call.arguments).map_err(|error| {
+                        RuntimeError::Provider(format!(
+                            "invalid tool arguments for call `{}`: {error}",
+                            call.id
+                        ))
+                    })?;
+
+                    Ok(ToolCall {
+                        id: call.id,
+                        name: call.function_name,
+                        arguments,
+                    })
+                })
+                .collect::<Result<Vec<_>, RuntimeError>>()?;
+
+            Ok(ProviderResponse {
+                final_text: response.content,
+                tool_calls,
+            })
+        }
+    }
+}
