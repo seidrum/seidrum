@@ -75,10 +75,7 @@ pub async fn download_document(
 
 /// Call Telegram's getFile API to retrieve the file_path for downloading.
 async fn get_telegram_file_path(token: &str, file_id: &str) -> anyhow::Result<String> {
-    let url = format!(
-        "https://api.telegram.org/bot{}/getFile?file_id={}",
-        token, file_id
-    );
+    let url = format!("https://api.telegram.org/bot{token}/getFile?file_id={file_id}");
 
     let client = reqwest::Client::new();
     let resp = client
@@ -107,7 +104,7 @@ async fn get_telegram_file_path(token: &str, file_id: &str) -> anyhow::Result<St
 
 /// Download a file from Telegram's file storage by its file_path.
 async fn download_telegram_file(token: &str, file_path: &str) -> anyhow::Result<Vec<u8>> {
-    let url = format!("https://api.telegram.org/file/bot{}/{}", token, file_path);
+    let url = format!("https://api.telegram.org/file/bot{token}/{file_path}");
 
     let client = reqwest::Client::new();
     let resp = client

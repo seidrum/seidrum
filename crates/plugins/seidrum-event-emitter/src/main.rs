@@ -104,7 +104,7 @@ async fn main() -> Result<()> {
             "brain.fact.upsert".to_string(),
             "agent.*.wake".to_string(),
         ],
-        health_subject: format!("plugin.{}.health", PLUGIN_ID),
+        health_subject: format!("plugin.{PLUGIN_ID}.health"),
         consumed_event_types: vec![],
         produced_event_types: vec![],
         config_schema: None,
@@ -186,7 +186,7 @@ fn extract_actions(content: &str) -> StructuredActions {
 
     // Strategy 1: Look for typed markers like ```json:tasks, ```json:facts, ```json:wake
     for marker_type in &["tasks", "facts", "wake"] {
-        let marker = format!("```json:{}", marker_type);
+        let marker = format!("```json:{marker_type}");
         if let Some(start_idx) = content.find(&marker) {
             let after_marker = &content[start_idx + marker.len()..];
             if let Some(end_idx) = after_marker.find("```") {

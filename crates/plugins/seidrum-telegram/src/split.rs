@@ -50,7 +50,7 @@ pub fn split_message(text: &str, max_len: usize) -> Vec<String> {
             let prefix = if fence_lang.is_empty() {
                 "```\n".to_string()
             } else {
-                format!("```{}\n", fence_lang)
+                format!("```{fence_lang}\n")
             };
             chunk_str = prefix + &chunk_str;
         }

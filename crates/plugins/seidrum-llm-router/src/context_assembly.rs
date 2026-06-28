@@ -123,10 +123,7 @@ fn format_tasks(tasks: &[Value]) -> String {
                 .get("due_date")
                 .and_then(|v| v.as_str())
                 .unwrap_or("no due date");
-            format!(
-                "- [{}] {} (priority: {}, due: {})",
-                status, title, priority, due
-            )
+            format!("- [{status}] {title} (priority: {priority}, due: {due})")
         })
         .collect::<Vec<_>>()
         .join("\n")
@@ -155,7 +152,7 @@ fn format_history(history: &[Value]) -> String {
             if content.is_empty() {
                 return None;
             }
-            Some(format!("{}: {}", role, content))
+            Some(format!("{role}: {content}"))
         })
         .collect::<Vec<_>>()
         .join("\n")
@@ -175,7 +172,7 @@ fn format_skills(skills: &[Value]) -> String {
             if snippet.is_empty() {
                 return None;
             }
-            Some(format!("[Active Skill: {}]\n{}", id, snippet))
+            Some(format!("[Active Skill: {id}]\n{snippet}"))
         })
         .collect::<Vec<_>>()
         .join("\n\n")
@@ -200,7 +197,7 @@ fn format_similar_content(content: &[Value]) -> String {
                 return None;
             }
             match score {
-                Some(s) => Some(format!("[relevance: {:.2}] {}", s, text)),
+                Some(s) => Some(format!("[relevance: {s:.2}] {text}")),
                 None => Some(text.to_string()),
             }
         })
@@ -381,8 +378,7 @@ pub fn assemble_context(
         messages.push(SimpleMessage {
             role: "user".to_string(),
             content: format!(
-                "[System context - relevant knowledge]\n{}\n[End system context]",
-                rag_text
+                "[System context - relevant knowledge]\n{rag_text}\n[End system context]"
             ),
         });
         messages.push(SimpleMessage {

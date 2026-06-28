@@ -208,7 +208,7 @@ fn generate_call_id() -> String {
         x
     });
 
-    format!("{:012x}-{:016x}", ts, rand_part)
+    format!("{ts:012x}-{rand_part:016x}")
 }
 
 #[cfg(test)]

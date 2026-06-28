@@ -69,7 +69,7 @@ async fn main() -> Result<()> {
         description: "Sandboxed code execution as an LLM tool".to_string(),
         consumes: vec!["capability.call.code-executor".to_string()],
         produces: vec![],
-        health_subject: format!("plugin.{}.health", PLUGIN_ID),
+        health_subject: format!("plugin.{PLUGIN_ID}.health"),
         consumed_event_types: vec![],
         produced_event_types: vec![],
         config_schema: None,
@@ -229,8 +229,7 @@ async fn execute_code(request: &CodeExecuteRequest) -> CodeExecuteResponse {
             return CodeExecuteResponse {
                 stdout: String::new(),
                 stderr: format!(
-                    "Unsupported language: {}. Supported: python, bash, javascript",
-                    other
+                    "Unsupported language: {other}. Supported: python, bash, javascript"
                 ),
                 exit_code: -1,
                 timed_out: false,
@@ -247,7 +246,7 @@ async fn execute_code(request: &CodeExecuteRequest) -> CodeExecuteResponse {
         Ok(response) => response,
         Err(err) => CodeExecuteResponse {
             stdout: String::new(),
-            stderr: format!("Execution error: {}", err),
+            stderr: format!("Execution error: {err}"),
             exit_code: -1,
             timed_out: false,
         },
@@ -327,7 +326,7 @@ async fn run_child_with_timeout(
         }
         Ok(Err(err)) => Ok(CodeExecuteResponse {
             stdout: String::new(),
-            stderr: format!("Process error: {}", err),
+            stderr: format!("Process error: {err}"),
             exit_code: -1,
             timed_out: false,
         }),
@@ -335,7 +334,7 @@ async fn run_child_with_timeout(
             // Timeout — process is dropped and killed automatically
             Ok(CodeExecuteResponse {
                 stdout: String::new(),
-                stderr: format!("Execution timed out after {}s", timeout_secs),
+                stderr: format!("Execution timed out after {timeout_secs}s"),
                 exit_code: -1,
                 timed_out: true,
             })

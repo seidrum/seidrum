@@ -205,18 +205,17 @@ async fn main() -> Result<()> {
         while let Some(msg) = tokio::select! {
             m = futures_next(&mut sub) => m,
         } {
-            if let Err(e) = handle_message(
-                &msg.payload,
-                &msg.subject,
+            let handler_config = MessageHandlerConfig {
                 max_tokens,
                 max_context_tokens,
                 max_dynamic_tools,
                 provider_timeout,
-                &prompt_template1,
-                &nats1,
-                &routing_config1,
-            )
-            .await
+                prompt_template: &prompt_template1,
+                routing_config: &routing_config1,
+            };
+
+            if let Err(e) =
+                handle_message(&msg.payload, &msg.subject, &handler_config, &nats1).await
             {
                 error!(error = %e, subject = %msg.subject, "Failed to process message");
             }
@@ -226,18 +225,17 @@ async fn main() -> Result<()> {
     let handle_inbound = tokio::spawn(async move {
         let mut sub = sub_inbound;
         while let Some(msg) = futures_next(&mut sub).await {
-            if let Err(e) = handle_message(
-                &msg.payload,
-                &msg.subject,
+            let handler_config = MessageHandlerConfig {
                 max_tokens,
                 max_context_tokens,
                 max_dynamic_tools,
                 provider_timeout,
-                &prompt_template,
-                &nats_pub,
-                &routing_config,
-            )
-            .await
+                prompt_template: &prompt_template,
+                routing_config: &routing_config,
+            };
+
+            if let Err(e) =
+                handle_message(&msg.payload, &msg.subject, &handler_config, &nats_pub).await
             {
                 error!(error = %e, subject = %msg.subject, "Failed to process message");
             }
@@ -264,16 +262,20 @@ async fn futures_next(
 // Message handler
 // ---------------------------------------------------------------------------
 
-async fn handle_message(
-    payload: &[u8],
-    subject: &str,
+struct MessageHandlerConfig<'a> {
     max_tokens: u32,
     max_context_tokens: usize,
     max_dynamic_tools: u32,
     provider_timeout: u64,
-    prompt_template: &str,
+    prompt_template: &'a str,
+    routing_config: &'a routing::RoutingStrategy,
+}
+
+async fn handle_message(
+    payload: &[u8],
+    subject: &str,
+    config: &MessageHandlerConfig<'_>,
     nats: &seidrum_common::bus_client::BusClient,
-    routing_config: &routing::RoutingStrategy,
 ) -> Result<()> {
     info!(subject = %subject, "Received event");
 
@@ -305,9 +307,9 @@ async fn handle_message(
                 .to_string();
 
             let config = ContextConfig {
-                max_context_tokens,
-                max_response_tokens: max_tokens as usize,
-                prompt_template: prompt_template.to_string(),
+                max_context_tokens: config.max_context_tokens,
+                max_response_tokens: config.max_tokens as usize,
+                prompt_template: config.prompt_template.to_string(),
             };
 
             let assembled = assemble_context(&config, &ctx)?;
@@ -359,7 +361,7 @@ async fn handle_message(
     // Query tool registry for available tools
     let mut tool_schemas = tools::meta_tools();
     let registry_tools =
-        tools::query_tool_registry(nats, &user_text_for_tools, max_dynamic_tools).await;
+        tools::query_tool_registry(nats, &user_text_for_tools, config.max_dynamic_tools).await;
     // Deduplicate: only add registry tools whose names don't collide with meta tools (O(n))
     let meta_names: std::collections::HashSet<String> =
         tool_schemas.iter().map(|t| t.name.clone()).collect();
@@ -380,15 +382,14 @@ async fn handle_message(
             + messages
                 .iter()
                 .map(|m| {
-                    context_assembly::count_tokens(&m.content.as_ref().unwrap_or(&String::new()))
-                        + 4
+                    context_assembly::count_tokens(m.content.as_ref().unwrap_or(&String::new())) + 4
                 })
                 .sum::<usize>()
     } else {
         messages
             .iter()
             .map(|m| {
-                context_assembly::count_tokens(&m.content.as_ref().unwrap_or(&String::new())) + 4
+                context_assembly::count_tokens(m.content.as_ref().unwrap_or(&String::new())) + 4
             })
             .sum::<usize>()
     };
@@ -411,7 +412,7 @@ async fn handle_message(
         tools: tool_schemas,
         config: LlmCallConfig {
             temperature: Some(0.7),
-            max_tokens: Some(max_tokens),
+            max_tokens: Some(config.max_tokens),
             top_p: None,
         },
         routing_strategy: "best-first".to_string(),
@@ -424,7 +425,7 @@ async fn handle_message(
     let request_bytes = serde_json::to_vec(&unified_request)?;
 
     // Get list of providers to try (in order)
-    let providers_to_try = get_providers_to_try(&request_profile, routing_config);
+    let providers_to_try = get_providers_to_try(&request_profile, config.routing_config);
 
     info!(
         providers = ?providers_to_try.iter().map(|p| p.name()).collect::<Vec<_>>(),
@@ -449,7 +450,7 @@ async fn handle_message(
         let start = Instant::now();
 
         let provider_response = tokio::time::timeout(
-            std::time::Duration::from_secs(provider_timeout),
+            std::time::Duration::from_secs(config.provider_timeout),
             nats.request_bytes(subject.clone(), request_bytes.clone()),
         )
         .await;
@@ -487,7 +488,7 @@ async fn handle_message(
             }
             Err(_) => {
                 let err_msg = format!("Provider {} request timed out", provider.name());
-                warn!(provider = %provider.name(), timeout_secs = provider_timeout, "Request timed out");
+                warn!(provider = %provider.name(), timeout_secs = config.provider_timeout, "Request timed out");
                 last_error = Some(err_msg);
             }
         }
@@ -505,7 +506,7 @@ async fn handle_message(
 
         LlmResponse {
             agent_id: agent_id.clone(),
-            content: Some(format!("Error: {}", error_msg)),
+            content: Some(format!("Error: {error_msg}")),
             tool_calls: None,
             model_used: "unknown".to_string(),
             provider: provider_name.to_string(),
@@ -560,8 +561,7 @@ fn build_routing_config(strategy: &str, fallback_str: &str) -> Result<routing::R
             routing::IntelligentRoutingConfig::default(),
         )),
         other => Err(anyhow::anyhow!(
-            "Unknown routing strategy: {}. Use 'fixed', 'fallback', or 'intelligent'",
-            other
+            "Unknown routing strategy: {other}. Use 'fixed', 'fallback', or 'intelligent'"
         )),
     }
 }
@@ -574,8 +574,7 @@ fn parse_provider(name: &str) -> Result<routing::Provider> {
         "anthropic" | "claude" => Ok(routing::Provider::Anthropic),
         "ollama" | "local" => Ok(routing::Provider::Ollama),
         other => Err(anyhow::anyhow!(
-            "Unknown provider: {}. Use 'google', 'openai', 'anthropic', or 'ollama'",
-            other
+            "Unknown provider: {other}. Use 'google', 'openai', 'anthropic', or 'ollama'"
         )),
     }
 }
@@ -626,7 +625,7 @@ fn generate_ulid() -> String {
         .unwrap_or_default()
         .as_millis();
     let rand_part: u64 = rand_u64();
-    format!("{:012x}-{:016x}", ts, rand_part)
+    format!("{ts:012x}-{rand_part:016x}")
 }
 
 /// Simple pseudo-random u64 using thread-local state seeded from the clock.

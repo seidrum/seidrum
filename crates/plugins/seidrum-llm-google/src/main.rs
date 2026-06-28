@@ -79,7 +79,7 @@ fn resolve_google_api_key(cli_key: &Option<String>) -> Result<String> {
     })?;
 
     let profiles: serde_json::Value = serde_json::from_str(&content)
-        .map_err(|e| anyhow::anyhow!("Failed to parse OpenClaw auth-profiles.json: {}", e))?;
+        .map_err(|e| anyhow::anyhow!("Failed to parse OpenClaw auth-profiles.json: {e}"))?;
 
     let key = profiles
         .get("profiles")
@@ -196,7 +196,7 @@ async fn main() -> Result<()> {
                     // Send an error response back
                     let err_response = LlmResponse {
                         agent_id: "unknown".to_string(),
-                        content: Some(format!("LLM provider error: {}", e)),
+                        content: Some(format!("LLM provider error: {e}")),
                         tool_calls: None,
                         model_used: model,
                         provider: "google".to_string(),
@@ -291,8 +291,7 @@ async fn handle_provider_request(
         };
 
         let url = format!(
-            "https://generativelanguage.googleapis.com/v1beta/models/{}:generateContent?key={}",
-            model, api_key
+            "https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent?key={api_key}"
         );
 
         let response = http
@@ -312,13 +311,13 @@ async fn handle_provider_request(
                         format!("code {:?}: {}", err.code, err.message)
                     } else {
                         // Don't log raw body — it may contain sensitive information
-                        format!("Non-error Gemini response with status {}", status)
+                        format!("Non-error Gemini response with status {status}")
                     }
                 }
                 // Don't log raw body — it may contain sensitive information
-                Err(_) => format!("Non-JSON error response (status {})", status),
+                Err(_) => format!("Non-JSON error response (status {status})"),
             };
-            anyhow::bail!("Gemini API error ({}): {}", status, err_msg);
+            anyhow::bail!("Gemini API error ({status}): {err_msg}");
         }
 
         let api_response: GeminiResponse = serde_json::from_slice(&body_bytes)?;

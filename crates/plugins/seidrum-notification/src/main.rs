@@ -75,7 +75,7 @@ async fn main() -> Result<()> {
             "channel.telegram.outbound".to_string(),
             "channel.cli.outbound".to_string(),
         ],
-        health_subject: format!("plugin.{}.health", PLUGIN_ID),
+        health_subject: format!("plugin.{PLUGIN_ID}.health"),
         consumed_event_types: vec![],
         produced_event_types: vec![],
         config_schema: None,
@@ -393,7 +393,7 @@ async fn send_notification(
         actions: vec![],
     };
 
-    let subject = format!("channel.{}.outbound", channel);
+    let subject = format!("channel.{channel}.outbound");
 
     let envelope = EventEnvelope::new(&subject, PLUGIN_ID, correlation_id, scope, &outbound)?;
 
@@ -421,10 +421,10 @@ fn format_task_created(task: &TaskCreated, channel: &str) -> (String, String) {
             priority_emoji, task.priority, task.title, task.scope
         );
         if let Some(ref desc) = task.description {
-            text.push_str(&format!("\n*Description:* {}", desc));
+            text.push_str(&format!("\n*Description:* {desc}"));
         }
         if let Some(ref agent) = task.assigned_agent {
-            text.push_str(&format!("\n*Assigned to:* {}", agent));
+            text.push_str(&format!("\n*Assigned to:* {agent}"));
         }
         if let Some(ref due) = task.due_date {
             text.push_str(&format!("\n*Due:* {}", due.format("%Y-%m-%d %H:%M UTC")));
@@ -436,7 +436,7 @@ fn format_task_created(task: &TaskCreated, channel: &str) -> (String, String) {
             task.title, task.priority, task.scope
         );
         if let Some(ref desc) = task.description {
-            text.push_str(&format!(" - {}", desc));
+            text.push_str(&format!(" - {desc}"));
         }
         (text, "plain".to_string())
     }
@@ -447,15 +447,15 @@ fn format_task_completed(task: &TaskCompleted, channel: &str) -> (String, String
     if channel == "telegram" {
         let mut text = format!("\u{2705} *Task Completed*\n\n*Task:* {}", task.task_key);
         if let Some(ref result) = task.result {
-            text.push_str(&format!("\n*Result:* {}", result));
+            text.push_str(&format!("\n*Result:* {result}"));
         }
         let duration = format_duration_ms(task.duration_ms);
-        text.push_str(&format!("\n*Duration:* {}", duration));
+        text.push_str(&format!("\n*Duration:* {duration}"));
         (text, "markdown".to_string())
     } else {
         let mut text = format!("[TASK COMPLETED] {}", task.task_key);
         if let Some(ref result) = task.result {
-            text.push_str(&format!(" - Result: {}", result));
+            text.push_str(&format!(" - Result: {result}"));
         }
         text.push_str(&format!(" (took {})", format_duration_ms(task.duration_ms)));
         (text, "plain".to_string())
@@ -475,7 +475,7 @@ fn format_health_alert(health: &SystemHealth, channel: &str) -> (String, String)
     if channel == "telegram" {
         let text = format!(
             "\u{1f6a8} *System Health Alert*\n\n*Issues:*\n{}\n\n*Active plugins:* {}\n*Uptime:* {}s",
-            issues.iter().map(|i| format!("\u{274c} {}", i)).collect::<Vec<_>>().join("\n"),
+            issues.iter().map(|i| format!("\u{274c} {i}")).collect::<Vec<_>>().join("\n"),
             health.active_plugins.len(),
             health.uptime_seconds,
         );
@@ -494,13 +494,13 @@ fn format_health_alert(health: &SystemHealth, channel: &str) -> (String, String)
 /// Format milliseconds into a human-readable duration string.
 fn format_duration_ms(ms: u64) -> String {
     if ms < 1000 {
-        format!("{}ms", ms)
+        format!("{ms}ms")
     } else if ms < 60_000 {
         format!("{:.1}s", ms as f64 / 1000.0)
     } else {
         let minutes = ms / 60_000;
         let seconds = (ms % 60_000) / 1000;
-        format!("{}m {}s", minutes, seconds)
+        format!("{minutes}m {seconds}s")
     }
 }
 

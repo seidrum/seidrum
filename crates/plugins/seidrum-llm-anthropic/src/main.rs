@@ -147,7 +147,7 @@ async fn main() -> Result<()> {
                     error!(error = %e, "Failed to handle llm.provider.anthropic request");
                     let err_response = LlmResponse {
                         agent_id: "unknown".to_string(),
-                        content: Some(format!("LLM provider error: {}", e)),
+                        content: Some(format!("LLM provider error: {e}")),
                         tool_calls: None,
                         model_used: model,
                         provider: "anthropic".to_string(),
@@ -252,9 +252,9 @@ async fn handle_provider_request(
                     .unwrap_or("Unknown error")
                     .to_string(),
                 // Don't log raw body — it may contain sensitive headers or tokens
-                Err(_) => format!("Non-JSON error response (status {})", status),
+                Err(_) => format!("Non-JSON error response (status {status})"),
             };
-            anyhow::bail!("Anthropic API error ({}): {}", status, err_msg);
+            anyhow::bail!("Anthropic API error ({status}): {err_msg}");
         }
 
         let api_response: AnthropicResponse = serde_json::from_slice(&body_bytes)?;

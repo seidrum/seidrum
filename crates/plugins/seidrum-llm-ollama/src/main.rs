@@ -124,17 +124,17 @@ async fn main() -> Result<()> {
         let max_tool_rounds = cli.max_tool_rounds;
 
         tokio::spawn(async move {
-            let result = handle_provider_request(
-                &msg.payload,
-                &http_clone,
-                &ollama_url_clone,
-                configured_model.as_deref(),
-                &ollama_api_key,
+            let provider_context = ProviderRequestContext {
+                http: &http_clone,
+                ollama_url: &ollama_url_clone,
+                configured_model: configured_model.as_deref(),
+                ollama_api_key: &ollama_api_key,
                 max_tokens,
                 max_tool_rounds,
-                &nats_clone,
-            )
-            .await;
+                nats: &nats_clone,
+            };
+
+            let result = handle_provider_request(&msg.payload, &provider_context).await;
 
             match result {
                 Ok(response) => {
@@ -156,7 +156,7 @@ async fn main() -> Result<()> {
                     error!(error = %e, "Failed to handle llm.provider.ollama request");
                     let err_response = LlmResponse {
                         agent_id: "unknown".to_string(),
-                        content: Some(format!("LLM provider error: {}", e)),
+                        content: Some(format!("LLM provider error: {e}")),
                         tool_calls: None,
                         model_used: configured_model.unwrap_or_else(|| "<auto>".to_string()),
                         provider: "ollama".to_string(),
@@ -258,7 +258,7 @@ async fn fetch_models(
     let body_bytes = response.bytes().await?;
     if !status.is_success() {
         let body = String::from_utf8_lossy(&body_bytes);
-        anyhow::bail!("failed to list Ollama models ({}): {}", status, body);
+        anyhow::bail!("failed to list Ollama models ({status}): {body}");
     }
 
     let tags: OllamaTagsResponse =
@@ -320,21 +320,31 @@ fn build_ollama_options(
 // Provider request handler
 // ---------------------------------------------------------------------------
 
-async fn handle_provider_request(
-    payload: &[u8],
-    http: &reqwest::Client,
-    ollama_url: &str,
-    configured_model: Option<&str>,
-    ollama_api_key: &str,
+struct ProviderRequestContext<'a> {
+    http: &'a reqwest::Client,
+    ollama_url: &'a str,
+    configured_model: Option<&'a str>,
+    ollama_api_key: &'a str,
     max_tokens: u32,
     max_tool_rounds: u32,
-    nats: &seidrum_common::bus_client::BusClient,
+    nats: &'a seidrum_common::bus_client::BusClient,
+}
+
+async fn handle_provider_request(
+    payload: &[u8],
+    context: &ProviderRequestContext<'_>,
 ) -> Result<LlmResponse> {
     let request: UnifiedLlmRequest = serde_json::from_slice(payload)?;
 
     let agent_id = &request.agent_id;
     let correlation_id = request.correlation_id.as_deref();
-    let model = resolve_model(http, ollama_url, configured_model, ollama_api_key).await?;
+    let model = resolve_model(
+        context.http,
+        context.ollama_url,
+        context.configured_model,
+        context.ollama_api_key,
+    )
+    .await?;
 
     info!(
         agent_id = %agent_id,
@@ -354,7 +364,7 @@ async fn handle_provider_request(
         Some(unified_to_ollama_tools(&request.tools))
     };
 
-    let options = build_ollama_options(&request, max_tokens);
+    let options = build_ollama_options(&request, context.max_tokens);
 
     // Tool call loop
     let mut total_input_tokens: u32 = 0;
@@ -364,7 +374,7 @@ async fn handle_provider_request(
     let mut finish_reason = "stop".to_string();
     let start = Instant::now();
 
-    for round in 0..=max_tool_rounds {
+    for round in 0..=context.max_tool_rounds {
         info!(round, "LLM call round");
 
         let api_request = OllamaRequest {
@@ -375,9 +385,9 @@ async fn handle_provider_request(
             stream: false,
         };
 
-        let url = ollama_endpoint(ollama_url, "chat");
+        let url = ollama_endpoint(context.ollama_url, "chat");
 
-        let response = apply_ollama_auth(http.post(&url), ollama_api_key)
+        let response = apply_ollama_auth(context.http.post(&url), context.ollama_api_key)
             .header("Content-Type", "application/json")
             .json(&api_request)
             .send()
@@ -394,26 +404,25 @@ async fn handle_provider_request(
                     .unwrap_or("Unknown error")
                     .to_string(),
                 // Don't log raw body — it may contain sensitive information
-                Err(_) => format!("Non-JSON error response (status {})", status),
+                Err(_) => format!("Non-JSON error response (status {status})"),
             };
 
             if err_msg.contains("not found") {
-                let available = fetch_models(http, ollama_url, ollama_api_key)
-                    .await
-                    .ok()
-                    .filter(|models| !models.is_empty())
-                    .map(|models| available_models_summary(&models));
+                let available =
+                    fetch_models(context.http, context.ollama_url, context.ollama_api_key)
+                        .await
+                        .ok()
+                        .filter(|models| !models.is_empty())
+                        .map(|models| available_models_summary(&models));
 
                 if let Some(available_models) = available {
                     anyhow::bail!(
-                        "Ollama model '{}' not found. Available models: {}",
-                        model,
-                        available_models
+                        "Ollama model '{model}' not found. Available models: {available_models}"
                     );
                 }
             }
 
-            anyhow::bail!("Ollama API error ({}): {}", status, err_msg);
+            anyhow::bail!("Ollama API error ({status}): {err_msg}");
         }
 
         let api_response: OllamaResponse = serde_json::from_slice(&body_bytes)?;
@@ -450,11 +459,11 @@ async fn handle_provider_request(
             .map(|tcs| ollama_tool_calls_to_unified(tcs))
             .unwrap_or_default();
 
-        if tool_calls.is_empty() || round == max_tool_rounds {
+        if tool_calls.is_empty() || round == context.max_tool_rounds {
             // No tool calls or max rounds hit -- done
-            if round == max_tool_rounds && !tool_calls.is_empty() {
+            if round == context.max_tool_rounds && !tool_calls.is_empty() {
                 warn!(
-                    max_rounds = max_tool_rounds,
+                    max_rounds = context.max_tool_rounds,
                     "Hit maximum tool call rounds, returning partial content"
                 );
             }
@@ -491,7 +500,7 @@ async fn handle_provider_request(
 
             let tool_result = match tokio::time::timeout(
                 std::time::Duration::from_secs(30),
-                nats.request_bytes("capability.call", req_bytes),
+                context.nats.request_bytes("capability.call", req_bytes),
             )
             .await
             {

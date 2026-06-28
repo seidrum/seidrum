@@ -53,7 +53,7 @@ fn resolve_google_api_key(cli_key: &Option<String>) -> Result<String> {
     })?;
 
     let profiles: serde_json::Value = serde_json::from_str(&content)
-        .map_err(|e| anyhow::anyhow!("Failed to parse OpenClaw auth-profiles.json: {}", e))?;
+        .map_err(|e| anyhow::anyhow!("Failed to parse OpenClaw auth-profiles.json: {e}"))?;
 
     let key = profiles
         .get("profiles")
@@ -128,10 +128,7 @@ async fn poll_calendar(
     let now = chrono::Utc::now();
     let time_max = now + chrono::Duration::days(7);
 
-    let url = format!(
-        "https://www.googleapis.com/calendar/v3/calendars/{}/events",
-        calendar_id
-    );
+    let url = format!("https://www.googleapis.com/calendar/v3/calendars/{calendar_id}/events");
 
     let resp = client
         .get(&url)
@@ -149,9 +146,7 @@ async fn poll_calendar(
         let status = resp.status();
         let body = resp.text().await.unwrap_or_default();
         return Err(anyhow::anyhow!(
-            "Google Calendar API error ({}): {}",
-            status,
-            body
+            "Google Calendar API error ({status}): {body}"
         ));
     }
 
@@ -190,8 +185,7 @@ async fn poll_calendar(
             .unwrap_or("");
 
         let text = format!(
-            "Event: {}\nWhen: {} - {}\nLocation: {}\nDescription: {}",
-            summary, start_str, end_str, location, description
+            "Event: {summary}\nWhen: {start_str} - {end_str}\nLocation: {location}\nDescription: {description}"
         );
 
         let mut metadata = HashMap::new();
@@ -233,10 +227,7 @@ async fn create_calendar_event(
     calendar_id: &str,
     event: &CalendarEventCreate,
 ) -> Result<()> {
-    let url = format!(
-        "https://www.googleapis.com/calendar/v3/calendars/{}/events",
-        calendar_id
-    );
+    let url = format!("https://www.googleapis.com/calendar/v3/calendars/{calendar_id}/events");
 
     let body = serde_json::json!({
         "summary": event.summary,
@@ -257,9 +248,7 @@ async fn create_calendar_event(
         let status = resp.status();
         let resp_body = resp.text().await.unwrap_or_default();
         return Err(anyhow::anyhow!(
-            "Google Calendar create event error ({}): {}",
-            status,
-            resp_body
+            "Google Calendar create event error ({status}): {resp_body}"
         ));
     }
 
@@ -278,10 +267,7 @@ async fn search_calendar_events(
     let now = chrono::Utc::now();
     let time_max = now + chrono::Duration::days(days_ahead);
 
-    let url = format!(
-        "https://www.googleapis.com/calendar/v3/calendars/{}/events",
-        calendar_id
-    );
+    let url = format!("https://www.googleapis.com/calendar/v3/calendars/{calendar_id}/events");
 
     let resp = client
         .get(&url)
@@ -300,9 +286,7 @@ async fn search_calendar_events(
         let status = resp.status();
         let body = resp.text().await.unwrap_or_default();
         return Err(anyhow::anyhow!(
-            "Google Calendar API error ({}): {}",
-            status,
-            body
+            "Google Calendar API error ({status}): {body}"
         ));
     }
 

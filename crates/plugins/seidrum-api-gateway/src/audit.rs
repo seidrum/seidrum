@@ -208,7 +208,7 @@ mod tests {
         let log = AuditLog::new(3);
 
         for i in 0..5 {
-            let entry = AuditEntryBuilder::new("action", &format!("user{}", i), "resource")
+            let entry = AuditEntryBuilder::new("action", &format!("user{i}"), "resource")
                 .method("POST")
                 .build();
             log.log(entry).await;
@@ -222,7 +222,7 @@ mod tests {
         let log = AuditLog::new(10);
 
         for i in 0..3 {
-            let entry = AuditEntryBuilder::new("action", &format!("user{}", i), "resource").build();
+            let entry = AuditEntryBuilder::new("action", &format!("user{i}"), "resource").build();
             log.log(entry).await;
         }
 

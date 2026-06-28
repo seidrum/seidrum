@@ -239,7 +239,7 @@ async fn fetch_capability_details(nats: &BusClient, tool_id: &str) -> (String, S
         _ => {
             // Fallback: derive from tool_id
             let plugin_id = tool_id.split('.').next().unwrap_or("unknown").to_string();
-            let call_subject = format!("capability.call.{}", tool_id);
+            let call_subject = format!("capability.call.{tool_id}");
             (plugin_id, call_subject)
         }
     }
@@ -278,15 +278,19 @@ pub async fn set_telegram_commands(bot: &Bot, registry: &CommandRegistry) {
 
 /// Execute a parsed command. Returns Ok(()) even for unknown commands
 /// (sends an error message to the user instead of failing).
+pub struct CommandExecutionContext<'a> {
+    pub chat_id: i64,
+    pub thread_id: Option<ThreadId>,
+    pub user_id: u64,
+    pub registry: &'a CommandRegistry,
+    pub bot: &'a Bot,
+    pub nats: &'a BusClient,
+}
+
 pub async fn execute_command(
     command: &str,
     args: &str,
-    chat_id: i64,
-    thread_id: Option<ThreadId>,
-    user_id: u64,
-    registry: &CommandRegistry,
-    bot: &Bot,
-    nats: &BusClient,
+    context: &CommandExecutionContext<'_>,
 ) -> Result<()> {
     // Strip bot username suffix if present (e.g., "/help@my_bot" -> "help")
     let cmd_name = command
@@ -295,41 +299,24 @@ pub async fn execute_command(
         .unwrap_or(command)
         .trim_start_matches('/');
 
-    info!(command = %cmd_name, %chat_id, %user_id, "Executing command");
+    info!(command = %cmd_name, chat_id = %context.chat_id, user_id = %context.user_id, "Executing command");
 
-    let entry = registry.find(cmd_name).await;
+    let entry = context.registry.find(cmd_name).await;
 
     match entry {
         Some(entry) => match &entry.kind {
-            CommandKind::BuiltIn => {
-                execute_builtin(
-                    cmd_name, args, chat_id, thread_id, user_id, registry, bot, nats,
-                )
-                .await
-            }
+            CommandKind::BuiltIn => execute_builtin(cmd_name, args, context).await,
             CommandKind::Capability {
                 capability_id,
                 plugin_id,
                 call_subject,
-            } => {
-                execute_capability(
-                    capability_id,
-                    plugin_id,
-                    call_subject,
-                    args,
-                    chat_id,
-                    thread_id,
-                    bot,
-                    nats,
-                )
-                .await
-            }
+            } => execute_capability(capability_id, plugin_id, call_subject, args, context).await,
         },
         None => {
             send_reply(
-                bot,
-                chat_id,
-                thread_id,
+                context.bot,
+                context.chat_id,
+                context.thread_id,
                 "Unknown command. Type /help for available commands.",
             )
             .await
@@ -341,53 +328,49 @@ pub async fn execute_command(
 async fn execute_builtin(
     command: &str,
     args: &str,
-    chat_id: i64,
-    thread_id: Option<ThreadId>,
-    user_id: u64,
-    registry: &CommandRegistry,
-    bot: &Bot,
-    nats: &BusClient,
+    context: &CommandExecutionContext<'_>,
 ) -> Result<()> {
     match command {
         "start" => {
             send_reply(
-                bot,
-                chat_id,
-                thread_id,
+                context.bot,
+                context.chat_id,
+                context.thread_id,
                 "\u{1f44b} Welcome to Seidrum!\n\nI'm your personal AI assistant. \
                  Send me a message, voice note, or photo.\n\nType /help to see available commands.",
             )
             .await
         }
         "help" => {
-            let commands = registry.list().await;
+            let commands = context.registry.list().await;
             let mut text = String::from("\u{2699}\u{fe0f} <b>Available Commands</b>\n\n");
             for cmd in &commands {
                 text.push_str(&format!("/{}", cmd.name));
                 if let Some(ref usage) = cmd.usage {
-                    text.push_str(&format!(" {}", usage));
+                    text.push_str(&format!(" {usage}"));
                 }
                 text.push_str(&format!(" — {}\n", cmd.description));
             }
-            send_html_reply(bot, chat_id, thread_id, &text).await
+            send_html_reply(context.bot, context.chat_id, context.thread_id, &text).await
         }
         "info" => {
-            let thread_str = thread_id
+            let thread_str = context
+                .thread_id
                 .map(|t| format!("{}", t.0))
                 .unwrap_or_else(|| "none".to_string());
             let text = format!(
                 "\u{2139}\u{fe0f} <b>Chat Info</b>\n\n\
                  Chat ID: <code>{}</code>\n\
-                 Thread ID: <code>{}</code>\n\
+                 Thread ID: <code>{thread_str}</code>\n\
                  User ID: <code>{}</code>",
-                chat_id, thread_str, user_id
+                context.chat_id, context.user_id
             );
-            send_html_reply(bot, chat_id, thread_id, &text).await
+            send_html_reply(context.bot, context.chat_id, context.thread_id, &text).await
         }
         "plugins" => {
             let text = match tokio::time::timeout(
                 Duration::from_secs(3),
-                nats.request::<_, RegistryQueryResponse>(
+                context.nats.request::<_, RegistryQueryResponse>(
                     "registry.query",
                     &RegistryQuery::ListPlugins,
                 ),
@@ -409,19 +392,19 @@ async fn execute_builtin(
                         text
                     }
                 }
-                Ok(Err(err)) => format!("Failed to query plugins: {}", err),
-                Err(_) => "Plugin registry query timed out.".to_string(),
+                Ok(Err(err)) => format!("Failed to query plugins: {err}"),
+                Err(_) => "Plugin context.registry query timed out.".to_string(),
             };
-            send_html_reply(bot, chat_id, thread_id, &text).await
+            send_html_reply(context.bot, context.chat_id, context.thread_id, &text).await
         }
         "link" => {
-            let tid = match thread_id {
+            let tid = match context.thread_id {
                 Some(tid) => tid,
                 None => {
                     return send_reply(
-                        bot,
-                        chat_id,
-                        thread_id,
+                        context.bot,
+                        context.chat_id,
+                        context.thread_id,
                         "/link can only be used inside a thread.",
                     )
                     .await;
@@ -431,15 +414,15 @@ async fn execute_builtin(
             let path = args.trim();
             if path.is_empty() {
                 return send_reply(
-                    bot,
-                    chat_id,
-                    thread_id,
+                    context.bot,
+                    context.chat_id,
+                    context.thread_id,
                     "Usage: /link <path>\nExample: /link /home/user/projects/myapp",
                 )
                 .await;
             }
 
-            let storage_key = format!("{}:{}", chat_id, tid.0);
+            let storage_key = format!("{}:{}", context.chat_id, tid.0);
             let req = StorageSetRequest {
                 plugin_id: "telegram".to_string(),
                 namespace: "thread_links".to_string(),
@@ -449,52 +432,68 @@ async fn execute_builtin(
 
             match tokio::time::timeout(
                 Duration::from_secs(5),
-                nats.request::<_, StorageSetResponse>("storage.set", &req),
+                context
+                    .nats
+                    .request::<_, StorageSetResponse>("storage.set", &req),
             )
             .await
             {
                 Ok(Ok(resp)) if resp.success => {
-                    info!(%chat_id, thread_id = %tid.0, %path, "Thread linked to project");
+                    info!(%context.chat_id, context.thread_id = %tid.0, %path, "Thread linked to project");
                     send_html_reply(
-                        bot,
-                        chat_id,
-                        thread_id,
-                        &format!("Thread linked to <code>{}</code>", path),
+                        context.bot,
+                        context.chat_id,
+                        context.thread_id,
+                        &format!("Thread linked to <code>{path}</code>"),
                     )
                     .await
                 }
                 Ok(Ok(resp)) => {
                     let err_msg = resp.error.unwrap_or_else(|| "unknown error".to_string());
                     send_reply(
-                        bot,
-                        chat_id,
-                        thread_id,
-                        &format!("Failed to save link: {}", err_msg),
+                        context.bot,
+                        context.chat_id,
+                        context.thread_id,
+                        &format!("Failed to save link: {err_msg}"),
                     )
                     .await
                 }
                 Ok(Err(err)) => {
                     warn!(%err, "storage.set request failed");
-                    send_reply(bot, chat_id, thread_id, "Failed to save link.").await
+                    send_reply(
+                        context.bot,
+                        context.chat_id,
+                        context.thread_id,
+                        "Failed to save link.",
+                    )
+                    .await
                 }
-                Err(_) => send_reply(bot, chat_id, thread_id, "Storage request timed out.").await,
+                Err(_) => {
+                    send_reply(
+                        context.bot,
+                        context.chat_id,
+                        context.thread_id,
+                        "Storage request timed out.",
+                    )
+                    .await
+                }
             }
         }
         "unlink" => {
-            let tid = match thread_id {
+            let tid = match context.thread_id {
                 Some(tid) => tid,
                 None => {
                     return send_reply(
-                        bot,
-                        chat_id,
-                        thread_id,
+                        context.bot,
+                        context.chat_id,
+                        context.thread_id,
                         "/unlink can only be used inside a thread.",
                     )
                     .await;
                 }
             };
 
-            let storage_key = format!("{}:{}", chat_id, tid.0);
+            let storage_key = format!("{}:{}", context.chat_id, tid.0);
             let req = StorageDeleteRequest {
                 plugin_id: "telegram".to_string(),
                 namespace: "thread_links".to_string(),
@@ -503,40 +502,68 @@ async fn execute_builtin(
 
             match tokio::time::timeout(
                 Duration::from_secs(5),
-                nats.request::<_, StorageDeleteResponse>("storage.delete", &req),
+                context
+                    .nats
+                    .request::<_, StorageDeleteResponse>("storage.delete", &req),
             )
             .await
             {
                 Ok(Ok(resp)) if resp.existed => {
-                    info!(%chat_id, thread_id = %tid.0, "Thread unlinked");
-                    send_reply(bot, chat_id, thread_id, "Thread unlinked from project.").await
+                    info!(%context.chat_id, context.thread_id = %tid.0, "Thread unlinked");
+                    send_reply(
+                        context.bot,
+                        context.chat_id,
+                        context.thread_id,
+                        "Thread unlinked from project.",
+                    )
+                    .await
                 }
                 Ok(Ok(_)) => {
                     send_reply(
-                        bot,
-                        chat_id,
-                        thread_id,
+                        context.bot,
+                        context.chat_id,
+                        context.thread_id,
                         "This thread is not linked to any project.",
                     )
                     .await
                 }
                 Ok(Err(err)) => {
                     warn!(%err, "storage.delete request failed");
-                    send_reply(bot, chat_id, thread_id, "Failed to unlink.").await
+                    send_reply(
+                        context.bot,
+                        context.chat_id,
+                        context.thread_id,
+                        "Failed to unlink.",
+                    )
+                    .await
                 }
-                Err(_) => send_reply(bot, chat_id, thread_id, "Storage request timed out.").await,
+                Err(_) => {
+                    send_reply(
+                        context.bot,
+                        context.chat_id,
+                        context.thread_id,
+                        "Storage request timed out.",
+                    )
+                    .await
+                }
             }
         }
         "restart" => {
-            send_reply(bot, chat_id, thread_id, "Restarting Telegram plugin...").await?;
+            send_reply(
+                context.bot,
+                context.chat_id,
+                context.thread_id,
+                "Restarting Telegram plugin...",
+            )
+            .await?;
             info!("Restart requested via /restart command");
             std::process::exit(0);
         }
         _ => {
             send_reply(
-                bot,
-                chat_id,
-                thread_id,
+                context.bot,
+                context.chat_id,
+                context.thread_id,
                 "Unknown command. Type /help for available commands.",
             )
             .await
@@ -578,18 +605,17 @@ async fn execute_capability(
     plugin_id: &str,
     call_subject: &str,
     args: &str,
-    chat_id: i64,
-    thread_id: Option<ThreadId>,
-    bot: &Bot,
-    nats: &BusClient,
+    context: &CommandExecutionContext<'_>,
 ) -> Result<()> {
     let mut arguments = serde_json::json!({
         "args": args,
-        "chat_id": chat_id.to_string(),
+        "context.chat_id": context.chat_id.to_string(),
     });
 
     // Inject linked working_dir if this thread is linked to a project
-    if let Some(working_dir) = get_thread_working_dir(nats, chat_id, thread_id).await {
+    if let Some(working_dir) =
+        get_thread_working_dir(context.nats, context.chat_id, context.thread_id).await
+    {
         arguments
             .as_object_mut()
             .unwrap()
@@ -600,12 +626,14 @@ async fn execute_capability(
         tool_id: capability_id.to_string(),
         plugin_id: plugin_id.to_string(),
         arguments,
-        correlation_id: Some(format!("telegram:{}:cmd", chat_id)),
+        correlation_id: Some(format!("telegram:{}:cmd", context.chat_id)),
     };
 
     match tokio::time::timeout(
         Duration::from_secs(120),
-        nats.request::<_, ToolCallResponse>(call_subject, &req),
+        context
+            .nats
+            .request::<_, ToolCallResponse>(call_subject, &req),
     )
     .await
     {
@@ -616,9 +644,9 @@ async fn execute_capability(
                     .as_str()
                     .map(|s| s.to_string())
                     .unwrap_or_else(|| resp.result.to_string());
-                format!("\u{274c} Command failed: {}", msg)
+                format!("\u{274c} Command failed: {msg}")
             } else {
-                // Handle both string results and JSON objects with a "result" field
+                // Handle context.both string results and JSON objects with a "result" field
                 resp.result
                     .as_str()
                     .map(|s| s.to_string())
@@ -630,23 +658,23 @@ async fn execute_capability(
                     })
                     .unwrap_or_else(|| resp.result.to_string())
             };
-            send_reply(bot, chat_id, thread_id, &text).await
+            send_reply(context.bot, context.chat_id, context.thread_id, &text).await
         }
         Ok(Err(err)) => {
             warn!(%err, capability_id, "Capability call failed");
             send_reply(
-                bot,
-                chat_id,
-                thread_id,
-                &format!("\u{274c} Command error: {}", err),
+                context.bot,
+                context.chat_id,
+                context.thread_id,
+                &format!("\u{274c} Command error: {err}"),
             )
             .await
         }
         Err(_) => {
             send_reply(
-                bot,
-                chat_id,
-                thread_id,
+                context.bot,
+                context.chat_id,
+                context.thread_id,
                 "\u{23f3} Command timed out. Please try again.",
             )
             .await
@@ -689,7 +717,7 @@ async fn send_html_reply(
         Ok(_) => Ok(()),
         Err(err) => {
             warn!(%err, "HTML send failed, retrying as plain text");
-            let mut req = bot.send_message(chat, &crate::markdown::strip_markdown(text));
+            let mut req = bot.send_message(chat, crate::markdown::strip_markdown(text));
             if let Some(tid) = thread_id {
                 req = req.message_thread_id(tid);
             }
@@ -754,7 +782,7 @@ pub async fn spawn_capability_listener(nats: BusClient, registry: CommandRegistr
                         }
                     };
 
-                    if reg.kind != "command" && reg.kind != "both" {
+                    if reg.kind != "command" && reg.kind != "context.both" {
                         continue;
                     }
 

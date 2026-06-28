@@ -28,9 +28,7 @@ mod tests {
             .generate_token("testuser", "user", vec!["read".to_string()], None)
             .unwrap();
 
-        let result = handler
-            .authenticate(&format!("Bearer {}", token), None)
-            .await;
+        let result = handler.authenticate(&format!("Bearer {token}"), None).await;
         assert!(result.is_some());
         let auth = result.unwrap();
         assert_eq!(auth.subject, "testuser");
@@ -169,7 +167,7 @@ mod tests {
 
         // Log 10 entries but max is 5
         for i in 0..10 {
-            let entry = AuditEntryBuilder::new("action", &format!("user{}", i), "resource").build();
+            let entry = AuditEntryBuilder::new("action", &format!("user{i}"), "resource").build();
             log.log(entry).await;
         }
 
@@ -182,7 +180,7 @@ mod tests {
 
         // Log 3 entries
         for i in 0..3 {
-            let entry = AuditEntryBuilder::new("action", &format!("user{}", i), "resource").build();
+            let entry = AuditEntryBuilder::new("action", &format!("user{i}"), "resource").build();
             log.log(entry).await;
         }
 
